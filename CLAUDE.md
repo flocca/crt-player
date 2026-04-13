@@ -30,11 +30,13 @@ TUI app (Textual) that downloads YouTube videos, converts them to 4:3 PAL (768x5
 
 **Key integration point:** Pipeline callbacks can fire from both the main asyncio thread and worker threads. The TUI's `_safe_call` method handles this by trying `call_from_thread` first and falling back to a direct call.
 
-**Configuration:** Environment variables loaded from `.env` via `run.sh`. Config constants in `config.py`.
+**Configuration:** Environment variables loaded from `.env` via `run.sh`. Config constants in `config.py`. Key env vars: `CRT_SCALE_MODE` (`crop`|`pad`, default `crop`) — crop fills the frame by cutting edges, pad adds letterbox bars.
 
 **Persistence:** Queue state (items, history, playback position) saved to `~/.local/share/crt-player/state.json` (configurable via `CRT_STATE_FILE`). Auto-saves every 60s + on exit. On reload, mid-processing items reset to `"queued"`; playing items become `"ready"` if encoded file exists (skips download+encode).
 
-**Encoding cache:** Pipeline checks for existing `{video_id}_pal.mp4` in TEMP_DIR before downloading. Files live for `FILE_TTL_HOURS` (default 24h). `fetch_title()` returns `(title, video_id)`.
+**Encoding pipeline:** `_detect_crop()` runs a cropdetect pre-pass (120 frames) to remove baked-in black bars from the source. `_build_video_filter()` then applies scale+crop or scale+pad based on `CRT_SCALE_MODE`, and stretches the result to 16:9 (1024x576) so the Chromecast doesn't add pillarboxing — the user's HW squeezes 16:9→4:3 restoring correct proportions.
+
+**Encoding cache:** Cached files are named `{video_id}_pal_{scale_mode}.mp4` in TEMP_DIR. Changing `CRT_SCALE_MODE` triggers re-encode. Files live for `FILE_TTL_HOURS` (default 24h). `fetch_title()` returns `(title, video_id)`.
 
 ## Debugging
 
