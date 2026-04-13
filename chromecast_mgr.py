@@ -38,6 +38,7 @@ class ChromecastManager:
         self._on_connection_change: Callable | None = None
         self._previous_state: str = "UNKNOWN"
         self._playback_ended_event = asyncio.Event()
+        self._connected_event = asyncio.Event()
 
     def set_status_callback(self, callback: Callable) -> None:
         self._on_status_change = callback
@@ -63,6 +64,7 @@ class ChromecastManager:
         self.cast.wait()
         self.device_name = self.cast.name
         self.connected = True
+        self._connected_event.set()
         listener = StatusListener(self._on_media_status)
         self.cast.media_controller.register_status_listener(listener)
         self._notify_connection()
@@ -91,6 +93,9 @@ class ChromecastManager:
     def _notify_connection(self) -> None:
         if self._on_connection_change:
             self._on_connection_change()
+
+    async def wait_for_connection(self) -> None:
+        await self._connected_event.wait()
 
     def reset_playback_ended(self) -> None:
         self._playback_ended_event.clear()
@@ -151,6 +156,12 @@ class ChromecastManager:
         new_pos = max(0.0, self.current_time + delta)
         self._safe_cmd(lambda: self.cast.media_controller.seek(new_pos))
         self.current_time = new_pos
+
+    def seek_to(self, position: float) -> None:
+        if not self.cast:
+            return
+        self._safe_cmd(lambda: self.cast.media_controller.seek(position))
+        self.current_time = position
 
     def adjust_volume(self, delta: int) -> None:
         if not self.cast:

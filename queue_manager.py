@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
+import logging
+import os
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 
+import config
 
-ACTIVE_STATUSES = {"downloading", "encoding", "casting", "playing"}
+log = logging.getLogger(__name__)
+
+ACTIVE_STATUSES = {"downloading", "encoding", "casting", "playing", "ready"}
 
 
 @dataclass
@@ -16,6 +23,29 @@ class QueueItem:
     progress: float = 0.0
     error: str | None = None
     filename: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "url": self.url,
+            "id": self.id,
+            "title": self.title,
+            "status": self.status,
+            "progress": self.progress,
+            "error": self.error,
+            "filename": self.filename,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> QueueItem:
+        return cls(
+            url=d["url"],
+            id=d.get("id", str(uuid.uuid4())),
+            title=d.get("title", ""),
+            status=d.get("status", "queued"),
+            progress=d.get("progress", 0.0),
+            error=d.get("error"),
+            filename=d.get("filename"),
+        )
 
 
 class QueueManager:
@@ -67,7 +97,7 @@ class QueueManager:
 
     def next_pending(self) -> QueueItem | None:
         for item in self.items:
-            if item.status == "queued":
+            if item.status in ("queued", "ready"):
                 return item
         return None
 
@@ -82,3 +112,62 @@ class QueueManager:
             if item.status in ACTIVE_STATUSES:
                 return i + 1
         return 0
+
+    def save_state(self, path: str, playback_position: float = 0.0) -> None:
+        data = {
+            "version": 1,
+            "playback_position": playback_position,
+            "items": [item.to_dict() for item in self.items],
+            "history": [item.to_dict() for item in self.history],
+        }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        except Exception:
+            log.exception("Failed to save state to %s", path)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    def load_state(self, path: str) -> float:
+        """Load queue state from disk. Returns saved playback position."""
+        if not os.path.isfile(path):
+            return 0.0
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            log.warning("Corrupt or unreadable state file %s, starting fresh", path)
+            return 0.0
+
+        playback_position = data.get("playback_position", 0.0)
+
+        for raw in data.get("items", []):
+            item = QueueItem.from_dict(raw)
+            if item.status in ("downloading", "encoding", "casting"):
+                item.status = "queued"
+                item.progress = 0.0
+                item.filename = None
+            elif item.status == "playing":
+                if item.filename and os.path.isfile(
+                    os.path.join(config.TEMP_DIR, item.filename)
+                ):
+                    item.status = "ready"
+                else:
+                    item.status = "queued"
+                    item.filename = None
+                item.progress = 0.0
+            self.items.append(item)
+
+        for raw in data.get("history", []):
+            self.history.append(QueueItem.from_dict(raw))
+
+        log.info(
+            "Loaded state: %d items, %d history, resume at %.1fs",
+            len(self.items), len(self.history), playback_position,
+        )
+        return playback_position

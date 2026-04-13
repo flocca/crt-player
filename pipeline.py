@@ -24,12 +24,13 @@ def get_local_ip() -> str:
         s.close()
 
 
-async def fetch_title(url: str) -> str:
+async def fetch_title(url: str) -> tuple[str, str]:
+    """Return (title, video_id) for the given URL."""
     def _extract():
         opts = {"quiet": True, "no_warnings": True, "skip_download": True}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            return info.get("title", "Unknown")
+            return info.get("title", "Unknown"), info.get("id", "")
 
     return await asyncio.to_thread(_extract)
 
@@ -127,6 +128,7 @@ class PipelineWorker:
         self._wake_event = asyncio.Event()
         self._current_proc: asyncio.subprocess.Process | None = None
         self._on_update: Callable | None = None
+        self.resume_position: float = 0.0
 
     def set_update_callback(self, callback: Callable) -> None:
         self._on_update = callback
@@ -155,73 +157,103 @@ class PipelineWorker:
     async def _process(self, item: QueueItem) -> None:
         self._cancel_event.clear()
         try:
-            # Fetch title
-            item.title = await fetch_title(item.url)
-            self.notify()
-
-            # Download
-            item.status = "downloading"
-            item.progress = 0.0
-            self.notify()
-
-            def dl_progress(pct: float) -> None:
-                item.progress = pct
-                self.notify()
-
-            downloaded_path, duration = await download_video(
-                item.url, config.TEMP_DIR, dl_progress
-            )
-
-            if self._cancel_event.is_set():
-                item.status = "done"
-                self.notify()
+            if item.status == "ready":
+                await self._cast_and_wait(item)
                 return
 
-            # Encode
-            item.status = "encoding"
-            item.progress = 0.0
+            # Fetch title and video ID
+            item.title, video_id = await fetch_title(item.url)
             self.notify()
 
-            base = os.path.splitext(os.path.basename(downloaded_path))[0]
-            encoded_path = os.path.join(config.TEMP_DIR, f"{base}_pal.mp4")
-
-            def enc_progress(pct: float) -> None:
-                item.progress = pct
+            # Check for cached encoded file
+            cached_encoded = os.path.join(config.TEMP_DIR, f"{video_id}_pal.mp4")
+            if video_id and os.path.isfile(cached_encoded):
+                log.info("Using cached encoded file: %s", cached_encoded)
+                item.filename = os.path.basename(cached_encoded)
+            else:
+                # Download
+                item.status = "downloading"
+                item.progress = 0.0
                 self.notify()
 
-            await encode_video(downloaded_path, encoded_path, duration, enc_progress, worker=self)
+                def dl_progress(pct: float) -> None:
+                    item.progress = pct
+                    self.notify()
 
-            if self._cancel_event.is_set():
-                item.status = "done"
+                downloaded_path, duration = await download_video(
+                    item.url, config.TEMP_DIR, dl_progress
+                )
+
+                if self._cancel_event.is_set():
+                    item.status = "done"
+                    self.notify()
+                    return
+
+                # Encode
+                item.status = "encoding"
+                item.progress = 0.0
                 self.notify()
-                return
 
-            item.filename = os.path.basename(encoded_path)
+                base = os.path.splitext(os.path.basename(downloaded_path))[0]
+                encoded_path = os.path.join(config.TEMP_DIR, f"{base}_pal.mp4")
 
-            # Cast
-            item.status = "casting"
-            item.progress = 0.0
-            self.notify()
+                def enc_progress(pct: float) -> None:
+                    item.progress = pct
+                    self.notify()
 
-            local_ip = get_local_ip()
-            media_url = f"http://{local_ip}:{config.SERVER_PORT}/media/{item.filename}"
-            await asyncio.to_thread(self.chromecast.cast_url, media_url)
+                await encode_video(downloaded_path, encoded_path, duration, enc_progress, worker=self)
 
-            item.status = "playing"
-            self.notify()
+                if self._cancel_event.is_set():
+                    item.status = "done"
+                    self.notify()
+                    return
 
-            # Wait for playback to end or cancellation
-            await self._wait_for_playback_end()
+                item.filename = os.path.basename(encoded_path)
 
-            if not self._cancel_event.is_set():
-                item.status = "done"
-                self.queue.push_to_history(item)
-                self.notify()
+            await self._cast_and_wait(item)
 
         except Exception as e:
             log.exception("Pipeline error for %s", item.url)
             item.status = "error"
             item.error = str(e)
+            self.notify()
+
+    async def _cast_and_wait(self, item: QueueItem) -> None:
+        item.status = "casting"
+        item.progress = 0.0
+        self.notify()
+
+        # Wait for Chromecast to be discovered before casting
+        if not self.chromecast.connected:
+            log.info("Waiting for Chromecast connection before casting...")
+            conn_task = asyncio.create_task(self.chromecast.wait_for_connection())
+            cancel_task = asyncio.create_task(self._cancel_event.wait())
+            done, pending = await asyncio.wait(
+                {conn_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+            if self._cancel_event.is_set():
+                item.status = "done"
+                self.notify()
+                return
+
+        local_ip = get_local_ip()
+        media_url = f"http://{local_ip}:{config.SERVER_PORT}/media/{item.filename}"
+        await asyncio.to_thread(self.chromecast.cast_url, media_url)
+
+        item.status = "playing"
+        self.notify()
+
+        if self.resume_position > 0:
+            await asyncio.to_thread(self.chromecast.seek_to, self.resume_position)
+            self.resume_position = 0.0
+
+        await self._wait_for_playback_end()
+
+        if not self._cancel_event.is_set():
+            item.status = "done"
+            self.queue.push_to_history(item)
             self.notify()
 
     async def _wait_for_playback_end(self) -> None:

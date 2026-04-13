@@ -57,16 +57,25 @@ def main() -> None:
     media_thread = threading.Thread(target=start_media_server, daemon=True)
     media_thread.start()
 
-    # Create core components
+    # Create core components and restore saved state
     queue = QueueManager()
+    saved_position = queue.load_state(config.STATE_FILE)
     chromecast = ChromecastManager()
     pipeline = PipelineWorker(queue, chromecast)
+    pipeline.resume_position = saved_position
 
     # Create and run the TUI app
     # Background tasks (chromecast discovery, pipeline worker) are started
     # from CRTCastApp.on_mount() which runs inside Textual's asyncio loop
     app = CRTCastApp(queue, pipeline, chromecast)
     app.run()
+
+    # Save state before shutdown
+    queue.save_state(config.STATE_FILE, playback_position=chromecast.current_time)
+
+    # Detach callbacks so pychromecast status updates don't hit dead widgets
+    chromecast.set_status_callback(None)
+    chromecast.set_connection_callback(None)
 
     # Graceful shutdown
     if chromecast.cast:

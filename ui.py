@@ -18,6 +18,7 @@ from textual.widgets import (
     Static,
 )
 
+import config
 from chromecast_mgr import ChromecastManager
 from pipeline import PipelineWorker
 from queue_manager import QueueItem, QueueManager
@@ -199,6 +200,10 @@ class CRTCastApp(App):
         asyncio.create_task(self.chromecast.discover_loop())
         asyncio.create_task(self.pipeline.run())
         self.set_interval(1, self._poll_playback)
+        self.set_interval(60, self._auto_save)
+        if self.queue.next_pending():
+            self.pipeline.wake()
+            self._refresh_all()
 
     def _on_chromecast_connection(self) -> None:
         self._safe_call(self._update_connection)
@@ -220,6 +225,9 @@ class CRTCastApp(App):
 
     def _on_pipeline_update(self) -> None:
         self._safe_call(self._refresh_all)
+
+    def _auto_save(self) -> None:
+        self.queue.save_state(config.STATE_FILE, playback_position=self.chromecast.current_time)
 
     def _poll_playback(self) -> None:
         if self.chromecast.connected:

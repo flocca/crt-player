@@ -10,12 +10,13 @@ from queue_manager import QueueItem
 
 @pytest.mark.asyncio
 async def test_fetch_title():
-    mock_info = {"title": "Test Video Title"}
+    mock_info = {"title": "Test Video Title", "id": "abc"}
     with patch("pipeline.yt_dlp.YoutubeDL") as MockYDL:
         instance = MockYDL.return_value.__enter__.return_value
         instance.extract_info.return_value = mock_info
-        title = await fetch_title("https://youtube.com/watch?v=abc")
+        title, video_id = await fetch_title("https://youtube.com/watch?v=abc")
     assert title == "Test Video Title"
+    assert video_id == "abc"
 
 
 @pytest.mark.asyncio
