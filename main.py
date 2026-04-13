@@ -78,6 +78,7 @@ def main() -> None:
     chromecast.set_connection_callback(None)
 
     # Graceful shutdown
+    pipeline.cancel_current()
     if chromecast.cast:
         try:
             chromecast.cast.quit_app()

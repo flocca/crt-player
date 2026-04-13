@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Tests
 source .venv/bin/activate
-python -m pytest tests/ -v                        # full suite (35 tests)
+python -m pytest tests/ -v                        # full suite (45 tests)
 python -m pytest tests/test_queue_manager.py -v   # single file
 python -m pytest tests/test_pipeline.py::test_fetch_title -v  # single test
 
@@ -42,6 +42,14 @@ TUI app (Textual) that downloads YouTube videos, converts them to 4:3 PAL (768x5
 
 Logs write to `crt_cast.log` (overwritten each run). stderr is redirected there too.
 Scan for Chromecasts: `python -c "import pychromecast, time; ccs, b = pychromecast.get_chromecasts(); time.sleep(10); b.stop_discovery(); [print(cc.name, cc.model_name) for cc in ccs]"`
+
+## Testing
+
+TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Shared fixtures in `tests/conftest.py`.
+- `QueueManager` is used as-is (pure data). `PipelineWorker` and `ChromecastManager` are `MagicMock` with `AsyncMock` for async methods — this neutralizes `on_mount`'s infinite-loop tasks.
+- `on_mount` only calls `_refresh_all` when `next_pending()` finds a queued item. To test UI state for "playing"/"ready" items, call `app._refresh_all()` manually after mount.
+- Always `await pilot.pause()` after interactions (`press`, `click`, value changes) — handlers run asynchronously.
+- Textual `ListView` is falsy when empty. Don't `assert widget` — use `query_one()` (raises `NoMatches` if absent).
 
 ## Gotchas
 
