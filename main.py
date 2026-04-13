@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 
@@ -14,7 +15,15 @@ from pipeline import PipelineWorker
 from queue_manager import QueueManager
 from ui import CRTCastApp
 
-logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
+LOG_FILE = os.path.join(os.path.dirname(__file__), "crt_cast.log")
+_log_fh = open(LOG_FILE, "w")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s: %(message)s",
+    stream=_log_fh,
+)
+# Redirect stderr to log file so unhandled exceptions are captured
+sys.stderr = _log_fh
 log = logging.getLogger(__name__)
 
 

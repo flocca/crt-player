@@ -30,12 +30,17 @@ class NowPlayingWidget(Static):
     playback_position = reactive(0.0)
     playback_duration = reactive(0.0)
     player_state = reactive("")
+    error_msg = reactive("")
 
     def render(self) -> str:
         if not self.title:
             return "  No video playing"
 
         lines = [f'  "{self.title}"']
+
+        if self.status == "error":
+            lines.append(f"  ERROR: {self.error_msg}")
+            return "\n".join(lines)
 
         if self.status in ("downloading", "encoding"):
             bar_width = 30
@@ -187,7 +192,7 @@ class CRTCastApp(App):
         asyncio.create_task(self.pipeline.run())
 
     def _on_chromecast_connection(self) -> None:
-        self.call_from_thread(self._update_connection)
+        self._safe_call(self._update_connection)
 
     def _update_connection(self) -> None:
         if self.chromecast.connected:
@@ -195,11 +200,17 @@ class CRTCastApp(App):
         else:
             self.sub_title = "Chromecast: Disconnected"
 
+    def _safe_call(self, callback: object) -> None:
+        try:
+            self.call_from_thread(callback)
+        except RuntimeError:
+            callback()
+
     def _on_chromecast_status(self) -> None:
-        self.call_from_thread(self._update_playback)
+        self._safe_call(self._update_playback)
 
     def _on_pipeline_update(self) -> None:
-        self.call_from_thread(self._refresh_all)
+        self._safe_call(self._refresh_all)
 
     def _update_playback(self) -> None:
         widget = self.query_one("#now-playing", NowPlayingWidget)
@@ -208,16 +219,26 @@ class CRTCastApp(App):
         widget.player_state = self.chromecast.player_state
 
     def _refresh_all(self) -> None:
+        # Show the most recent error or the active item
+        error_item = None
+        for item in reversed(self.queue.items):
+            if item.status == "error":
+                error_item = item
+                break
+
         active = self.queue.active_item()
         widget = self.query_one("#now-playing", NowPlayingWidget)
-        if active:
-            widget.title = active.title
-            widget.status = active.status
-            widget.progress = active.progress
+        show = active or error_item
+        if show:
+            widget.title = show.title or show.url
+            widget.status = show.status
+            widget.progress = show.progress
+            widget.error_msg = show.error or ""
         else:
             widget.title = ""
             widget.status = ""
             widget.progress = 0.0
+            widget.error_msg = ""
 
         self._refresh_queue_list()
 
