@@ -7,13 +7,13 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import (
+    Button,
     Footer,
     Header,
     Input,
     Label,
     ListItem,
     ListView,
-    ProgressBar,
     Select,
     Static,
 )
@@ -23,54 +23,31 @@ from pipeline import PipelineWorker
 from queue_manager import QueueItem, QueueManager
 
 
+def _format_time(secs: float) -> str:
+    m, s = divmod(int(secs), 60)
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
 class NowPlayingWidget(Static):
     title = reactive("")
     status = reactive("")
-    progress = reactive(0.0)
-    playback_position = reactive(0.0)
-    playback_duration = reactive(0.0)
-    player_state = reactive("")
     error_msg = reactive("")
 
     def render(self) -> str:
         if not self.title:
             return "  No video playing"
 
-        lines = [f'  "{self.title}"']
+        max_title = max(self.size.width - 6, 10)
+        title = self.title if len(self.title) <= max_title else self.title[:max_title - 1] + "…"
 
         if self.status == "error":
-            lines.append(f"  ERROR: {self.error_msg}")
-            return "\n".join(lines)
-
-        if self.status in ("downloading", "encoding"):
-            bar_width = 30
-            filled = int(self.progress / 100 * bar_width)
-            bar = "█" * filled + "░" * (bar_width - filled)
-            label = self.status.capitalize()
-            lines.append(f"  {bar} {label} {self.progress:.0f}%")
-
-        if self.status == "playing" and self.playback_duration > 0:
-            pos = self._format_time(self.playback_position)
-            dur = self._format_time(self.playback_duration)
-            bar_width = 30
-            frac = self.playback_position / self.playback_duration
-            filled = int(frac * bar_width)
-            bar = "█" * filled + "░" * (bar_width - filled)
-            state_icon = "▶" if self.player_state == "PLAYING" else "⏸"
-            lines.append(f"  {state_icon} {pos} / {dur}  {bar}")
-
+            return f'  "{title}"\n  ERROR: {self.error_msg}'
         if self.status == "casting":
-            lines.append("  Connecting to Chromecast...")
-
-        return "\n".join(lines)
-
-    @staticmethod
-    def _format_time(secs: float) -> str:
-        m, s = divmod(int(secs), 60)
-        h, m = divmod(m, 60)
-        if h > 0:
-            return f"{h}:{m:02d}:{s:02d}"
-        return f"{m}:{s:02d}"
+            return f'  "{title}"\n  Connessione al Chromecast...'
+        return f'  "{title}"'
 
 
 class QueueListItem(ListItem):
@@ -88,25 +65,22 @@ class QueueListItem(ListItem):
             prefix = "✕"
         else:
             prefix = " "
-        yield Label(f"  {prefix} {self.index + 1}. {title}")
+        if status in ("downloading", "encoding"):
+            pct = self.queue_item.progress
+            bar_width = 12
+            filled = int(pct / 100 * bar_width)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            label = "DL" if status == "downloading" else "ENC"
+            suffix = f"  {bar} {label} {pct:.0f}%"
+        else:
+            suffix = ""
+        yield Label(f"  {prefix} {self.index + 1}. {title}{suffix}")
 
 
 class CRTCastApp(App):
     CSS = """
     Screen {
         background: $surface;
-    }
-    #header-bar {
-        dock: top;
-        height: 1;
-        background: $accent;
-        color: $text;
-        content-align: center middle;
-    }
-    #chromecast-status {
-        dock: right;
-        width: auto;
-        padding: 0 1;
     }
     #url-input {
         margin: 1 1 1 2;
@@ -120,21 +94,40 @@ class CRTCastApp(App):
         height: 5;
         margin: 0 1;
     }
-    #now-playing {
-        height: auto;
-        min-height: 5;
-        margin: 1 2;
-        border: solid $accent;
-        padding: 0 1;
-    }
     #now-playing-header {
         text-style: bold;
         margin: 0 1;
     }
-    #queue-section {
+    #now-playing-section {
         margin: 1 2;
         border: solid $accent;
-        height: 1fr;
+        height: auto;
+    }
+    #now-playing {
+        padding: 0 1;
+        height: auto;
+    }
+    #playback-row {
+        height: 1;
+        padding: 0 1;
+        display: none;
+    }
+    #np-progress {
+        width: 1fr;
+    }
+    #playback-row Button {
+        min-width: 6;
+        height: 1;
+        border: none;
+        background: transparent;
+        color: $text;
+        padding: 0 1;
+    }
+    #playback-row Button:hover {
+        background: $accent;
+    }
+    #playback-row Button:disabled {
+        color: $text-disabled;
     }
     #queue-header {
         text-style: bold;
@@ -142,16 +135,18 @@ class CRTCastApp(App):
     }
     #queue-list {
         height: 1fr;
-    }
-    #controls-row {
-        height: 1;
-        margin: 0 2;
+        border: solid $accent;
+        margin: 1 2;
     }
     """
 
     BINDINGS = [
         Binding("ctrl+s", "stop", "Stop", show=True, priority=True),
         Binding("ctrl+p", "pause", "Pause", show=True, priority=True),
+        Binding("ctrl+left", "seek_back", "↺15s", show=True, priority=True),
+        Binding("ctrl+right", "seek_forward", "↻30s", show=True, priority=True),
+        Binding("ctrl+n", "next_video", "Next", show=True, priority=True),
+        Binding("ctrl+b", "prev_video", "Prev", show=True, priority=True),
         Binding("plus,equal", "volume_up", "Vol+", show=True, priority=True),
         Binding("minus", "volume_down", "Vol-", show=True, priority=True),
         Binding("ctrl+d", "remove_item", "Remove", show=True, priority=True),
@@ -159,9 +154,6 @@ class CRTCastApp(App):
         Binding("ctrl+j", "move_down", "Down", show=True, priority=True),
         Binding("escape", "quit", "Quit", show=True, priority=True),
     ]
-
-    chromecast_connected = reactive(False)
-    chromecast_device = reactive("")
 
     def __init__(
         self,
@@ -185,7 +177,15 @@ class CRTCastApp(App):
                 allow_blank=False,
             )
         yield Static(" IN RIPRODUZIONE", id="now-playing-header")
-        yield NowPlayingWidget(id="now-playing")
+        with Vertical(id="now-playing-section"):
+            yield NowPlayingWidget(id="now-playing")
+            with Horizontal(id="playback-row"):
+                yield Static("", id="np-progress")
+                yield Button("⏮", id="btn-prev", disabled=True)
+                yield Button("↺15", id="btn-back")
+                yield Button("⏸", id="btn-pause")
+                yield Button("30↻", id="btn-fwd")
+                yield Button("⏭", id="btn-next", disabled=True)
         yield Static(" CODA", id="queue-header")
         yield ListView(id="queue-list")
         yield Footer()
@@ -198,7 +198,7 @@ class CRTCastApp(App):
         self.pipeline.set_update_callback(self._on_pipeline_update)
         asyncio.create_task(self.chromecast.discover_loop())
         asyncio.create_task(self.pipeline.run())
-        self.set_interval(2, self._poll_playback)
+        self.set_interval(1, self._poll_playback)
 
     def _on_chromecast_connection(self) -> None:
         self._safe_call(self._update_connection)
@@ -223,17 +223,33 @@ class CRTCastApp(App):
 
     def _poll_playback(self) -> None:
         if self.chromecast.connected:
-            self.chromecast.poll_status()
-            self._update_playback()
+            asyncio.create_task(self._poll_playback_async())
+
+    async def _poll_playback_async(self) -> None:
+        await asyncio.to_thread(self.chromecast.poll_status)
+        self._update_playback()
 
     def _update_playback(self) -> None:
-        widget = self.query_one("#now-playing", NowPlayingWidget)
-        widget.playback_position = self.chromecast.current_time
-        widget.playback_duration = self.chromecast.duration
-        widget.player_state = self.chromecast.player_state
+        state = self.chromecast.player_state
+        pos = self.chromecast.current_time
+        dur = self.chromecast.duration
+
+        state_icon = "▶" if state == "PLAYING" else "⏸"
+        progress_widget = self.query_one("#np-progress", Static)
+        if dur > 0:
+            pos_str = _format_time(pos)
+            dur_str = _format_time(dur)
+            left = f"  {state_icon} {pos_str} / {dur_str}  "
+            avail = max(5, progress_widget.size.width - len(left))
+            filled = int(min(pos / dur, 1.0) * avail)
+            bar = "█" * filled + "░" * (avail - filled)
+            progress_widget.update(left + bar)
+        else:
+            progress_widget.update(f"  {state_icon}  --:-- / --:--")
+
+        self.query_one("#btn-pause", Button).label = "⏸" if state == "PLAYING" else "▶"
 
     def _refresh_all(self) -> None:
-        # Show the most recent error or the active item
         error_item = None
         for item in reversed(self.queue.items):
             if item.status == "error":
@@ -243,16 +259,22 @@ class CRTCastApp(App):
         active = self.queue.active_item()
         widget = self.query_one("#now-playing", NowPlayingWidget)
         show = active or error_item
+        is_playing = bool(active and active.status == "playing")
+
         if show:
             widget.title = show.title or show.url
             widget.status = show.status
-            widget.progress = show.progress
             widget.error_msg = show.error or ""
         else:
             widget.title = ""
             widget.status = ""
-            widget.progress = 0.0
             widget.error_msg = ""
+
+        playback_row = self.query_one("#playback-row")
+        playback_row.display = is_playing
+        if is_playing:
+            self.query_one("#btn-prev", Button).disabled = not bool(self.queue.history)
+            self.query_one("#btn-next", Button).disabled = self.queue.next_pending() is None
 
         self._refresh_queue_list()
 
@@ -278,12 +300,25 @@ class CRTCastApp(App):
         event.input.value = ""
         self._refresh_all()
 
-    def action_stop(self) -> None:
-        self.pipeline.cancel_current()
-        self.chromecast.stop()
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        btn_id = event.button.id
+        if btn_id == "btn-prev":
+            self.action_prev_video()
+        elif btn_id == "btn-back":
+            await self.action_seek_back()
+        elif btn_id == "btn-pause":
+            await self.action_pause()
+        elif btn_id == "btn-fwd":
+            await self.action_seek_forward()
+        elif btn_id == "btn-next":
+            self.action_next_video()
 
-    def action_pause(self) -> None:
-        self.chromecast.pause_or_resume()
+    async def action_stop(self) -> None:
+        self.pipeline.cancel_current()
+        await asyncio.to_thread(self.chromecast.stop)
+
+    async def action_pause(self) -> None:
+        await asyncio.to_thread(self.chromecast.pause_or_resume)
 
     def action_volume_up(self) -> None:
         self.chromecast.adjust_volume(10)
@@ -311,3 +346,22 @@ class CRTCastApp(App):
             queue_item = list_view.highlighted_child.queue_item
             self.queue.move(queue_item.id, "down")
             self._refresh_queue_list()
+
+    async def action_seek_back(self) -> None:
+        await asyncio.to_thread(self.chromecast.seek, -15)
+
+    async def action_seek_forward(self) -> None:
+        await asyncio.to_thread(self.chromecast.seek, 30)
+
+    def action_next_video(self) -> None:
+        self.pipeline.cancel_current()
+
+    def action_prev_video(self) -> None:
+        prev = self.queue.pop_from_history()
+        if prev is None:
+            return
+        self.pipeline.cancel_current()
+        new_item = self.queue.add(prev.url, mode="now")
+        new_item.title = prev.title
+        self.pipeline.wake()
+        self._refresh_all()

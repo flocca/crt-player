@@ -21,6 +21,15 @@ class QueueItem:
 class QueueManager:
     def __init__(self) -> None:
         self.items: list[QueueItem] = []
+        self.history: list[QueueItem] = []
+
+    def push_to_history(self, item: QueueItem) -> None:
+        self.history.append(item)
+
+    def pop_from_history(self) -> QueueItem | None:
+        if not self.history:
+            return None
+        return self.history.pop()
 
     def add(self, url: str, mode: str = "queue") -> QueueItem:
         item = QueueItem(url=url)

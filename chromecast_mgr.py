@@ -99,8 +99,15 @@ class ChromecastManager:
         await self._playback_ended_event.wait()
 
     def poll_status(self) -> None:
-        if self.cast and self.cast.media_controller.status:
-            status = self.cast.media_controller.status
+        if not self.cast:
+            return
+        mc = self.cast.media_controller
+        try:
+            mc.update_status()
+        except Exception as e:
+            log.debug("update_status failed: %s", e)
+        if mc.status:
+            status = mc.status
             self.player_state = status.player_state or "UNKNOWN"
             self.current_time = status.current_time or 0.0
             self.duration = status.duration or 0.0
@@ -133,11 +140,17 @@ class ChromecastManager:
             self._safe_cmd(self.cast.media_controller.play)
 
     def pause_or_resume(self) -> None:
-        self.poll_status()
         if self.player_state == "PAUSED":
             self.resume()
         elif self.player_state == "PLAYING":
             self.pause()
+
+    def seek(self, delta: float) -> None:
+        if not self.cast:
+            return
+        new_pos = max(0.0, self.current_time + delta)
+        self._safe_cmd(lambda: self.cast.media_controller.seek(new_pos))
+        self.current_time = new_pos
 
     def adjust_volume(self, delta: int) -> None:
         if not self.cast:

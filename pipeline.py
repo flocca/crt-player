@@ -215,6 +215,7 @@ class PipelineWorker:
 
             if not self._cancel_event.is_set():
                 item.status = "done"
+                self.queue.push_to_history(item)
                 self.notify()
 
         except Exception as e:
