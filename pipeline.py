@@ -75,6 +75,50 @@ async def download_video(
     return result_path, duration
 
 
+def _build_video_filter(crop_detect: str | None = None) -> str:
+    w, h = 768, 576
+    # Output 16:9 so Chromecast doesn't add pillarboxing
+    out_w = w * 16 // 12  # 1024 for 768 base
+    prefix = f"{crop_detect}," if crop_detect else ""
+    if config.SCALE_MODE == "crop":
+        # Scale to cover 4:3, crop to 4:3, then stretch to 16:9
+        # HW will squeeze 16:9 → 4:3 restoring correct proportions
+        return f"{prefix}scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},scale={out_w}:{h},setsar=1:1"
+    # Pad: fit inside 4:3 with letterbox, then stretch to 16:9
+    return f"{prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:({w}-iw)/2:({h}-ih)/2,scale={out_w}:{h},setsar=1:1"
+
+
+async def _detect_crop(input_path: str) -> str | None:
+    """Run a quick cropdetect pass and return the most common crop value."""
+    cmd = [
+        "ffmpeg", "-i", input_path,
+        "-vf", "cropdetect=24:16:0",
+        "-frames:v", "120",
+        "-f", "null", "-",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    crops: dict[str, int] = {}
+    for line in stderr.decode(errors="replace").splitlines():
+        if "crop=" in line:
+            crop_val = line.rpartition("crop=")[2].strip()
+            crops[crop_val] = crops.get(crop_val, 0) + 1
+    if not crops:
+        return None
+    best = max(crops, key=crops.get)
+    # Only apply if it actually trims something (not full-frame crop)
+    parts = best.split(":")
+    if len(parts) == 4:
+        cw, ch = int(parts[0]), int(parts[1])
+        # Skip if crop removes less than 16px on any side
+        if cw < 32 or ch < 32:
+            return None
+        return f"crop={best}"
+    return None
+
+
 async def encode_video(
     input_path: str,
     output_path: str,
@@ -82,9 +126,12 @@ async def encode_video(
     on_progress: Callable[[float], None],
     worker: PipelineWorker | None = None,
 ) -> str:
+    crop_filter = await _detect_crop(input_path)
+    if crop_filter:
+        log.info("Detected source black bars, applying: %s", crop_filter)
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
-        "-vf", "scale=768:576:force_original_aspect_ratio=decrease,pad=768:576:(768-iw)/2:(576-ih)/2,setsar=1:1",
+        "-vf", _build_video_filter(crop_filter),
         "-r", "25",
         "-progress", "pipe:1",
         "-loglevel", "quiet",
@@ -166,7 +213,7 @@ class PipelineWorker:
             self.notify()
 
             # Check for cached encoded file
-            cached_encoded = os.path.join(config.TEMP_DIR, f"{video_id}_pal.mp4")
+            cached_encoded = os.path.join(config.TEMP_DIR, f"{video_id}_pal_{config.SCALE_MODE}.mp4")
             if video_id and os.path.isfile(cached_encoded):
                 log.info("Using cached encoded file: %s", cached_encoded)
                 item.filename = os.path.basename(cached_encoded)
@@ -195,7 +242,7 @@ class PipelineWorker:
                 self.notify()
 
                 base = os.path.splitext(os.path.basename(downloaded_path))[0]
-                encoded_path = os.path.join(config.TEMP_DIR, f"{base}_pal.mp4")
+                encoded_path = os.path.join(config.TEMP_DIR, f"{base}_pal_{config.SCALE_MODE}.mp4")
 
                 def enc_progress(pct: float) -> None:
                     item.progress = pct

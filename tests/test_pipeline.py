@@ -87,7 +87,8 @@ async def test_encode_video(tmp_path):
     mock_process.stdout.readline = mock_readline
     mock_process.wait = AsyncMock(return_value=0)
 
-    with patch("pipeline.asyncio.create_subprocess_exec", return_value=mock_process):
+    with patch("pipeline._detect_crop", return_value=None), \
+         patch("pipeline.asyncio.create_subprocess_exec", return_value=mock_process):
         result = await encode_video(input_file, output_file, 10.0, on_progress)
 
     assert result == output_file
