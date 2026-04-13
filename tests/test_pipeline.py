@@ -37,7 +37,7 @@ async def test_download_video():
                 hook({"status": "downloading", "downloaded_bytes": 50, "total_bytes": 100})
                 hook({"status": "downloading", "downloaded_bytes": 100, "total_bytes": 100})
                 hook({"status": "finished"})
-            return {"id": "abc", "ext": "mp4", "title": "Test"}
+            return {"id": "abc", "ext": "mp4", "title": "Test", "duration": 120.0}
         MockYDL_instance.extract_info.side_effect = fake_extract_info
         MockYDL_instance.prepare_filename.return_value = "/tmp/test/abc.mp4"
         context_mock = MagicMock()
@@ -46,11 +46,12 @@ async def test_download_video():
         return context_mock
 
     with patch("pipeline.yt_dlp.YoutubeDL", side_effect=capture_init):
-        filepath = await download_video(
+        filepath, duration = await download_video(
             "https://youtube.com/watch?v=abc", "/tmp/test", on_progress
         )
 
     assert len(progress_values) >= 1
+    assert duration == 120.0
 
 
 @pytest.mark.asyncio

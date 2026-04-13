@@ -36,11 +36,12 @@ async def fetch_title(url: str) -> str:
 
 async def download_video(
     url: str, temp_dir: str, on_progress: Callable[[float], None]
-) -> str:
+) -> tuple[str, float]:
     result_path: str = ""
+    duration: float = 0.0
 
     def _download():
-        nonlocal result_path
+        nonlocal result_path, duration
 
         def progress_hook(d):
             if d["status"] == "downloading":
@@ -61,6 +62,7 @@ async def download_video(
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            duration = info.get("duration", 0.0) or 0.0
             result_path = ydl.prepare_filename(info)
             # yt-dlp may merge to mp4
             base, _ = os.path.splitext(result_path)
@@ -69,7 +71,7 @@ async def download_video(
                 result_path = mp4_path
 
     await asyncio.to_thread(_download)
-    return result_path
+    return result_path, duration
 
 
 async def encode_video(
@@ -77,6 +79,7 @@ async def encode_video(
     output_path: str,
     duration_secs: float,
     on_progress: Callable[[float], None],
+    worker: PipelineWorker | None = None,
 ) -> str:
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
@@ -89,6 +92,8 @@ async def encode_video(
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
     )
+    if worker:
+        worker._current_proc = proc
     while True:
         line = await proc.stdout.readline()
         if not line:
@@ -103,9 +108,12 @@ async def encode_video(
             except ValueError:
                 pass
     await proc.wait()
-    if proc.returncode != 0:
+    if worker:
+        worker._current_proc = None
+    if proc.returncode not in (0, -15):  # 0=success, -15=SIGTERM (cancelled)
         raise RuntimeError(f"ffmpeg failed with exit code {proc.returncode}")
-    on_progress(100.0)
+    if proc.returncode == 0:
+        on_progress(100.0)
     return output_path
 
 
@@ -132,6 +140,8 @@ class PipelineWorker:
 
     def cancel_current(self) -> None:
         self._cancel_event.set()
+        if self._current_proc and self._current_proc.returncode is None:
+            self._current_proc.terminate()
 
     async def run(self) -> None:
         while True:
@@ -158,7 +168,7 @@ class PipelineWorker:
                 item.progress = pct
                 self.notify()
 
-            downloaded_path = await download_video(
+            downloaded_path, duration = await download_video(
                 item.url, config.TEMP_DIR, dl_progress
             )
 
@@ -166,9 +176,6 @@ class PipelineWorker:
                 item.status = "done"
                 self.notify()
                 return
-
-            # Get duration for encoding progress
-            duration = await self._get_duration(item.url)
 
             # Encode
             item.status = "encoding"
@@ -182,7 +189,7 @@ class PipelineWorker:
                 item.progress = pct
                 self.notify()
 
-            await encode_video(downloaded_path, encoded_path, duration, enc_progress)
+            await encode_video(downloaded_path, encoded_path, duration, enc_progress, worker=self)
 
             if self._cancel_event.is_set():
                 item.status = "done"
@@ -216,17 +223,12 @@ class PipelineWorker:
             item.error = str(e)
             self.notify()
 
-    async def _get_duration(self, url: str) -> float:
-        def _extract():
-            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return info.get("duration", 0.0)
-
-        return await asyncio.to_thread(_extract)
-
     async def _wait_for_playback_end(self) -> None:
-        while not self._cancel_event.is_set():
-            if self.chromecast.playback_ended:
-                return
-            await asyncio.sleep(1)
+        self.chromecast.reset_playback_ended()
+        cancel_task = asyncio.create_task(self._cancel_event.wait())
+        playback_task = asyncio.create_task(self.chromecast.wait_for_playback_end())
+        done, pending = await asyncio.wait(
+            {cancel_task, playback_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()

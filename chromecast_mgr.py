@@ -37,6 +37,7 @@ class ChromecastManager:
         self._on_status_change: Callable | None = None
         self._on_connection_change: Callable | None = None
         self._previous_state: str = "UNKNOWN"
+        self._playback_ended_event = asyncio.Event()
 
     def set_status_callback(self, callback: Callable) -> None:
         self._on_status_change = callback
@@ -48,6 +49,8 @@ class ChromecastManager:
         return await asyncio.to_thread(self._discover_sync)
 
     def _discover_sync(self) -> bool:
+        if self.browser:
+            self.browser.stop_discovery()
         chromecasts, browser = pychromecast.get_listed_chromecasts(
             friendly_names=[config.CHROMECAST_NAME]
         )
@@ -73,12 +76,15 @@ class ChromecastManager:
                 await asyncio.sleep(10)
 
     def _on_media_status(self, status) -> None:
-        self._previous_state = self.player_state
+        previous = self.player_state
+        self._previous_state = previous
         self.player_state = status.player_state or "UNKNOWN"
         self.current_time = status.current_time or 0.0
         self.duration = status.duration or 0.0
         if status.volume_level is not None:
             self.volume = status.volume_level
+        if self.player_state == "IDLE" and previous in ("PLAYING", "BUFFERING"):
+            self._playback_ended_event.set()
         if self._on_status_change:
             self._on_status_change()
 
@@ -86,12 +92,11 @@ class ChromecastManager:
         if self._on_connection_change:
             self._on_connection_change()
 
-    @property
-    def playback_ended(self) -> bool:
-        return (
-            self.player_state == "IDLE"
-            and self._previous_state in ("PLAYING", "BUFFERING")
-        )
+    def reset_playback_ended(self) -> None:
+        self._playback_ended_event.clear()
+
+    async def wait_for_playback_end(self) -> None:
+        await self._playback_ended_event.wait()
 
     def cast_url(self, url: str) -> None:
         if not self.cast:

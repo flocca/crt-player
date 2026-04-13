@@ -59,6 +59,10 @@ def main() -> None:
     app = CRTCastApp(queue, pipeline, chromecast)
     app.run()
 
+    # Graceful shutdown
+    chromecast.stop()
+    chromecast.shutdown()
+
 
 if __name__ == "__main__":
     main()
