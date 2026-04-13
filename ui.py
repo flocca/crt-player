@@ -96,14 +96,15 @@ class CRTCastApp(App):
         padding: 0 1;
     }
     #url-input {
-        margin: 1 2;
+        margin: 1 1 1 2;
+        width: 1fr;
     }
     #mode-select {
-        width: 16;
-        margin: 0 2;
+        width: 22;
+        margin: 1 2 1 0;
     }
     #input-row {
-        height: 3;
+        height: 5;
         margin: 0 1;
     }
     #now-playing {
