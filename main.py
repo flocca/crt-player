@@ -69,9 +69,9 @@ def main() -> None:
     app.run()
 
     # Graceful shutdown
-    if chromecast.player_state in ("PLAYING", "PAUSED", "BUFFERING"):
+    if chromecast.cast:
         try:
-            chromecast.stop()
+            chromecast.cast.quit_app()
         except Exception:
             pass
     chromecast.shutdown()

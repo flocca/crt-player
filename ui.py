@@ -150,14 +150,14 @@ class CRTCastApp(App):
     """
 
     BINDINGS = [
-        Binding("s", "stop", "Stop", show=True),
-        Binding("p", "pause", "Pause", show=True),
-        Binding("plus,equal", "volume_up", "Vol+", show=True),
-        Binding("minus", "volume_down", "Vol-", show=True),
-        Binding("d", "remove_item", "Remove", show=True),
-        Binding("k", "move_up", "Move Up", show=True),
-        Binding("j", "move_down", "Move Down", show=True),
-        Binding("q", "quit", "Quit", show=True),
+        Binding("ctrl+s", "stop", "Stop", show=True, priority=True),
+        Binding("ctrl+p", "pause", "Pause", show=True, priority=True),
+        Binding("plus,equal", "volume_up", "Vol+", show=True, priority=True),
+        Binding("minus", "volume_down", "Vol-", show=True, priority=True),
+        Binding("ctrl+d", "remove_item", "Remove", show=True, priority=True),
+        Binding("ctrl+k", "move_up", "Up", show=True, priority=True),
+        Binding("ctrl+j", "move_down", "Down", show=True, priority=True),
+        Binding("escape", "quit", "Quit", show=True, priority=True),
     ]
 
     chromecast_connected = reactive(False)
