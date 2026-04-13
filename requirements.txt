@@ -1,0 +1,8 @@
+textual
+fastapi
+uvicorn
+yt-dlp
+pychromecast
+pytest
+httpx
+pytest-asyncio
