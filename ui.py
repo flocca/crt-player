@@ -33,9 +33,9 @@ def _format_time(secs: float) -> str:
 
 
 class NowPlayingWidget(Static):
-    title = reactive("")
-    status = reactive("")
-    error_msg = reactive("")
+    title = reactive("", layout=True)
+    status = reactive("", layout=True)
+    error_msg = reactive("", layout=True)
 
     def render(self) -> str:
         if not self.title:
