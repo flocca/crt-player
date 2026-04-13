@@ -23,6 +23,8 @@ class QueueItem:
     progress: float = 0.0
     error: str | None = None
     filename: str | None = None
+    playback_position: float = 0.0
+    downloaded_path: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -33,6 +35,8 @@ class QueueItem:
             "progress": self.progress,
             "error": self.error,
             "filename": self.filename,
+            "playback_position": self.playback_position,
+            "downloaded_path": self.downloaded_path,
         }
 
     @classmethod
@@ -45,6 +49,8 @@ class QueueItem:
             progress=d.get("progress", 0.0),
             error=d.get("error"),
             filename=d.get("filename"),
+            playback_position=d.get("playback_position", 0.0),
+            downloaded_path=d.get("downloaded_path"),
         )
 
 
@@ -75,8 +81,6 @@ class QueueManager:
     def remove(self, item_id: str) -> bool:
         for i, item in enumerate(self.items):
             if item.id == item_id:
-                if item.status != "queued":
-                    return False
                 self.items.pop(i)
                 return True
         return False
@@ -95,9 +99,33 @@ class QueueManager:
                 return False
         return False
 
+    def move_to_front(self, item_id: str) -> bool:
+        for i, item in enumerate(self.items):
+            if item.id == item_id:
+                self.items.pop(i)
+                self.items.insert(0, item)
+                return True
+        return False
+
     def next_pending(self) -> QueueItem | None:
         for item in self.items:
             if item.status in ("queued", "ready"):
+                return item
+        return None
+
+    def first_queued(self) -> QueueItem | None:
+        """First item with status 'queued' (for the prepare loop)."""
+        for item in self.items:
+            if item.status == "queued":
+                return item
+        return None
+
+    def next_ready(self) -> QueueItem | None:
+        """First 'ready' item that can be cast now (no unfinished items before it)."""
+        for item in self.items:
+            if item.status in ("queued", "downloading", "encoding"):
+                return None
+            if item.status == "ready":
                 return item
         return None
 
@@ -148,7 +176,28 @@ class QueueManager:
 
         for raw in data.get("items", []):
             item = QueueItem.from_dict(raw)
-            if item.status in ("downloading", "encoding", "casting"):
+            if item.status == "downloading":
+                item.status = "queued"
+                item.progress = 0.0
+                item.filename = None
+                item.downloaded_path = None
+            elif item.status == "encoding":
+                # Clean up partial encoded output so the cache check won't reuse it
+                if item.downloaded_path:
+                    base = os.path.splitext(os.path.basename(item.downloaded_path))[0]
+                    partial = os.path.join(config.TEMP_DIR, f"{base}_pal_{config.SCALE_MODE}.mp4")
+                    if os.path.isfile(partial):
+                        try:
+                            os.unlink(partial)
+                        except OSError:
+                            pass
+                    # Keep downloaded_path only if the source file still exists
+                    if not os.path.isfile(item.downloaded_path):
+                        item.downloaded_path = None
+                item.status = "queued"
+                item.progress = 0.0
+                item.filename = None
+            elif item.status == "casting":
                 item.status = "queued"
                 item.progress = 0.0
                 item.filename = None

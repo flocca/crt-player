@@ -88,6 +88,24 @@ def _build_video_filter(crop_detect: str | None = None) -> str:
     return f"{prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:({w}-iw)/2:({h}-ih)/2,scale={out_w}:{h},setsar=1:1"
 
 
+async def _get_duration(path: str) -> float:
+    """Return duration in seconds using ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        path,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+    )
+    stdout, _ = await proc.communicate()
+    try:
+        return float(stdout.decode().strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
 async def _detect_crop(input_path: str) -> str | None:
     """Run a quick cropdetect pass and return the most common crop value."""
     cmd = [
@@ -171,8 +189,10 @@ class PipelineWorker:
     ) -> None:
         self.queue = queue
         self.chromecast = chromecast
-        self._cancel_event = asyncio.Event()
-        self._wake_event = asyncio.Event()
+        self._prepare_cancel = asyncio.Event()
+        self._cast_cancel = asyncio.Event()
+        self._prepare_wake = asyncio.Event()
+        self._cast_wake = asyncio.Event()
         self._current_proc: asyncio.subprocess.Process | None = None
         self._on_update: Callable | None = None
         self.resume_position: float = 0.0
@@ -184,31 +204,45 @@ class PipelineWorker:
         if self._on_update:
             self._on_update()
 
-    def wake(self) -> None:
-        self._wake_event.set()
-
-    def cancel_current(self) -> None:
-        self._cancel_event.set()
+    def cancel_prepare(self) -> None:
+        self._prepare_cancel.set()
         if self._current_proc and self._current_proc.returncode is None:
             self._current_proc.terminate()
 
-    async def run(self) -> None:
+    def cancel_cast(self) -> None:
+        self._cast_cancel.set()
+
+    def cancel_current(self) -> None:
+        self.cancel_prepare()
+        self.cancel_cast()
+
+    def wake(self) -> None:
+        self._prepare_wake.set()
+        self._cast_wake.set()
+
+    async def run_prepare(self) -> None:
         while True:
-            item = self.queue.next_pending()
+            self._prepare_cancel.clear()
+            item = self.queue.first_queued()
             if item is None:
-                self._wake_event.clear()
-                await self._wake_event.wait()
+                self._prepare_wake.clear()
+                await self._prepare_wake.wait()
                 continue
-            await self._process(item)
+            await self._prepare_one(item)
+            self._cast_wake.set()
 
-    async def _process(self, item: QueueItem) -> None:
-        self._cancel_event.clear()
+    async def run_cast(self) -> None:
+        while True:
+            self._cast_cancel.clear()
+            item = self.queue.next_ready()
+            if item is None:
+                self._cast_wake.clear()
+                await self._cast_wake.wait()
+                continue
+            await self._cast_and_wait(item)
+
+    async def _prepare_one(self, item: QueueItem) -> None:
         try:
-            if item.status == "ready":
-                await self._cast_and_wait(item)
-                return
-
-            # Fetch title and video ID
             item.title, video_id = await fetch_title(item.url)
             self.notify()
 
@@ -217,6 +251,15 @@ class PipelineWorker:
             if video_id and os.path.isfile(cached_encoded):
                 log.info("Using cached encoded file: %s", cached_encoded)
                 item.filename = os.path.basename(cached_encoded)
+                item.status = "ready"
+                self.notify()
+                return
+
+            # Skip download if file already exists from a previous interrupted session
+            if item.downloaded_path and os.path.isfile(item.downloaded_path):
+                log.info("Resuming encode from existing download: %s", item.downloaded_path)
+                downloaded_path = item.downloaded_path
+                duration = await _get_duration(downloaded_path)
             else:
                 # Download
                 item.status = "downloading"
@@ -230,37 +273,40 @@ class PipelineWorker:
                 downloaded_path, duration = await download_video(
                     item.url, config.TEMP_DIR, dl_progress
                 )
+                item.downloaded_path = downloaded_path
 
-                if self._cancel_event.is_set():
-                    item.status = "done"
+                if self._prepare_cancel.is_set():
+                    item.status = "queued"
+                    item.progress = 0.0
                     self.notify()
                     return
 
-                # Encode
-                item.status = "encoding"
-                item.progress = 0.0
+            # Encode
+            item.status = "encoding"
+            item.progress = 0.0
+            self.notify()
+
+            base = os.path.splitext(os.path.basename(downloaded_path))[0]
+            encoded_path = os.path.join(config.TEMP_DIR, f"{base}_pal_{config.SCALE_MODE}.mp4")
+
+            def enc_progress(pct: float) -> None:
+                item.progress = pct
                 self.notify()
 
-                base = os.path.splitext(os.path.basename(downloaded_path))[0]
-                encoded_path = os.path.join(config.TEMP_DIR, f"{base}_pal_{config.SCALE_MODE}.mp4")
+            await encode_video(downloaded_path, encoded_path, duration, enc_progress, worker=self)
 
-                def enc_progress(pct: float) -> None:
-                    item.progress = pct
-                    self.notify()
+            if self._prepare_cancel.is_set():
+                item.status = "queued"
+                item.progress = 0.0
+                self.notify()
+                return
 
-                await encode_video(downloaded_path, encoded_path, duration, enc_progress, worker=self)
-
-                if self._cancel_event.is_set():
-                    item.status = "done"
-                    self.notify()
-                    return
-
-                item.filename = os.path.basename(encoded_path)
-
-            await self._cast_and_wait(item)
+            item.filename = os.path.basename(encoded_path)
+            item.status = "ready"
+            self.notify()
 
         except Exception as e:
-            log.exception("Pipeline error for %s", item.url)
+            log.exception("Pipeline prepare error for %s", item.url)
             item.status = "error"
             item.error = str(e)
             self.notify()
@@ -274,13 +320,13 @@ class PipelineWorker:
         if not self.chromecast.connected:
             log.info("Waiting for Chromecast connection before casting...")
             conn_task = asyncio.create_task(self.chromecast.wait_for_connection())
-            cancel_task = asyncio.create_task(self._cancel_event.wait())
+            cancel_task = asyncio.create_task(self._cast_cancel.wait())
             done, pending = await asyncio.wait(
                 {conn_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
             )
             for t in pending:
                 t.cancel()
-            if self._cancel_event.is_set():
+            if self._cast_cancel.is_set():
                 item.status = "done"
                 self.notify()
                 return
@@ -298,14 +344,14 @@ class PipelineWorker:
 
         await self._wait_for_playback_end()
 
-        if not self._cancel_event.is_set():
-            item.status = "done"
+        item.status = "done"
+        if not self._cast_cancel.is_set():
             self.queue.push_to_history(item)
-            self.notify()
+        self.notify()
 
     async def _wait_for_playback_end(self) -> None:
         self.chromecast.reset_playback_ended()
-        cancel_task = asyncio.create_task(self._cancel_event.wait())
+        cancel_task = asyncio.create_task(self._cast_cancel.wait())
         playback_task = asyncio.create_task(self.chromecast.wait_for_playback_end())
         done, pending = await asyncio.wait(
             {cancel_task, playback_task}, return_when=asyncio.FIRST_COMPLETED

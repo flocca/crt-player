@@ -62,12 +62,12 @@ def test_remove_queued_item():
     assert len(qm.items) == 0
 
 
-def test_remove_non_queued_item_fails():
+def test_remove_non_queued_item_succeeds():
     qm = QueueManager()
     item = qm.add("https://youtube.com/watch?v=1", mode="queue")
     item.status = "downloading"
-    assert qm.remove(item.id) is False
-    assert len(qm.items) == 1
+    assert qm.remove(item.id) is True
+    assert len(qm.items) == 0
 
 
 def test_remove_nonexistent_item_fails():

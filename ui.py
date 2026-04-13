@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -21,7 +22,7 @@ from textual.widgets import (
 import config
 from chromecast_mgr import ChromecastManager
 from pipeline import PipelineWorker
-from queue_manager import QueueItem, QueueManager
+from queue_manager import ACTIVE_STATUSES, QueueItem, QueueManager
 
 
 def _format_time(secs: float) -> str:
@@ -60,10 +61,16 @@ class QueueListItem(ListItem):
     def compose(self) -> ComposeResult:
         title = self.queue_item.title or self.queue_item.url
         status = self.queue_item.status
-        if status in ("downloading", "encoding", "casting", "playing"):
-            prefix = "▶"
+        if status in ("casting", "playing"):
+            prefix = "[green]▶[/green]"
+        elif status in ("downloading", "encoding"):
+            prefix = "[yellow]↓[/yellow]"
+        elif status == "ready":
+            prefix = "[cyan]✓[/cyan]"
         elif status == "error":
-            prefix = "✕"
+            prefix = "[red]✕[/red]"
+        elif status == "done":
+            prefix = "[dim]✓[/dim]"
         else:
             prefix = " "
         if status in ("downloading", "encoding"):
@@ -72,7 +79,7 @@ class QueueListItem(ListItem):
             filled = int(pct / 100 * bar_width)
             bar = "█" * filled + "░" * (bar_width - filled)
             label = "DL" if status == "downloading" else "ENC"
-            suffix = f"  {bar} {label} {pct:.0f}%"
+            suffix = f"  [yellow]{bar} {label} {pct:.0f}%[/yellow]"
         else:
             suffix = ""
         yield Label(f"  {prefix} {self.index + 1}. {title}{suffix}")
@@ -150,7 +157,7 @@ class CRTCastApp(App):
         Binding("ctrl+b", "prev_video", "Prev", show=True, priority=True),
         Binding("plus,equal", "volume_up", "Vol+", show=True, priority=True),
         Binding("minus", "volume_down", "Vol-", show=True, priority=True),
-        Binding("ctrl+d", "remove_item", "Remove", show=True, priority=True),
+        Binding("backspace", "remove_item", "Remove", show=True),
         Binding("ctrl+k", "move_up", "Up", show=True, priority=True),
         Binding("ctrl+j", "move_down", "Down", show=True, priority=True),
         Binding("escape", "quit", "Quit", show=True, priority=True),
@@ -198,7 +205,8 @@ class CRTCastApp(App):
         self.chromecast.set_connection_callback(self._on_chromecast_connection)
         self.pipeline.set_update_callback(self._on_pipeline_update)
         asyncio.create_task(self.chromecast.discover_loop())
-        asyncio.create_task(self.pipeline.run())
+        asyncio.create_task(self.pipeline.run_prepare())
+        asyncio.create_task(self.pipeline.run_cast())
         self.set_interval(1, self._poll_playback)
         self.set_interval(60, self._auto_save)
         if self.queue.next_pending():
@@ -290,8 +298,7 @@ class CRTCastApp(App):
         list_view = self.query_one("#queue-list", ListView)
         list_view.clear()
         for i, item in enumerate(self.queue.items):
-            if item.status not in ("done", "error"):
-                list_view.append(QueueListItem(item, i))
+            list_view.append(QueueListItem(item, i))
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         url = event.value.strip()
@@ -301,7 +308,8 @@ class CRTCastApp(App):
         mode = str(mode_select.value)
 
         if mode == "now":
-            self.pipeline.cancel_current()
+            self.pipeline.cancel_cast()
+            self.pipeline.cancel_prepare()
 
         self.queue.add(url, mode=mode)
         self.pipeline.wake()
@@ -321,8 +329,27 @@ class CRTCastApp(App):
         elif btn_id == "btn-next":
             self.action_next_video()
 
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if not isinstance(event.item, QueueListItem):
+            return
+        target = event.item.queue_item
+        if target.status not in ("queued", "ready"):
+            return
+        active = self.queue.active_item()
+        if active:
+            if active.status == "playing":
+                active.playback_position = self.chromecast.current_time
+            active.status = "done"
+        self.pipeline.resume_position = target.playback_position
+        self.pipeline.cancel_cast()
+        if target.status == "queued":
+            self.pipeline.cancel_prepare()
+        self.queue.move_to_front(target.id)
+        self.pipeline.wake()
+        self._refresh_all()
+
     async def action_stop(self) -> None:
-        self.pipeline.cancel_current()
+        self.pipeline.cancel_cast()
         await asyncio.to_thread(self.chromecast.stop)
 
     async def action_pause(self) -> None:
@@ -334,12 +361,26 @@ class CRTCastApp(App):
     def action_volume_down(self) -> None:
         self.chromecast.adjust_volume(-10)
 
-    def action_remove_item(self) -> None:
+    async def action_remove_item(self) -> None:
         list_view = self.query_one("#queue-list", ListView)
-        if list_view.highlighted_child is not None:
-            queue_item = list_view.highlighted_child.queue_item
-            self.queue.remove(queue_item.id)
-            self._refresh_queue_list()
+        if list_view.highlighted_child is None:
+            return
+        if not isinstance(list_view.highlighted_child, QueueListItem):
+            return
+        queue_item = list_view.highlighted_child.queue_item
+        if queue_item.status in ("downloading", "encoding"):
+            self.pipeline.cancel_prepare()
+        elif queue_item.status in ("casting", "playing"):
+            self.pipeline.cancel_cast()
+            if queue_item.status == "playing":
+                await asyncio.to_thread(self.chromecast.stop)
+        if queue_item.filename:
+            try:
+                os.unlink(os.path.join(config.TEMP_DIR, queue_item.filename))
+            except OSError:
+                pass
+        self.queue.remove(queue_item.id)
+        self._refresh_all()
 
     def action_move_up(self) -> None:
         list_view = self.query_one("#queue-list", ListView)
@@ -362,13 +403,17 @@ class CRTCastApp(App):
         await asyncio.to_thread(self.chromecast.seek, 30)
 
     def action_next_video(self) -> None:
-        self.pipeline.cancel_current()
+        self.pipeline.cancel_cast()
 
     def action_prev_video(self) -> None:
         prev = self.queue.pop_from_history()
         if prev is None:
             return
-        self.pipeline.cancel_current()
+        active = self.queue.active_item()
+        if active:
+            active.status = "done"
+        self.pipeline.cancel_cast()
+        self.pipeline.cancel_prepare()
         new_item = self.queue.add(prev.url, mode="now")
         new_item.title = prev.title
         self.pipeline.wake()
