@@ -98,6 +98,15 @@ class ChromecastManager:
     async def wait_for_playback_end(self) -> None:
         await self._playback_ended_event.wait()
 
+    def poll_status(self) -> None:
+        if self.cast and self.cast.media_controller.status:
+            status = self.cast.media_controller.status
+            self.player_state = status.player_state or "UNKNOWN"
+            self.current_time = status.current_time or 0.0
+            self.duration = status.duration or 0.0
+            if status.volume_level is not None:
+                self.volume = status.volume_level
+
     def cast_url(self, url: str) -> None:
         if not self.cast:
             raise RuntimeError("Chromecast not connected")
@@ -105,19 +114,26 @@ class ChromecastManager:
         mc.play_media(url, "video/mp4")
         mc.block_until_active()
 
+    def _safe_cmd(self, fn: object) -> None:
+        try:
+            fn()
+        except Exception as e:
+            log.warning("Chromecast command failed: %s", e)
+
     def stop(self) -> None:
         if self.cast:
-            self.cast.media_controller.stop()
+            self._safe_cmd(self.cast.media_controller.stop)
 
     def pause(self) -> None:
         if self.cast:
-            self.cast.media_controller.pause()
+            self._safe_cmd(self.cast.media_controller.pause)
 
     def resume(self) -> None:
         if self.cast:
-            self.cast.media_controller.play()
+            self._safe_cmd(self.cast.media_controller.play)
 
     def pause_or_resume(self) -> None:
+        self.poll_status()
         if self.player_state == "PAUSED":
             self.resume()
         elif self.player_state == "PLAYING":
@@ -127,7 +143,7 @@ class ChromecastManager:
         if not self.cast:
             return
         new_vol = max(0.0, min(1.0, self.volume + delta / 100.0))
-        self.cast.set_volume(new_vol)
+        self._safe_cmd(lambda: self.cast.set_volume(new_vol))
         self.volume = new_vol
 
     def shutdown(self) -> None:

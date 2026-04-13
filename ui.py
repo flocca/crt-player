@@ -80,7 +80,15 @@ class QueueListItem(ListItem):
         self.index = index
 
     def compose(self) -> ComposeResult:
-        yield Label(f"  {self.index + 1}. {self.queue_item.title or self.queue_item.url}")
+        title = self.queue_item.title or self.queue_item.url
+        status = self.queue_item.status
+        if status in ("downloading", "encoding", "casting", "playing"):
+            prefix = "▶"
+        elif status == "error":
+            prefix = "✕"
+        else:
+            prefix = " "
+        yield Label(f"  {prefix} {self.index + 1}. {title}")
 
 
 class CRTCastApp(App):
@@ -190,6 +198,7 @@ class CRTCastApp(App):
         self.pipeline.set_update_callback(self._on_pipeline_update)
         asyncio.create_task(self.chromecast.discover_loop())
         asyncio.create_task(self.pipeline.run())
+        self.set_interval(2, self._poll_playback)
 
     def _on_chromecast_connection(self) -> None:
         self._safe_call(self._update_connection)
@@ -211,6 +220,11 @@ class CRTCastApp(App):
 
     def _on_pipeline_update(self) -> None:
         self._safe_call(self._refresh_all)
+
+    def _poll_playback(self) -> None:
+        if self.chromecast.connected:
+            self.chromecast.poll_status()
+            self._update_playback()
 
     def _update_playback(self) -> None:
         widget = self.query_one("#now-playing", NowPlayingWidget)
@@ -246,7 +260,7 @@ class CRTCastApp(App):
         list_view = self.query_one("#queue-list", ListView)
         list_view.clear()
         for i, item in enumerate(self.queue.items):
-            if item.status == "queued":
+            if item.status not in ("done", "error"):
                 list_view.append(QueueListItem(item, i))
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
