@@ -14,7 +14,7 @@ STATE_FILE = os.environ.get(
     "CRT_STATE_FILE",
     os.path.join(os.path.expanduser("~"), ".local", "share", "crt-player", "state.json"),
 )
-LOOP_MODE_DEFAULT: bool = os.getenv("CRT_LOOP", "0") == "1"
+LOOP_MODE_DEFAULT: bool = os.environ.get("CRT_LOOP", "0") == "1"
 
 # Logical frame is 768x576 (4:3). Margins are pixels in that frame that will be
 # rendered as black borders to compensate for CRT overscan.
