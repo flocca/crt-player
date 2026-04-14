@@ -101,12 +101,14 @@ async def test_integration_single_video_plays(
 
         assert len(real_queue.items) == 1, "URL was not added to the queue"
 
-        # Pipeline transitions: queued → downloading
+        # Pipeline started — either downloading or (if cached) already past it
         await wait_for_condition(
             pilot,
-            lambda: real_queue.items[0].status == "downloading",
+            lambda: real_queue.items[0].status in (
+                "downloading", "encoding", "ready", "casting", "playing"
+            ),
             timeout_s=60,
-            description="status=downloading",
+            description="pipeline started",
         )
 
         # downloading → encoding → ready
