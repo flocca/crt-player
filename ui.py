@@ -570,17 +570,17 @@ class CRTCastApp(App):
         list_view = self.query_one("#queue-list", ListView)
         if list_view.highlighted_child is not None:
             queue_item = list_view.highlighted_child.queue_item
-            self.queue.move(queue_item.id, "up")
-            self._refresh_queue_list()
-            self.pipeline.wake()
+            if self.queue.move(queue_item.id, "up"):
+                self._refresh_queue_list()
+                self.pipeline.wake()
 
     def action_move_down(self) -> None:
         list_view = self.query_one("#queue-list", ListView)
         if list_view.highlighted_child is not None:
             queue_item = list_view.highlighted_child.queue_item
-            self.queue.move(queue_item.id, "down")
-            self._refresh_queue_list()
-            self.pipeline.wake()
+            if self.queue.move(queue_item.id, "down"):
+                self._refresh_queue_list()
+                self.pipeline.wake()
 
     def _refresh_loop_indicator(self) -> None:
         text = " CODA ⟳" if self.loop_mode else " CODA"

@@ -262,7 +262,21 @@ class PipelineWorker:
     async def run_prepare(self) -> None:
         while True:
             self._prepare_cancel.clear()
-            item = self.queue.first_queued_after_cursor()
+            # Prioritise an explicitly-requested item (set via _next_item_id)
+            # so it gets prepared even if it sits before the cursor.
+            item = None
+            if self._next_item_id:
+                item = next(
+                    (i for i in self.queue.items if i.id == self._next_item_id and i.status == "queued"),
+                    None,
+                )
+            if item is None:
+                item = self.queue.first_queued_after_cursor()
+            # Fallback: after a loop-wrap, the next candidate may be before the
+            # cursor (e.g. items[0] after all items are done). first_queued()
+            # finds it while first_queued_after_cursor() would not.
+            if item is None:
+                item = self.queue.first_queued()
             if item is None:
                 self._prepare_wake.clear()
                 await self._prepare_wake.wait()
@@ -277,17 +291,21 @@ class PipelineWorker:
             if self._cast_enabled:
                 if self._next_item_id:
                     nid = self._next_item_id
-                    self._next_item_id = None
                     item = next(
                         (i for i in self.queue.items if i.id == nid and i.status == "ready"),
                         None,
                     )
+                    if item is not None:
+                        self._next_item_id = None  # consume only when actually used
                 if item is None:
                     candidate = self.queue.advance_cursor(loop=self.loop_mode)
                     if candidate is not None:
                         self.queue.prepare_for_play(candidate)
                         if candidate.status == "ready":
                             item = candidate
+                        elif candidate.status == "queued":
+                            # Cache miss: wake prepare loop so it encodes the item.
+                            self.wake_prepare()
             if item is None:
                 self._cast_wake.clear()
                 await self._cast_wake.wait()
