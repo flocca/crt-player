@@ -77,15 +77,44 @@ async def download_video(
 
 def _build_video_filter(crop_detect: str | None = None) -> str:
     w, h = 768, 576
-    # Output 16:9 so Chromecast doesn't add pillarboxing
-    out_w = w * 16 // 12  # 1024 for 768 base
+    out_w = w * 16 // 12  # 1024
     prefix = f"{crop_detect}," if crop_detect else ""
+
+    top = config.MARGIN_TOP
+    bottom = config.MARGIN_BOTTOM
+    left = config.MARGIN_LEFT
+    right = config.MARGIN_RIGHT
+    has_margins = any((top, bottom, left, right))
+
+    if not has_margins:
+        # Back-compat fast path: keep filter byte-identical to the pre-margin
+        # version so cached encoded files stay valid.
+        if config.SCALE_MODE == "crop":
+            return (
+                f"{prefix}scale={w}:{h}:force_original_aspect_ratio=increase,"
+                f"crop={w}:{h},scale={out_w}:{h},setsar=1:1"
+            )
+        return (
+            f"{prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,"
+            f"pad={w}:{h}:({w}-iw)/2:({h}-ih)/2,"
+            f"scale={out_w}:{h},setsar=1:1"
+        )
+
+    inner_w = w - left - right
+    inner_h = h - top - bottom
     if config.SCALE_MODE == "crop":
-        # Scale to cover 4:3, crop to 4:3, then stretch to 16:9
-        # HW will squeeze 16:9 → 4:3 restoring correct proportions
-        return f"{prefix}scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},scale={out_w}:{h},setsar=1:1"
-    # Pad: fit inside 4:3 with letterbox, then stretch to 16:9
-    return f"{prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:({w}-iw)/2:({h}-ih)/2,scale={out_w}:{h},setsar=1:1"
+        return (
+            f"{prefix}scale={inner_w}:{inner_h}:force_original_aspect_ratio=increase,"
+            f"crop={inner_w}:{inner_h},"
+            f"pad={w}:{h}:{left}:{top}:color=black,"
+            f"scale={out_w}:{h},setsar=1:1"
+        )
+    return (
+        f"{prefix}scale={inner_w}:{inner_h}:force_original_aspect_ratio=decrease,"
+        f"pad={inner_w}:{inner_h}:({inner_w}-iw)/2:({inner_h}-ih)/2,"
+        f"pad={w}:{h}:{left}:{top}:color=black,"
+        f"scale={out_w}:{h},setsar=1:1"
+    )
 
 
 async def _get_duration(path: str) -> float:
