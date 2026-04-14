@@ -65,7 +65,7 @@ def test_calibration_filter_includes_centered_square():
     assert "w=192:h=192" in fc
 
 
-def test_calibration_filter_overlays_current_margin_values():
+def test_calibration_filter_margin_bars_encode_pixel_values():
     _reset_margins(top=7, bottom=11, left=3, right=4)
     fc = build_calibration_filter()
     # Margin values are encoded in the pad step and in the margin indicator

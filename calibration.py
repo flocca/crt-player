@@ -92,20 +92,6 @@ def build_calibration_filter(duration_s: int = 60) -> str:
         f"drawbox=x={inner_w - max(mr, 1)}:y=0:w={max(mr, 1)}:h={inner_h}:color=red@0.7:t=fill",
     ])
 
-    # Margin value annotation: encode T:{mt} B:{mb} L:{ml} R:{mr} as a
-    # uniquely-sized drawbox at the bottom-centre of the inner frame so the
-    # filter string carries the margin values for test assertions and logging.
-    # Width encodes the combined horizontal margin; height encodes vertical.
-    margin_tag_w = ml + mr if (ml + mr) > 0 else 1
-    margin_tag_h = mt + mb if (mt + mb) > 0 else 1
-    margin_annotation = (
-        f"drawbox=x={(inner_w - margin_tag_w) // 2}:y={inner_h - margin_tag_h - 4}"
-        f":w={margin_tag_w}:h={margin_tag_h}"
-        f":color=0xFFFF00@0.9:t=fill"
-        # Embed margin text in a metadata-style comment via the label param:
-        # T:{mt} B:{mb} L:{ml} R:{mr}
-    )
-
     # Final geometry: pad to full frame at the configured offsets, then
     # stretch to 16:9 the same way the main pipeline does.
     pad_and_stretch = (
