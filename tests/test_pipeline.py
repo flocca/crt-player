@@ -18,6 +18,7 @@ def _restore_config():
     orig_left = config_module.MARGIN_LEFT
     orig_right = config_module.MARGIN_RIGHT
     orig_auto_crop = config_module.AUTO_CROP
+    orig_loop = config_module.LOOP_MODE_DEFAULT
     yield
     config_module.SCALE_MODE = orig_scale
     config_module.MARGIN_TOP = orig_top
@@ -25,6 +26,7 @@ def _restore_config():
     config_module.MARGIN_LEFT = orig_left
     config_module.MARGIN_RIGHT = orig_right
     config_module.AUTO_CROP = orig_auto_crop
+    config_module.LOOP_MODE_DEFAULT = orig_loop
 
 
 @pytest.mark.asyncio
@@ -219,3 +221,18 @@ async def test_detect_crop_runs_ffmpeg_when_auto_crop_enabled():
     with patch("pipeline.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         await _detect_crop("/tmp/anything.mp4")
     mock_exec.assert_called_once()
+
+
+def test_pipeline_worker_loop_mode_defaults_to_false():
+    from pipeline import PipelineWorker
+    from unittest.mock import MagicMock
+    worker = PipelineWorker(MagicMock(), MagicMock())
+    assert worker.loop_mode is False
+
+
+def test_pipeline_worker_loop_mode_reads_from_config(monkeypatch):
+    monkeypatch.setattr(config_module, "LOOP_MODE_DEFAULT", True)
+    from pipeline import PipelineWorker
+    from unittest.mock import MagicMock
+    worker = PipelineWorker(MagicMock(), MagicMock())
+    assert worker.loop_mode is True

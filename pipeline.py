@@ -228,6 +228,7 @@ class PipelineWorker:
         self._on_update: Callable | None = None
         self.resume_position: float = 0.0
         self._cast_enabled: bool = False  # True once user explicitly starts playback
+        self.loop_mode: bool = config.LOOP_MODE_DEFAULT
         self._next_item_id: str | None = None  # Specific item to cast next (no reorder)
 
     def set_update_callback(self, callback: Callable) -> None:
@@ -261,7 +262,7 @@ class PipelineWorker:
     async def run_prepare(self) -> None:
         while True:
             self._prepare_cancel.clear()
-            item = self.queue.first_queued()
+            item = self.queue.first_queued_after_cursor()
             if item is None:
                 self._prepare_wake.clear()
                 await self._prepare_wake.wait()
@@ -282,7 +283,11 @@ class PipelineWorker:
                         None,
                     )
                 if item is None:
-                    item = self.queue.next_ready()
+                    candidate = self.queue.advance_cursor(loop=self.loop_mode)
+                    if candidate is not None:
+                        self.queue.prepare_for_play(candidate)
+                        if candidate.status == "ready":
+                            item = candidate
             if item is None:
                 self._cast_wake.clear()
                 await self._cast_wake.wait()

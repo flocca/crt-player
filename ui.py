@@ -443,17 +443,9 @@ class CRTCastApp(App):
         if not isinstance(event.item, QueueListItem):
             return
         target = event.item.queue_item
-        if target.status not in ("queued", "ready", "done"):
+        if target.status not in ("queued", "ready", "done", "error"):
             return
-        # Restore a "done" item to its playable state before proceeding.
-        if target.status == "done":
-            if target.filename and os.path.isfile(
-                os.path.join(config.TEMP_DIR, target.filename)
-            ):
-                target.status = "ready"
-            else:
-                target.status = "queued"
-                target.filename = None
+        self.queue.prepare_for_play(target)
         # Only interrupt actual playback; leave downloading/encoding untouched.
         # playback_position is already kept current by _poll_playback_async.
         # Must search directly — active_item() could return target itself (now "ready")
