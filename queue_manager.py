@@ -178,6 +178,40 @@ class QueueManager:
                 return item
         return None
 
+    def first_queued_after_cursor(self) -> QueueItem | None:
+        """First 'queued' item after the cursor position.
+
+        Cursor = first playing item, or last done item. If no cursor,
+        searches from the beginning (equivalent to first_queued()).
+        Used by the prepare loop so prefetch targets only items ahead of
+        the current playback position.
+        """
+        cursor_idx: int | None = None
+        last_done_idx: int | None = None
+
+        for i, item in enumerate(self.items):
+            if item.status == "playing":
+                cursor_idx = i
+                break
+            if item.status == "done":
+                last_done_idx = i
+
+        if cursor_idx is None:
+            cursor_idx = last_done_idx
+
+        start = (cursor_idx + 1) if cursor_idx is not None else 0
+        for item in self.items[start:]:
+            if item.status == "queued":
+                return item
+        return None
+
+    def first_ready(self) -> QueueItem | None:
+        """First item with status 'ready', for display purposes."""
+        for item in self.items:
+            if item.status == "ready":
+                return item
+        return None
+
     def next_ready(self) -> QueueItem | None:
         """First 'ready' item that can be cast now.
 

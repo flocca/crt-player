@@ -346,3 +346,64 @@ def test_prepare_for_play_encoding_is_unchanged():
     item.status = "encoding"
     qm.prepare_for_play(item)
     assert item.status == "encoding"
+
+
+def test_first_queued_after_cursor_no_cursor_returns_first_queued():
+    """Without a cursor, behaves like the old first_queued()."""
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    qm.add("https://youtube.com/watch?v=2")
+    assert qm.first_queued_after_cursor() is item1
+
+
+def test_first_queued_after_cursor_skips_items_before_playing():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")  # queued — before cursor
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "playing"  # cursor
+    item3 = qm.add("https://youtube.com/watch?v=3")  # queued — after cursor
+    assert qm.first_queued_after_cursor() is item3
+
+
+def test_first_queued_after_cursor_skips_items_before_last_done():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")  # queued — before cursor
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "done"  # cursor (last done)
+    item3 = qm.add("https://youtube.com/watch?v=3")  # queued — after cursor
+    assert qm.first_queued_after_cursor() is item3
+
+
+def test_first_queued_after_cursor_returns_none_when_nothing_after():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "playing"
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "ready"  # not queued
+    assert qm.first_queued_after_cursor() is None
+
+
+def test_first_queued_after_cursor_uses_last_done_of_multiple():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "done"
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "done"  # this is the last done
+    item3 = qm.add("https://youtube.com/watch?v=3")  # queued
+    assert qm.first_queued_after_cursor() is item3
+
+
+def test_first_ready_returns_first_ready_item():
+    qm = QueueManager()
+    qm.add("https://youtube.com/watch?v=1")  # queued
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "ready"
+    item3 = qm.add("https://youtube.com/watch?v=3")
+    item3.status = "ready"
+    assert qm.first_ready() is item2
+
+
+def test_first_ready_returns_none_when_no_ready():
+    qm = QueueManager()
+    qm.add("https://youtube.com/watch?v=1")
+    assert qm.first_ready() is None
