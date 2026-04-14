@@ -6,3 +6,4 @@ __pycache__/
 .env
 crt_cast.log
 state.json
+.worktrees/
