@@ -87,7 +87,61 @@ async def get_video_info(path: str) -> dict:
 async def test_integration_single_video_plays(
     integration_config, integration_app, real_queue, real_chromecast_per_test
 ):
-    pass  # implemented in Task 4
+    import config
+    url = integration_config["video_url_1"]
+
+    async with integration_app.run_test(size=(120, 40)) as pilot:
+        # Type URL into the TUI input field and submit
+        await pilot.click("#url-input")
+        await pilot.pause()
+        integration_app.query_one("#url-input", Input).value = url
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(real_queue.items) == 1, "URL was not added to the queue"
+
+        # Pipeline transitions: queued → downloading
+        await wait_for_condition(
+            pilot,
+            lambda: real_queue.items[0].status == "downloading",
+            timeout_s=60,
+            description="status=downloading",
+        )
+
+        # downloading → encoding → ready
+        await wait_for_condition(
+            pilot,
+            lambda: real_queue.items[0].status == "ready",
+            timeout_s=300,
+            description="status=ready (encode complete)",
+        )
+
+        # Chromecast receives the cast and starts playing
+        await wait_for_condition(
+            pilot,
+            lambda: real_chromecast_per_test.player_state == "PLAYING",
+            timeout_s=60,
+            description="chromecast player_state=PLAYING",
+        )
+
+        # TUI assertions
+        np = integration_app.query_one("#now-playing", NowPlayingWidget)
+        assert np.title, "NowPlayingWidget.title should be non-empty while playing"
+        playback_row = integration_app.query_one("#playback-row")
+        assert playback_row.display is True, "#playback-row should be visible during playback"
+
+        # Encoding quality assertions (ffprobe)
+        item = real_queue.items[0]
+        assert item.filename, "item.filename should be set after encode"
+        encoded_path = f"{config.TEMP_DIR}/{item.filename}"
+        info = await get_video_info(encoded_path)
+        assert info.get("width") == 1024, f"Expected width=1024, got {info.get('width')}"
+        assert info.get("height") == 576, f"Expected height=576, got {info.get('height')}"
+        assert abs(info.get("fps", 0) - 25.0) < 0.5, (
+            f"Expected fps≈25, got {info.get('fps')}"
+        )
+        assert info.get("codec") == "h264", f"Expected codec=h264, got {info.get('codec')}"
 
 
 @pytest.mark.integration
