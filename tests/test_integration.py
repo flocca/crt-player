@@ -172,14 +172,16 @@ async def test_integration_playback_completes(
 
         assert len(real_queue.items) == 1
 
-        # Pipeline started — fetch_title() does a network request; allow extra time
-        # in case YouTube rate-limits back-to-back requests from the test session.
+        # Pipeline started — fetch_title() always runs first (before the encode cache
+        # check), so even a cache hit requires a YouTube network round-trip. Use
+        # encode_wait_s here: if YouTube rate-limits us back-to-back we need the
+        # same headroom as a full encode would take.
         await wait_for_condition(
             pilot,
             lambda: real_queue.items[0].status in (
                 "downloading", "encoding", "ready", "casting", "playing"
             ),
-            timeout_s=180,
+            timeout_s=encode_wait_s,
             description="pipeline started",
         )
 
