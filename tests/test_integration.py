@@ -35,7 +35,7 @@ async def wait_for_condition(
     pilot.pause(n) cedes control to Textual's asyncio loop for n seconds,
     keeping pipeline tasks and callbacks alive while we wait for external state.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
     while loop.time() < deadline:
         await pilot.pause(poll_interval)
