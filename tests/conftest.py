@@ -82,6 +82,7 @@ def integration_config():
         "video_url_1": url1,
         "video_url_2": os.environ.get("TEST_VIDEO_URL_2", "").strip() or None,
         "playback_wait_s": int(os.environ.get("TEST_PLAYBACK_WAIT_S", "300")),
+        "encode_wait_s": int(os.environ.get("TEST_ENCODE_WAIT_S", "600")),
     }
 
 

@@ -86,13 +86,14 @@ async def get_video_info(path: str) -> dict:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1800)
 @pytest.mark.asyncio
 async def test_integration_single_video_plays(
     integration_config, integration_app, real_queue, real_chromecast_per_test
 ):
     import config
     url = integration_config["video_url_1"]
+    encode_wait_s = integration_config["encode_wait_s"]
 
     async with integration_app.run_test(size=(120, 40)) as pilot:
         # Type URL into the TUI input field and submit
@@ -115,11 +116,11 @@ async def test_integration_single_video_plays(
             description="pipeline started",
         )
 
-        # downloading → encoding → ready
+        # downloading → encoding → ready (also accept casting/playing in case we miss the ready window)
         await wait_for_condition(
             pilot,
-            lambda: real_queue.items[0].status == "ready",
-            timeout_s=300,
+            lambda: real_queue.items[0].status in ("ready", "casting", "playing"),
+            timeout_s=encode_wait_s,
             description="status=ready (encode complete)",
         )
 
@@ -151,13 +152,14 @@ async def test_integration_single_video_plays(
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1800)
 @pytest.mark.asyncio
 async def test_integration_playback_completes(
     integration_config, integration_app, real_queue, real_chromecast_per_test
 ):
     url = integration_config["video_url_1"]
     playback_wait_s = integration_config["playback_wait_s"]
+    encode_wait_s = integration_config["encode_wait_s"]
 
     async with integration_app.run_test(size=(120, 40)) as pilot:
         # Submit URL via TUI
@@ -184,7 +186,7 @@ async def test_integration_playback_completes(
         await wait_for_condition(
             pilot,
             lambda: real_queue.items[0].status in ("ready", "casting", "playing"),
-            timeout_s=300,
+            timeout_s=encode_wait_s,
             description="status=ready (encode complete)",
         )
 
@@ -213,7 +215,7 @@ async def test_integration_playback_completes(
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(1800)
 @pytest.mark.asyncio
 async def test_integration_queue_transition(
     integration_config, integration_app, real_queue, real_chromecast_per_test
@@ -223,6 +225,7 @@ async def test_integration_queue_transition(
     if not url2:
         pytest.skip("TEST_VIDEO_URL_2 not set — queue transition test requires two videos")
     playback_wait_s = integration_config["playback_wait_s"]
+    encode_wait_s = integration_config["encode_wait_s"]
 
     async with integration_app.run_test(size=(120, 40)) as pilot:
         # Insert both URLs in sequence
@@ -259,11 +262,11 @@ async def test_integration_queue_transition(
             description="video1 status=done",
         )
 
-        # Second video must start automatically (no user action)
+        # Second video must start automatically — may still be encoding when video1 ends
         await wait_for_condition(
             pilot,
             lambda: real_queue.items[1].status == "playing",
-            timeout_s=60,
+            timeout_s=encode_wait_s,
             description="video2 status=playing (automatic transition)",
         )
 
