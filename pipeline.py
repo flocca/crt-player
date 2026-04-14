@@ -117,23 +117,6 @@ def _build_video_filter(crop_detect: str | None = None) -> str:
     )
 
 
-def _cached_encoded_filename(video_id_or_base: str) -> str:
-    """Return the cached encoded filename for a given video_id or source base.
-
-    When all margins are zero the legacy name `{id}_pal_{mode}.mp4` is kept
-    so previously encoded files remain valid.
-    """
-    mode = config.SCALE_MODE
-    margins = (
-        config.MARGIN_TOP, config.MARGIN_BOTTOM,
-        config.MARGIN_LEFT, config.MARGIN_RIGHT,
-    )
-    if any(margins):
-        suffix = f"_m{margins[0]}-{margins[1]}-{margins[2]}-{margins[3]}"
-    else:
-        suffix = ""
-    return f"{video_id_or_base}_pal_{mode}{suffix}.mp4"
-
 
 async def _get_duration(path: str) -> float:
     """Return duration in seconds using ffprobe."""
@@ -311,7 +294,7 @@ class PipelineWorker:
             self.notify()
 
             # Check for cached encoded file
-            cached_encoded = os.path.join(config.TEMP_DIR, _cached_encoded_filename(video_id))
+            cached_encoded = os.path.join(config.TEMP_DIR, config.cached_encoded_filename(video_id))
             if video_id and os.path.isfile(cached_encoded):
                 log.info("Using cached encoded file: %s", cached_encoded)
                 item.filename = os.path.basename(cached_encoded)
@@ -351,7 +334,7 @@ class PipelineWorker:
             self.notify()
 
             base = os.path.splitext(os.path.basename(downloaded_path))[0]
-            encoded_path = os.path.join(config.TEMP_DIR, _cached_encoded_filename(base))
+            encoded_path = os.path.join(config.TEMP_DIR, config.cached_encoded_filename(base))
 
             def enc_progress(pct: float) -> None:
                 item.progress = pct

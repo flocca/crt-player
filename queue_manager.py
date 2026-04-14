@@ -190,7 +190,7 @@ class QueueManager:
                 # Clean up partial encoded output so the cache check won't reuse it
                 if item.downloaded_path:
                     base = os.path.splitext(os.path.basename(item.downloaded_path))[0]
-                    partial = os.path.join(config.TEMP_DIR, f"{base}_pal_{config.SCALE_MODE}.mp4")
+                    partial = os.path.join(config.TEMP_DIR, config.cached_encoded_filename(base))
                     if os.path.isfile(partial):
                         try:
                             os.unlink(partial)

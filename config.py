@@ -66,3 +66,17 @@ if any((MARGIN_TOP, MARGIN_BOTTOM, MARGIN_LEFT, MARGIN_RIGHT)):
         "CRT margins active: top=%d bottom=%d left=%d right=%d",
         MARGIN_TOP, MARGIN_BOTTOM, MARGIN_LEFT, MARGIN_RIGHT,
     )
+
+
+def cached_encoded_filename(video_id_or_base: str) -> str:
+    """Return the cached encoded filename for a given video_id or source base.
+
+    When all margins are zero the legacy name `{id}_pal_{mode}.mp4` is kept
+    so previously encoded files remain valid.
+    """
+    margins = (MARGIN_TOP, MARGIN_BOTTOM, MARGIN_LEFT, MARGIN_RIGHT)
+    if any(margins):
+        suffix = f"_m{margins[0]}-{margins[1]}-{margins[2]}-{margins[3]}"
+    else:
+        suffix = ""
+    return f"{video_id_or_base}_pal_{SCALE_MODE}{suffix}.mp4"
