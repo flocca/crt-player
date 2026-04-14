@@ -490,7 +490,7 @@ class CRTCastApp(App):
             direction, _, item_id = btn_id.partition("-")
             if self.queue.move(item_id, direction):
                 self._refresh_queue_list()
-                self.pipeline.wake()
+                self.pipeline.wake_prepare()
             event.stop()
             return
         # Playback control buttons
@@ -572,7 +572,7 @@ class CRTCastApp(App):
             queue_item = list_view.highlighted_child.queue_item
             if self.queue.move(queue_item.id, "up"):
                 self._refresh_queue_list()
-                self.pipeline.wake()
+                self.pipeline.wake_prepare()
 
     def action_move_down(self) -> None:
         list_view = self.query_one("#queue-list", ListView)
@@ -580,7 +580,7 @@ class CRTCastApp(App):
             queue_item = list_view.highlighted_child.queue_item
             if self.queue.move(queue_item.id, "down"):
                 self._refresh_queue_list()
-                self.pipeline.wake()
+                self.pipeline.wake_prepare()
 
     def _refresh_loop_indicator(self) -> None:
         text = " CODA ⟳" if self.loop_mode else " CODA"

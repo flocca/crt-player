@@ -297,7 +297,10 @@ class PipelineWorker:
                     )
                     if item is not None:
                         self._next_item_id = None  # consume only when actually used
-                if item is None:
+                # Only advance cursor when no explicit selection is pending.
+                # If _next_item_id is set but item isn't ready yet, we wait
+                # for the prepare loop to finish encoding it.
+                if item is None and not self._next_item_id:
                     candidate = self.queue.advance_cursor(loop=self.loop_mode)
                     if candidate is not None:
                         self.queue.prepare_for_play(candidate)
