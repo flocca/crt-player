@@ -41,7 +41,7 @@ def _clamp_axis_pair(a: int, b: int, max_sum: int) -> tuple[int, int]:
     if a + b <= max_sum:
         return a, b
     factor = max_sum / (a + b)
-    return int(a * factor), int(b * factor)
+    return round(a * factor), round(b * factor)
 
 
 _ct, _cb = _clamp_axis_pair(MARGIN_TOP, MARGIN_BOTTOM, _MAX_V_SUM)
