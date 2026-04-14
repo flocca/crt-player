@@ -121,9 +121,14 @@ class QueueManager:
         return None
 
     def next_ready(self) -> QueueItem | None:
-        """First 'ready' item that can be cast now (no unfinished items before it)."""
+        """First 'ready' item that can be cast now.
+
+        Encoding items are skipped — they don't block casting a manually
+        selected ready item that was moved ahead of them.
+        Queued/downloading items do block (they haven't been prepared yet).
+        """
         for item in self.items:
-            if item.status in ("queued", "downloading", "encoding"):
+            if item.status in ("queued", "downloading"):
                 return None
             if item.status == "ready":
                 return item
@@ -209,6 +214,12 @@ class QueueManager:
                 else:
                     item.status = "queued"
                     item.filename = None
+                item.progress = 0.0
+            elif item.status == "done":
+                if item.filename and os.path.isfile(
+                    os.path.join(config.TEMP_DIR, item.filename)
+                ):
+                    item.status = "ready"
                 item.progress = 0.0
             self.items.append(item)
 

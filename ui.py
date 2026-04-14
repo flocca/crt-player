@@ -52,13 +52,29 @@ class NowPlayingWidget(Static):
         return f'  "{title}"'
 
 
+class QueueListView(ListView):
+    """ListView that highlights on click but does not select (Enter selects)."""
+
+    _from_mouse: bool = False
+
+    def _on_list_item__child_clicked(self, event: ListItem._ChildClicked) -> None:
+        self._from_mouse = True
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if self._from_mouse:
+            self._from_mouse = False
+            event.stop()
+            return
+        # Keyboard-triggered: let the event bubble to the App.
+
+
 class QueueListItem(ListItem):
     def __init__(self, item: QueueItem, index: int) -> None:
         super().__init__()
         self.queue_item = item
         self.index = index
 
-    def compose(self) -> ComposeResult:
+    def _build_label(self) -> str:
         title = self.queue_item.title or self.queue_item.url
         status = self.queue_item.status
         if status in ("casting", "playing"):
@@ -82,7 +98,13 @@ class QueueListItem(ListItem):
             suffix = f"  [yellow]{bar} {label} {pct:.0f}%[/yellow]"
         else:
             suffix = ""
-        yield Label(f"  {prefix} {self.index + 1}. {title}{suffix}")
+        return f"  {prefix} {self.index + 1}. {title}{suffix}"
+
+    def compose(self) -> ComposeResult:
+        yield Label(self._build_label())
+
+    def refresh_label(self) -> None:
+        self.query_one(Label).update(self._build_label())
 
 
 class CRTCastApp(App):
@@ -149,6 +171,7 @@ class CRTCastApp(App):
     """
 
     BINDINGS = [
+        Binding("enter", "play_selected", "Riproduci", show=True),
         Binding("ctrl+s", "stop", "Stop", show=True, priority=True),
         Binding("ctrl+p", "pause", "Pause", show=True, priority=True),
         Binding("ctrl+left", "seek_back", "↺15s", show=True, priority=True),
@@ -157,10 +180,10 @@ class CRTCastApp(App):
         Binding("ctrl+b", "prev_video", "Prev", show=True, priority=True),
         Binding("plus,equal", "volume_up", "Vol+", show=True, priority=True),
         Binding("minus", "volume_down", "Vol-", show=True, priority=True),
-        Binding("backspace", "remove_item", "Remove", show=True),
-        Binding("ctrl+k", "move_up", "Up", show=True, priority=True),
-        Binding("ctrl+j", "move_down", "Down", show=True, priority=True),
-        Binding("escape", "quit", "Quit", show=True, priority=True),
+        Binding("backspace", "remove_item", "Rimuovi", show=True),
+        Binding("ctrl+k", "move_up", "Su", show=True, priority=True),
+        Binding("ctrl+j", "move_down", "Giù", show=True, priority=True),
+        Binding("escape", "quit", "Esci", show=True, priority=True),
     ]
 
     def __init__(
@@ -176,14 +199,6 @@ class CRTCastApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Horizontal(id="input-row"):
-            yield Input(placeholder="YouTube URL...", id="url-input")
-            yield Select(
-                [("Accoda", "queue"), ("Prossimo", "next"), ("Subito", "now")],
-                value="queue",
-                id="mode-select",
-                allow_blank=False,
-            )
         yield Static(" IN RIPRODUZIONE", id="now-playing-header")
         with Vertical(id="now-playing-section"):
             yield NowPlayingWidget(id="now-playing")
@@ -195,8 +210,41 @@ class CRTCastApp(App):
                 yield Button("30↻", id="btn-fwd")
                 yield Button("⏭", id="btn-next", disabled=True)
         yield Static(" CODA", id="queue-header")
-        yield ListView(id="queue-list")
+        yield QueueListView(id="queue-list")
+        with Horizontal(id="input-row"):
+            yield Input(placeholder="YouTube URL...", id="url-input")
+            yield Select(
+                [("Accoda", "queue"), ("Prossimo", "next"), ("Subito", "now")],
+                value="queue",
+                id="mode-select",
+                allow_blank=False,
+            )
         yield Footer()
+
+    def _highlighted_status(self) -> str | None:
+        """Status of the currently highlighted queue item, or None."""
+        lv = self.query_one("#queue-list", ListView)
+        if isinstance(lv.highlighted_child, QueueListItem):
+            return lv.highlighted_child.queue_item.status
+        return None
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        playing = bool(self.queue.active_item() and self.queue.active_item().status in ("casting", "playing"))
+        sel = self._highlighted_status()
+        has_sel = sel is not None
+        if action == "play_selected":
+            return True if sel in ("queued", "ready", "done") else False
+        if action in ("stop", "pause", "seek_back", "seek_forward", "next_video", "prev_video"):
+            return True if playing else False
+        if action in ("remove_item", "move_up", "move_down"):
+            return True if has_sel else False
+        return True
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        self.refresh_bindings()
+
+    def action_play_selected(self) -> None:
+        """No-op: real logic lives in on_list_view_selected (fired by Enter on QueueListView)."""
 
     def on_mount(self) -> None:
         self.title = "CRT Cast"
@@ -209,9 +257,15 @@ class CRTCastApp(App):
         asyncio.create_task(self.pipeline.run_cast())
         self.set_interval(1, self._poll_playback)
         self.set_interval(60, self._auto_save)
-        if self.queue.next_pending():
-            self.pipeline.wake()
+        if self.queue.items:
             self._refresh_all()
+            list_view = self.query_one("#queue-list", ListView)
+            list_view.focus()
+            list_view.index = 0
+            if self.queue.next_pending():
+                self.pipeline.wake_prepare()
+        else:
+            self.query_one("#url-input", Input).focus()
 
     def _on_chromecast_connection(self) -> None:
         self._safe_call(self._update_connection)
@@ -243,6 +297,9 @@ class CRTCastApp(App):
 
     async def _poll_playback_async(self) -> None:
         await asyncio.to_thread(self.chromecast.poll_status)
+        active = self.queue.active_item()
+        if active and active.status == "playing":
+            active.playback_position = self.chromecast.current_time
         self._update_playback()
 
     def _update_playback(self) -> None:
@@ -273,9 +330,10 @@ class CRTCastApp(App):
                 break
 
         active = self.queue.active_item()
+        playing_item = active if active and active.status in ("casting", "playing") else None
         widget = self.query_one("#now-playing", NowPlayingWidget)
-        show = active or error_item
-        is_playing = bool(active and active.status == "playing")
+        show = playing_item or error_item
+        is_playing = bool(playing_item and playing_item.status == "playing")
 
         if show:
             widget.title = show.title or show.url
@@ -296,9 +354,26 @@ class CRTCastApp(App):
 
     def _refresh_queue_list(self) -> None:
         list_view = self.query_one("#queue-list", ListView)
+        existing = list(list_view.query(QueueListItem))
+        queue_ids = [item.id for item in self.queue.items]
+        existing_ids = [li.queue_item.id for li in existing]
+
+        if queue_ids == existing_ids:
+            for i, (li, item) in enumerate(zip(existing, self.queue.items)):
+                li.queue_item = item
+                li.index = i
+                li.refresh_label()
+            return
+
+        prev_index = list_view.index
+        had_focus = list_view.has_focus
         list_view.clear()
         for i, item in enumerate(self.queue.items):
             list_view.append(QueueListItem(item, i))
+        if self.queue.items:
+            list_view.index = min(prev_index or 0, len(self.queue.items) - 1)
+        if had_focus:
+            list_view.focus()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         url = event.value.strip()
@@ -333,12 +408,21 @@ class CRTCastApp(App):
         if not isinstance(event.item, QueueListItem):
             return
         target = event.item.queue_item
-        if target.status not in ("queued", "ready"):
+        if target.status not in ("queued", "ready", "done"):
             return
+        # Restore a "done" item to its playable state before proceeding.
+        if target.status == "done":
+            if target.filename and os.path.isfile(
+                os.path.join(config.TEMP_DIR, target.filename)
+            ):
+                target.status = "ready"
+            else:
+                target.status = "queued"
+                target.filename = None
+        # Only interrupt actual playback; leave downloading/encoding untouched.
+        # playback_position is already kept current by _poll_playback_async.
         active = self.queue.active_item()
-        if active:
-            if active.status == "playing":
-                active.playback_position = self.chromecast.current_time
+        if active and active.status == "playing":
             active.status = "done"
         self.pipeline.resume_position = target.playback_position
         self.pipeline.cancel_cast()

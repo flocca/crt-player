@@ -196,6 +196,7 @@ class PipelineWorker:
         self._current_proc: asyncio.subprocess.Process | None = None
         self._on_update: Callable | None = None
         self.resume_position: float = 0.0
+        self._cast_enabled: bool = False  # True once user explicitly starts playback
 
     def set_update_callback(self, callback: Callable) -> None:
         self._on_update = callback
@@ -217,8 +218,13 @@ class PipelineWorker:
         self.cancel_cast()
 
     def wake(self) -> None:
+        self._cast_enabled = True
         self._prepare_wake.set()
         self._cast_wake.set()
+
+    def wake_prepare(self) -> None:
+        """Wake only the prepare loop, leaving the cast loop idle."""
+        self._prepare_wake.set()
 
     async def run_prepare(self) -> None:
         while True:
@@ -234,7 +240,7 @@ class PipelineWorker:
     async def run_cast(self) -> None:
         while True:
             self._cast_cancel.clear()
-            item = self.queue.next_ready()
+            item = self.queue.next_ready() if self._cast_enabled else None
             if item is None:
                 self._cast_wake.clear()
                 await self._cast_wake.wait()

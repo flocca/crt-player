@@ -1,7 +1,7 @@
 import pytest
 from textual.widgets import Button, Input, ListView, Select
 
-from ui import CRTCastApp, NowPlayingWidget, QueueListItem
+from ui import CRTCastApp, NowPlayingWidget, QueueListItem, QueueListView
 
 
 # --- Compose & mount ---
@@ -106,8 +106,12 @@ async def test_pause_button(app, queue, mock_chromecast):
 
 
 @pytest.mark.asyncio
-async def test_keybinding_seek_forward(app, mock_chromecast):
+async def test_keybinding_seek_forward(app, queue, mock_chromecast):
+    item = queue.add("https://youtube.com/watch?v=1")
+    item.status = "playing"
     async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
         await pilot.press("ctrl+right")
         await pilot.pause()
         mock_chromecast.seek.assert_called_once_with(30)
@@ -122,6 +126,75 @@ async def test_keybinding_volume_up(app, mock_chromecast):
 
 
 # --- Queue manipulation ---
+
+
+# --- List click vs Enter ---
+
+
+@pytest.mark.asyncio
+async def test_click_item_selects_only_no_play(app, queue, mock_pipeline):
+    """Clicking a queued item must highlight it but NOT start playback."""
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "Video 1"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Video 2"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        mock_pipeline.wake.reset_mock()
+        # Click the second item
+        list_view = app.query_one("#queue-list", QueueListView)
+        second_item = list(app.query(QueueListItem))[1]
+        await pilot.click(second_item)
+        await pilot.pause()
+        # Index moves but pipeline is NOT woken (no play triggered)
+        assert list_view.index == 1
+        mock_pipeline.wake.assert_not_called()
+        # Queue order unchanged
+        assert queue.items[0].title == "Video 1"
+
+
+@pytest.mark.asyncio
+async def test_enter_on_ready_item_starts_play(app, queue, mock_pipeline):
+    """Pressing Enter on a ready item must move it to front and wake the pipeline."""
+    item1 = queue.add("https://youtube.com/watch?v=1")
+    item1.title = "Playing"
+    item1.status = "playing"
+    item2 = queue.add("https://youtube.com/watch?v=2")
+    item2.title = "Ready"
+    item2.status = "ready"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        list_view = app.query_one("#queue-list", QueueListView)
+        list_view.focus()
+        list_view.index = 1
+        await pilot.pause()
+        mock_pipeline.wake.reset_mock()
+        await pilot.press("enter")
+        await pilot.pause()
+        # Pipeline woken and ready item moved to front
+        mock_pipeline.wake.assert_called_once()
+        assert queue.items[0].title == "Ready"
+
+
+@pytest.mark.asyncio
+async def test_enter_on_playing_item_does_nothing(app, queue, mock_pipeline):
+    """Pressing Enter on an already-playing item must not trigger any action."""
+    item = queue.add("https://youtube.com/watch?v=1")
+    item.title = "Playing"
+    item.status = "playing"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        list_view = app.query_one("#queue-list", QueueListView)
+        list_view.focus()
+        list_view.index = 0
+        await pilot.pause()
+        mock_pipeline.wake.reset_mock()
+        await pilot.press("enter")
+        await pilot.pause()
+        mock_pipeline.wake.assert_not_called()
 
 
 @pytest.mark.asyncio
