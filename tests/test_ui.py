@@ -274,3 +274,44 @@ async def test_remove_item(app, queue):
         await pilot.pause()
         assert len(queue.items) == 1
         assert queue.items[0].title == "Keep"
+
+
+# --- Calibration pattern ---
+
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+
+@pytest.mark.asyncio
+async def test_ctrl_t_triggers_calibration(app, mock_chromecast):
+    """Pressing ctrl+t should generate and cast the calibration pattern."""
+    mock_chromecast.connected = True
+    mock_chromecast.wait_for_connection = AsyncMock()
+    mock_chromecast.cast_url = MagicMock()
+
+    with patch("ui.calibration.generate_calibration_clip", new=AsyncMock()) as gen, \
+         patch("ui.get_local_ip", return_value="127.0.0.1"):
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+
+    gen.assert_awaited_once()
+    mock_chromecast.cast_url.assert_called_once()
+    args, _ = mock_chromecast.cast_url.call_args
+    assert args[0].endswith("/media/calibration.mp4")
+
+
+@pytest.mark.asyncio
+async def test_ctrl_t_blocked_while_video_playing(app, queue, mock_chromecast):
+    """If a queue item is casting/playing, ctrl+t should not cast the pattern."""
+    item = queue.add("https://youtube.com/watch?v=abc")
+    item.status = "playing"
+    mock_chromecast.cast_url = MagicMock()
+
+    with patch("ui.calibration.generate_calibration_clip", new=AsyncMock()) as gen:
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+
+    gen.assert_not_awaited()
+    mock_chromecast.cast_url.assert_not_called()
