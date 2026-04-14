@@ -83,10 +83,12 @@ class QueueListView(ListView):
 
 
 class QueueListItem(ListItem):
-    def __init__(self, item: QueueItem, index: int) -> None:
+    def __init__(self, item: QueueItem, index: int, can_up: bool = True, can_down: bool = True) -> None:
         super().__init__()
         self.queue_item = item
         self.index = index
+        self._can_up = can_up
+        self._can_down = can_down
 
     def _build_label(self) -> str:
         title = self.queue_item.title or self.queue_item.url
@@ -115,10 +117,28 @@ class QueueListItem(ListItem):
         return f"  {prefix} {self.index + 1}. {title}{suffix}"
 
     def compose(self) -> ComposeResult:
-        yield Label(self._build_label())
+        with Horizontal(classes="queue-row"):
+            yield Label(self._build_label(), classes="queue-title")
+            with Horizontal(classes="queue-actions"):
+                yield Button(
+                    "↑",
+                    id=f"up-{self.queue_item.id}",
+                    classes="queue-action-btn",
+                    disabled=not self._can_up,
+                )
+                yield Button(
+                    "↓",
+                    id=f"down-{self.queue_item.id}",
+                    classes="queue-action-btn",
+                    disabled=not self._can_down,
+                )
 
     def refresh_label(self) -> None:
-        self.query_one(Label).update(self._build_label())
+        self.query_one(".queue-title", Label).update(self._build_label())
+
+    def update_buttons(self, can_up: bool, can_down: bool) -> None:
+        self.query_one(f"#up-{self.queue_item.id}", Button).disabled = not can_up
+        self.query_one(f"#down-{self.queue_item.id}", Button).disabled = not can_down
 
 
 class CRTCastApp(App):
@@ -181,6 +201,31 @@ class CRTCastApp(App):
         height: 1fr;
         border: solid $accent;
         margin: 1 2;
+    }
+    .queue-row {
+        height: 1;
+    }
+    .queue-title {
+        width: 1fr;
+    }
+    .queue-actions {
+        width: auto;
+        height: 1;
+    }
+    .queue-action-btn {
+        min-width: 3;
+        height: 1;
+        border: none;
+        background: transparent;
+        color: $text;
+        padding: 0;
+        margin: 0 0 0 1;
+    }
+    .queue-action-btn:hover {
+        background: $accent;
+    }
+    .queue-action-btn:disabled {
+        color: $text-disabled;
     }
     """
 

@@ -334,3 +334,22 @@ async def test_ctrl_t_aborts_if_video_starts_during_render(app, queue, mock_chro
             await pilot.pause()
 
     mock_chromecast.cast_url.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_queue_list_item_has_up_down_buttons(app, queue):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        items = list(app.query(QueueListItem))
+        assert len(items) == 2
+        item0_id = queue.items[0].id
+        item1_id = queue.items[1].id
+        items[0].query_one(f"#up-{item0_id}", Button)
+        items[0].query_one(f"#down-{item0_id}", Button)
+        items[1].query_one(f"#up-{item1_id}", Button)
+        items[1].query_one(f"#down-{item1_id}", Button)
