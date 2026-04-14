@@ -443,15 +443,24 @@ class CRTCastApp(App):
                 li.queue_item = item
                 li.index = i
                 li.refresh_label()
+                li.update_buttons(
+                    can_up=self.queue.can_move(item.id, "up"),
+                    can_down=self.queue.can_move(item.id, "down"),
+                )
             return
 
         prev_index = list_view.index
         had_focus = list_view.has_focus
         list_view.clear()
+        n = len(self.queue.items)
         for i, item in enumerate(self.queue.items):
-            list_view.append(QueueListItem(item, i))
+            list_view.append(QueueListItem(
+                item, i,
+                can_up=self.queue.can_move(item.id, "up"),
+                can_down=self.queue.can_move(item.id, "down"),
+            ))
         if self.queue.items:
-            list_view.index = min(prev_index or 0, len(self.queue.items) - 1)
+            list_view.index = min(prev_index or 0, n - 1)
         if had_focus:
             list_view.focus()
 
@@ -472,7 +481,16 @@ class CRTCastApp(App):
         self._refresh_all()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        btn_id = event.button.id
+        btn_id = event.button.id or ""
+        # Queue reorder buttons (↑/↓ on each row)
+        if btn_id.startswith("up-") or btn_id.startswith("down-"):
+            direction, _, item_id = btn_id.partition("-")
+            if self.queue.move(item_id, direction):
+                self._refresh_queue_list()
+                self.pipeline.wake()
+            event.stop()
+            return
+        # Playback control buttons
         if btn_id == "btn-prev":
             self.action_prev_video()
         elif btn_id == "btn-back":

@@ -353,3 +353,63 @@ async def test_queue_list_item_has_up_down_buttons(app, queue):
         items[0].query_one(f"#down-{item0_id}", Button)
         items[1].query_one(f"#up-{item1_id}", Button)
         items[1].query_one(f"#down-{item1_id}", Button)
+
+
+@pytest.mark.asyncio
+async def test_up_button_moves_item_up(app, queue, mock_pipeline):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        item1_id = queue.items[0].id
+        item2_id = queue.items[1].id
+        await pilot.click(f"#up-{item2_id}")
+        await pilot.pause()
+        assert queue.items[0].id == item2_id
+        assert queue.items[1].id == item1_id
+
+
+@pytest.mark.asyncio
+async def test_down_button_moves_item_down(app, queue, mock_pipeline):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        item1_id = queue.items[0].id
+        await pilot.click(f"#down-{item1_id}")
+        await pilot.pause()
+        assert queue.items[1].id == item1_id
+
+
+@pytest.mark.asyncio
+async def test_up_button_disabled_for_first_item(app, queue):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        item0_id = queue.items[0].id
+        up_btn = app.query_one(f"#up-{item0_id}", Button)
+        assert up_btn.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_down_button_disabled_for_last_item(app, queue):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        item1_id = queue.items[1].id
+        down_btn = app.query_one(f"#down-{item1_id}", Button)
+        assert down_btn.disabled is True
