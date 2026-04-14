@@ -79,9 +79,9 @@ def build_calibration_filter(duration_s: int = 60) -> str:
 
     # Margin indicator bars: one coloured bar per edge, thickness = margin px.
     # Drawn with a minimum of 1px so zero margins still produce a hair line.
-    # The label T:{mt} B:{mb} L:{ml} R:{mr} is encoded as comments in the
-    # drawbox parameters for traceability in the filter string.
-    # Format: drawbox=...:color=...:t=fill  (t=fill → solid bar)
+    # Traceability comes from the numeric drawbox widths/heights themselves:
+    # top/bottom use h=<margin> and left/right use w=<margin> in the filter
+    # string. Format: drawbox=...:color=...:t=fill  (t=fill → solid bar)
     margin_bars = ",".join([
         # Top — yellow bar, height = mt (min 1)
         f"drawbox=x=0:y=0:w={inner_w}:h={max(mt, 1)}:color=yellow@0.7:t=fill",
