@@ -103,12 +103,72 @@ def test_move_down_at_bottom_fails():
     assert qm.move(item1.id, "down") is False
 
 
-def test_move_non_queued_item_fails():
+def test_move_non_queued_item_succeeds():
+    """move() allows swapping items of any status — no status restrictions."""
     qm = QueueManager()
-    item1 = qm.add("https://youtube.com/watch?v=1", mode="queue")
+    item1 = qm.add("https://youtube.com/watch?v=1")
     item1.status = "downloading"
-    item2 = qm.add("https://youtube.com/watch?v=2", mode="queue")
-    assert qm.move(item1.id, "down") is False
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    assert qm.move(item1.id, "down") is True
+    assert qm.items[1].url == "https://youtube.com/watch?v=1"
+
+
+def test_move_any_status_up():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "ready"
+    assert qm.move(item2.id, "up") is True
+    assert qm.items[0].url == "https://youtube.com/watch?v=2"
+
+
+def test_move_any_status_down():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "playing"
+    qm.add("https://youtube.com/watch?v=2")
+    assert qm.move(item1.id, "down") is True
+    assert qm.items[1].url == "https://youtube.com/watch?v=1"
+
+
+def test_can_move_middle_item():
+    qm = QueueManager()
+    qm.add("https://youtube.com/watch?v=1")
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    qm.add("https://youtube.com/watch?v=3")
+    assert qm.can_move(item2.id, "up") is True
+    assert qm.can_move(item2.id, "down") is True
+
+
+def test_can_move_first_item_cannot_go_up():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    qm.add("https://youtube.com/watch?v=2")
+    assert qm.can_move(item1.id, "up") is False
+    assert qm.can_move(item1.id, "down") is True
+
+
+def test_can_move_last_item_cannot_go_down():
+    qm = QueueManager()
+    qm.add("https://youtube.com/watch?v=1")
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    assert qm.can_move(item2.id, "up") is True
+    assert qm.can_move(item2.id, "down") is False
+
+
+def test_can_move_any_status():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "playing"
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    assert qm.can_move(item1.id, "down") is True
+    assert qm.can_move(item2.id, "up") is True
+
+
+def test_can_move_unknown_id_returns_false():
+    qm = QueueManager()
+    assert qm.can_move("nonexistent", "up") is False
+    assert qm.can_move("nonexistent", "down") is False
 
 
 def test_next_pending_returns_first_queued():

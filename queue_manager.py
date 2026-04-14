@@ -88,15 +88,23 @@ class QueueManager:
     def move(self, item_id: str, direction: str) -> bool:
         for i, item in enumerate(self.items):
             if item.id == item_id:
-                if item.status != "queued":
-                    return False
-                if direction == "up" and i > 0 and self.items[i - 1].status == "queued":
+                if direction == "up" and i > 0:
                     self.items[i], self.items[i - 1] = self.items[i - 1], self.items[i]
                     return True
-                if direction == "down" and i < len(self.items) - 1 and self.items[i + 1].status == "queued":
+                if direction == "down" and i < len(self.items) - 1:
                     self.items[i], self.items[i + 1] = self.items[i + 1], self.items[i]
                     return True
                 return False
+        return False
+
+    def can_move(self, item_id: str, direction: str) -> bool:
+        """Return True if item can be moved in that direction (border check only)."""
+        for i, item in enumerate(self.items):
+            if item.id == item_id:
+                if direction == "up":
+                    return i > 0
+                if direction == "down":
+                    return i < len(self.items) - 1
         return False
 
     def move_to_front(self, item_id: str) -> bool:
