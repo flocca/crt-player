@@ -102,7 +102,11 @@ def real_tmp_dir(integration_config, tmp_path_factory):
     server = uvicorn.Server(server_cfg)
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
-    time.sleep(1.5)  # give uvicorn time to bind the port
+    deadline = time.monotonic() + 10
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if not server.started:
+        raise RuntimeError("uvicorn media server failed to start within 10s")
     yield str(d)
 
 
@@ -126,6 +130,21 @@ def real_chromecast(integration_config, real_tmp_dir):
 
 
 @pytest.fixture
+def real_chromecast_per_test(real_chromecast):
+    """Re-create asyncio.Event objects bound to the current test's event loop.
+
+    real_chromecast is session-scoped (expensive to discover) but asyncio.Event
+    objects must be re-created per test to bind to the current event loop.
+    """
+    import asyncio
+    real_chromecast._connected_event = asyncio.Event()
+    real_chromecast._playback_ended_event = asyncio.Event()
+    if real_chromecast.connected:
+        real_chromecast._connected_event.set()
+    return real_chromecast
+
+
+@pytest.fixture
 def real_queue():
     """Fresh QueueManager per test — no saved state loaded."""
     from queue_manager import QueueManager
@@ -133,7 +152,7 @@ def real_queue():
 
 
 @pytest.fixture
-def real_pipeline(real_queue, real_chromecast):
+def real_pipeline(real_queue, real_chromecast_per_test):
     """Fresh PipelineWorker per test.
 
     Must be function-scoped because PipelineWorker holds an internal reference
@@ -141,11 +160,11 @@ def real_pipeline(real_queue, real_chromecast):
     sees the same queue the test does.
     """
     from pipeline import PipelineWorker
-    return PipelineWorker(real_queue, real_chromecast)
+    return PipelineWorker(real_queue, real_chromecast_per_test)
 
 
 @pytest.fixture
-def integration_app(real_queue, real_pipeline, real_chromecast):
+def integration_app(real_queue, real_pipeline, real_chromecast_per_test):
     """Full CRTCastApp wired with real dependencies, fresh per test."""
     from ui import CRTCastApp
-    return CRTCastApp(real_queue, real_pipeline, real_chromecast)
+    return CRTCastApp(real_queue, real_pipeline, real_chromecast_per_test)
