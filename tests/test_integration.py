@@ -29,11 +29,16 @@ async def wait_for_condition(
     timeout_s: float = 30,
     poll_interval: float = 1.0,
     description: str = "condition",
+    fail_fn=None,
+    fail_msg_fn=None,
 ) -> None:
     """Yield to the Textual event loop until fn() is True or timeout expires.
 
     pilot.pause(n) cedes control to Textual's asyncio loop for n seconds,
     keeping pipeline tasks and callbacks alive while we wait for external state.
+
+    fail_fn: if provided, called each poll; raises AssertionError immediately
+             (don't wait for timeout) with fail_msg_fn() as the message.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
@@ -41,6 +46,11 @@ async def wait_for_condition(
         await pilot.pause(poll_interval)
         if fn():
             return
+        if fail_fn and fail_fn():
+            msg = fail_msg_fn() if fail_msg_fn else "early-fail condition met"
+            raise AssertionError(
+                f"Giving up waiting for '{description}': {msg}"
+            )
     raise TimeoutError(
         f"Timed out after {timeout_s}s waiting for: {description}"
     )
@@ -114,6 +124,8 @@ async def test_integration_single_video_plays(
             ),
             timeout_s=60,
             description="pipeline started",
+            fail_fn=lambda: real_queue.items[0].status == "error",
+            fail_msg_fn=lambda: f"item.error={real_queue.items[0].error!r}",
         )
 
         # downloading → encoding → ready (also accept casting/playing in case we miss the ready window)
@@ -122,6 +134,8 @@ async def test_integration_single_video_plays(
             lambda: real_queue.items[0].status in ("ready", "casting", "playing"),
             timeout_s=encode_wait_s,
             description="status=ready (encode complete)",
+            fail_fn=lambda: real_queue.items[0].status == "error",
+            fail_msg_fn=lambda: f"item.error={real_queue.items[0].error!r}",
         )
 
         # Chromecast receives the cast and starts playing
@@ -183,6 +197,8 @@ async def test_integration_playback_completes(
             ),
             timeout_s=encode_wait_s,
             description="pipeline started",
+            fail_fn=lambda: real_queue.items[0].status == "error",
+            fail_msg_fn=lambda: f"item.error={real_queue.items[0].error!r}",
         )
 
         # Encode complete
@@ -191,6 +207,8 @@ async def test_integration_playback_completes(
             lambda: real_queue.items[0].status in ("ready", "casting", "playing"),
             timeout_s=encode_wait_s,
             description="status=ready (encode complete)",
+            fail_fn=lambda: real_queue.items[0].status == "error",
+            fail_msg_fn=lambda: f"item.error={real_queue.items[0].error!r}",
         )
 
         # Chromecast playing
@@ -252,6 +270,8 @@ async def test_integration_queue_transition(
             lambda: real_queue.items[0].status == "playing",
             timeout_s=420,
             description="video1 status=playing",
+            fail_fn=lambda: real_queue.items[0].status == "error",
+            fail_msg_fn=lambda: f"video1 item.error={real_queue.items[0].error!r}",
         )
 
         title_1 = integration_app.query_one("#now-playing", NowPlayingWidget).title
@@ -271,6 +291,8 @@ async def test_integration_queue_transition(
             lambda: real_queue.items[1].status == "playing",
             timeout_s=encode_wait_s,
             description="video2 status=playing (automatic transition)",
+            fail_fn=lambda: real_queue.items[1].status == "error",
+            fail_msg_fn=lambda: f"video2 item.error={real_queue.items[1].error!r}",
         )
 
         # TUI: NowPlayingWidget updated to second video
