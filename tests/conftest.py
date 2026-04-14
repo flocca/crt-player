@@ -140,13 +140,24 @@ def real_chromecast_per_test(real_chromecast):
 
     real_chromecast is session-scoped (expensive to discover) but asyncio.Event
     objects must be re-created per test to bind to the current event loop.
+
+    Teardown stops any ongoing Chromecast playback so the next test starts from
+    a clean state. Without this, _poll_playback in the next test repeatedly calls
+    poll_status() (a blocking pychromecast call) on an actively-playing device,
+    which saturates the asyncio thread pool and starves fetch_title() from getting
+    a worker thread — leaving the queue item stuck in "queued" indefinitely.
     """
     import asyncio
     real_chromecast._connected_event = asyncio.Event()
     real_chromecast._playback_ended_event = asyncio.Event()
     if real_chromecast.connected:
         real_chromecast._connected_event.set()
-    return real_chromecast
+    yield real_chromecast
+    # Teardown: stop playback so the next test sees an idle Chromecast.
+    try:
+        real_chromecast.stop()
+    except Exception:
+        pass
 
 
 @pytest.fixture
