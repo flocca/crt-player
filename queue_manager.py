@@ -115,6 +115,9 @@ class QueueManager:
         or None if loop=False and the cursor is at the last position.
         If no cursor exists (fresh playlist), returns items[0] or None if empty.
         Does NOT mutate any item state.
+
+        When multiple items are 'done', the cursor is the LAST done item in the list.
+        Items that precede the cursor (even if 'queued') are skipped until manually selected.
         """
         cursor_idx: int | None = None
         last_done_idx: int | None = None

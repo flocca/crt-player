@@ -296,7 +296,7 @@ class CRTCastApp(App):
         sel = self._highlighted_status()
         has_sel = sel is not None
         if action == "play_selected":
-            return True if sel in ("queued", "ready", "done") else False
+            return True if sel in ("queued", "ready", "done", "error") else False
         if action in ("stop", "pause", "seek_back", "seek_forward", "next_video", "prev_video"):
             return True if playing else False
         if action in ("remove_item", "move_up", "move_down"):
@@ -572,6 +572,7 @@ class CRTCastApp(App):
             queue_item = list_view.highlighted_child.queue_item
             self.queue.move(queue_item.id, "up")
             self._refresh_queue_list()
+            self.pipeline.wake()
 
     def action_move_down(self) -> None:
         list_view = self.query_one("#queue-list", ListView)
@@ -579,6 +580,7 @@ class CRTCastApp(App):
             queue_item = list_view.highlighted_child.queue_item
             self.queue.move(queue_item.id, "down")
             self._refresh_queue_list()
+            self.pipeline.wake()
 
     def _refresh_loop_indicator(self) -> None:
         text = " CODA ⟳" if self.loop_mode else " CODA"
