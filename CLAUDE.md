@@ -65,8 +65,12 @@ TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Share
 - `on_mount` calls `_refresh_all` when `queue.items` is non-empty and focuses the queue list; otherwise focuses the URL input. `wake()` only fires if `next_pending()` exists. To test UI state for "playing"/"ready" items without pre-populating the queue, call `app._refresh_all()` manually after mount.
 - Always `await pilot.pause()` after interactions (`press`, `click`, value changes) — handlers run asynchronously.
 - Textual `ListView` is falsy when empty. Don't `assert widget` — use `query_one()` (raises `NoMatches` if absent).
+- Config state (`MARGIN_*`, `SCALE_MODE`, `AUTO_CROP`) is mutated directly on the `config` module in tests. Each test file that does this MUST define an `autouse` `_restore_config` fixture that captures+restores these values around every test, otherwise state leaks across tests in the same pytest session (cross-file contamination). See `tests/test_pipeline.py` and `tests/test_calibration.py` for the pattern.
 
 ## Gotchas
+
+- `_detect_crop()` can misidentify near-black scenes (dark opening titles, night shots) as letterbox and silently remove real pixels from the top/bottom of the source. Results in calibrated margins still appearing "too aggressive" on specific videos. Set `CRT_AUTO_CROP=0` to bypass.
+- `action_calibrate` does not pause the `PipelineWorker` cast loop. If a prepared `ready` item exists and `_cast_enabled` is True, `run_cast()` can cast it right after the calibration pattern, overriding what's on screen. The double `_playing()` check catches items already in `casting`/`playing` but not items still `ready`. Known limitation; mitigation would be to temporarily toggle `pipeline._cast_enabled` around the calibration action.
 
 - Calibration pattern in `calibration.py` uses only `drawbox`/`drawgrid`, no `drawtext` — the Homebrew ffmpeg build here lacks libfreetype. Numeric margin values are surfaced to the user via a TUI toast in `action_calibrate` rather than overlaid on-screen.
 - `call_from_thread` crashes if called from the main Textual thread. Always use `_safe_call` wrapper in `ui.py`.
