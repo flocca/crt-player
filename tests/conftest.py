@@ -92,6 +92,8 @@ def real_tmp_dir(integration_config, tmp_path_factory):
     from media_server import create_media_app
 
     d = tmp_path_factory.mktemp("integration_media")
+    _orig_temp_dir = cfg.TEMP_DIR
+    _orig_state_file = cfg.STATE_FILE
     cfg.TEMP_DIR = str(d)
     cfg.STATE_FILE = str(d / "test_state.json")  # avoid polluting the real state file
 
@@ -108,6 +110,8 @@ def real_tmp_dir(integration_config, tmp_path_factory):
     if not server.started:
         raise RuntimeError("uvicorn media server failed to start within 10s")
     yield str(d)
+    cfg.TEMP_DIR = _orig_temp_dir
+    cfg.STATE_FILE = _orig_state_file
 
 
 @pytest.fixture(scope="session")

@@ -61,6 +61,10 @@ async def get_video_info(path: str) -> dict:
         stderr=asyncio.subprocess.DEVNULL,
     )
     stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe failed with exit code {proc.returncode} for path: {path}"
+        )
     data = json.loads(stdout.decode())
     streams = data.get("streams", [{}])
     if not streams:
@@ -264,6 +268,7 @@ async def test_integration_queue_transition(
         )
 
         # TUI: NowPlayingWidget updated to second video
+        await pilot.pause()  # let _refresh_all propagate after status change
         title_2 = integration_app.query_one("#now-playing", NowPlayingWidget).title
         assert title_2 != title_1, (
             f"NowPlayingWidget should show second video title, still showing: '{title_2}'"
