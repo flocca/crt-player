@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import pytest
 
 import config as config_module
-from pipeline import fetch_title, download_video, encode_video, _build_video_filter
+from pipeline import fetch_title, download_video, encode_video, _build_video_filter, _cached_encoded_filename
 from queue_manager import QueueItem
 
 
@@ -178,3 +178,21 @@ def test_build_filter_no_margins_prepends_crop_detect():
     config_module.SCALE_MODE = "crop"
     result = _build_video_filter("crop=640:480:0:0")
     assert result.startswith("crop=640:480:0:0,scale=768:576")
+
+
+def test_cached_filename_no_margins_is_legacy_shape():
+    _reset_margins()
+    config_module.SCALE_MODE = "crop"
+    assert _cached_encoded_filename("abc123") == "abc123_pal_crop.mp4"
+
+
+def test_cached_filename_with_margins_has_suffix():
+    _reset_margins(top=10, bottom=15, left=5, right=8)
+    config_module.SCALE_MODE = "crop"
+    assert _cached_encoded_filename("abc123") == "abc123_pal_crop_m10-15-5-8.mp4"
+
+
+def test_cached_filename_pad_mode_no_margins():
+    _reset_margins()
+    config_module.SCALE_MODE = "pad"
+    assert _cached_encoded_filename("xyz") == "xyz_pal_pad.mp4"
