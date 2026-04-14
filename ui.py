@@ -19,9 +19,10 @@ from textual.widgets import (
     Static,
 )
 
+import calibration
 import config
 from chromecast_mgr import ChromecastManager
-from pipeline import PipelineWorker
+from pipeline import PipelineWorker, get_local_ip
 from queue_manager import ACTIVE_STATUSES, QueueItem, QueueManager
 
 
@@ -191,6 +192,7 @@ class CRTCastApp(App):
         Binding("ctrl+right", "seek_forward", "↻30s", show=True, priority=True),
         Binding("ctrl+n", "next_video", "Next", show=True, priority=True),
         Binding("ctrl+b", "prev_video", "Prev", show=True, priority=True),
+        Binding("ctrl+t", "calibrate", "Calibra", show=True, priority=True),
         Binding("plus,equal", "volume_up", "Vol+", show=True, priority=True),
         Binding("minus", "volume_down", "Vol-", show=True, priority=True),
         Binding("backspace", "remove_item", "Rimuovi", show=True),
@@ -252,6 +254,8 @@ class CRTCastApp(App):
             return True if playing else False
         if action in ("remove_item", "move_up", "move_down"):
             return True if has_sel else False
+        if action == "calibrate":
+            return True
         return True
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
@@ -540,3 +544,50 @@ class CRTCastApp(App):
         new_item.title = prev.title
         self.pipeline.wake()
         self._refresh_all()
+
+    async def action_calibrate(self) -> None:
+        def _playing() -> bool:
+            return any(
+                i.status in ("casting", "playing") for i in self.queue.items
+            )
+
+        if _playing():
+            self.notify("Ferma il video attuale prima di calibrare.", severity="warning")
+            return
+
+        self.notify("Generazione pattern di calibrazione…")
+        out_path = os.path.join(config.TEMP_DIR, "calibration.mp4")
+        try:
+            await calibration.generate_calibration_clip(out_path)
+        except Exception as e:
+            self.notify(f"Errore calibrazione: {e}", severity="error")
+            return
+
+        if _playing():
+            self.notify(
+                "Un video è iniziato durante la generazione del pattern.",
+                severity="warning",
+            )
+            return
+
+        try:
+            media_url = (
+                f"http://{get_local_ip()}:{config.SERVER_PORT}/media/calibration.mp4"
+            )
+            if not self.chromecast.connected:
+                await asyncio.wait_for(self.chromecast.wait_for_connection(), timeout=30.0)
+            await asyncio.to_thread(self.chromecast.cast_url, media_url, 0.0)
+        except asyncio.TimeoutError:
+            self.notify("Chromecast non trovato.", severity="error")
+            return
+        except Exception as e:
+            self.notify(f"Errore cast pattern: {e}", severity="error")
+            return
+
+        self.notify(
+            f"Pattern di calibrazione in riproduzione. Margini attuali: "
+            f"T:{config.MARGIN_TOP} B:{config.MARGIN_BOTTOM} "
+            f"L:{config.MARGIN_LEFT} R:{config.MARGIN_RIGHT}. "
+            f"Ctrl+T per rigenerare, Ctrl+S per fermare.",
+            timeout=10,
+        )

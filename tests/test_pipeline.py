@@ -4,8 +4,27 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
-from pipeline import fetch_title, download_video, encode_video
+import config as config_module
+from pipeline import fetch_title, download_video, encode_video, _build_video_filter, _detect_crop
+from config import cached_encoded_filename
 from queue_manager import QueueItem
+
+
+@pytest.fixture(autouse=True)
+def _restore_config():
+    orig_scale = config_module.SCALE_MODE
+    orig_top = config_module.MARGIN_TOP
+    orig_bottom = config_module.MARGIN_BOTTOM
+    orig_left = config_module.MARGIN_LEFT
+    orig_right = config_module.MARGIN_RIGHT
+    orig_auto_crop = config_module.AUTO_CROP
+    yield
+    config_module.SCALE_MODE = orig_scale
+    config_module.MARGIN_TOP = orig_top
+    config_module.MARGIN_BOTTOM = orig_bottom
+    config_module.MARGIN_LEFT = orig_left
+    config_module.MARGIN_RIGHT = orig_right
+    config_module.AUTO_CROP = orig_auto_crop
 
 
 @pytest.mark.asyncio
@@ -92,3 +111,111 @@ async def test_encode_video(tmp_path):
         result = await encode_video(input_file, output_file, 10.0, on_progress)
 
     assert result == output_file
+
+
+def _reset_margins(top=0, bottom=0, left=0, right=0):
+    config_module.MARGIN_TOP = top
+    config_module.MARGIN_BOTTOM = bottom
+    config_module.MARGIN_LEFT = left
+    config_module.MARGIN_RIGHT = right
+
+
+def test_build_filter_no_margins_crop_mode_is_backcompat():
+    _reset_margins()
+    config_module.SCALE_MODE = "crop"
+    result = _build_video_filter(None)
+    expected = (
+        "scale=768:576:force_original_aspect_ratio=increase,"
+        "crop=768:576,scale=1024:576,setsar=1:1"
+    )
+    assert result == expected
+
+
+def test_build_filter_no_margins_pad_mode_is_backcompat():
+    _reset_margins()
+    config_module.SCALE_MODE = "pad"
+    result = _build_video_filter(None)
+    expected = (
+        "scale=768:576:force_original_aspect_ratio=decrease,"
+        "pad=768:576:(768-iw)/2:(576-ih)/2,"
+        "scale=1024:576,setsar=1:1"
+    )
+    assert result == expected
+
+
+def test_build_filter_crop_mode_with_margins():
+    _reset_margins(top=20, bottom=0, left=10, right=0)
+    config_module.SCALE_MODE = "crop"
+    result = _build_video_filter(None)
+    expected = (
+        "scale=758:556:force_original_aspect_ratio=increase,"
+        "crop=758:556,"
+        "pad=768:576:10:20:color=black,"
+        "scale=1024:576,setsar=1:1"
+    )
+    assert result == expected
+
+
+def test_build_filter_pad_mode_with_margins():
+    _reset_margins(top=10, bottom=10, left=20, right=20)
+    config_module.SCALE_MODE = "pad"
+    result = _build_video_filter(None)
+    expected = (
+        "scale=728:556:force_original_aspect_ratio=decrease,"
+        "pad=728:556:(728-iw)/2:(556-ih)/2,"
+        "pad=768:576:20:10:color=black,"
+        "scale=1024:576,setsar=1:1"
+    )
+    assert result == expected
+
+
+def test_build_filter_prepends_crop_detect_when_given():
+    _reset_margins(top=20, left=10)
+    config_module.SCALE_MODE = "crop"
+    result = _build_video_filter("crop=640:480:0:0")
+    assert result.startswith("crop=640:480:0:0,scale=758:556")
+
+
+def test_build_filter_no_margins_prepends_crop_detect():
+    _reset_margins()
+    config_module.SCALE_MODE = "crop"
+    result = _build_video_filter("crop=640:480:0:0")
+    assert result.startswith("crop=640:480:0:0,scale=768:576")
+
+
+def test_cached_filename_no_margins_is_legacy_shape():
+    _reset_margins()
+    config_module.SCALE_MODE = "crop"
+    assert cached_encoded_filename("abc123") == "abc123_pal_crop.mp4"
+
+
+def test_cached_filename_with_margins_has_suffix():
+    _reset_margins(top=10, bottom=15, left=5, right=8)
+    config_module.SCALE_MODE = "crop"
+    assert cached_encoded_filename("abc123") == "abc123_pal_crop_m10-15-5-8.mp4"
+
+
+def test_cached_filename_pad_mode_no_margins():
+    _reset_margins()
+    config_module.SCALE_MODE = "pad"
+    assert cached_encoded_filename("xyz") == "xyz_pal_pad.mp4"
+
+
+@pytest.mark.asyncio
+async def test_detect_crop_returns_none_when_auto_crop_disabled():
+    config_module.AUTO_CROP = False
+    # Should short-circuit without shelling out to ffmpeg at all.
+    with patch("pipeline.asyncio.create_subprocess_exec") as mock_exec:
+        result = await _detect_crop("/tmp/anything.mp4")
+    assert result is None
+    mock_exec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_detect_crop_runs_ffmpeg_when_auto_crop_enabled():
+    config_module.AUTO_CROP = True
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    with patch("pipeline.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await _detect_crop("/tmp/anything.mp4")
+    mock_exec.assert_called_once()
