@@ -4,8 +4,24 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
-from pipeline import fetch_title, download_video, encode_video
+import config as config_module
+from pipeline import fetch_title, download_video, encode_video, _build_video_filter
 from queue_manager import QueueItem
+
+
+@pytest.fixture(autouse=True)
+def _restore_config():
+    orig_scale = config_module.SCALE_MODE
+    orig_top = config_module.MARGIN_TOP
+    orig_bottom = config_module.MARGIN_BOTTOM
+    orig_left = config_module.MARGIN_LEFT
+    orig_right = config_module.MARGIN_RIGHT
+    yield
+    config_module.SCALE_MODE = orig_scale
+    config_module.MARGIN_TOP = orig_top
+    config_module.MARGIN_BOTTOM = orig_bottom
+    config_module.MARGIN_LEFT = orig_left
+    config_module.MARGIN_RIGHT = orig_right
 
 
 @pytest.mark.asyncio
@@ -92,12 +108,6 @@ async def test_encode_video(tmp_path):
         result = await encode_video(input_file, output_file, 10.0, on_progress)
 
     assert result == output_file
-
-
-import importlib
-
-import config as config_module
-from pipeline import _build_video_filter
 
 
 def _reset_margins(top=0, bottom=0, left=0, right=0):
