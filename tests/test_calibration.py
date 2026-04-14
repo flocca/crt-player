@@ -1,6 +1,6 @@
 import pytest
 import config as config_module
-from calibration import build_calibration_filter, build_calibration_source
+from calibration import build_calibration_filter
 
 
 @pytest.fixture(autouse=True)
@@ -29,13 +29,13 @@ def test_calibration_filter_has_dark_grey_background():
     assert "color=c=0x202020" in fc
 
 
-def test_calibration_source_uses_inner_size_when_margins_set():
+def test_calibration_source_embedded_at_inner_size_when_margins_set():
     _reset_margins(top=20, bottom=10, left=5, right=15)
-    src = build_calibration_source(duration_s=30)
+    fc = build_calibration_filter(duration_s=30)
     # Inner: 768-5-15=748, 576-20-10=546
-    assert "s=748x546" in src
-    assert "d=30" in src
-    assert "r=25" in src
+    assert "s=748x546" in fc
+    assert "d=30" in fc
+    assert "r=25" in fc
 
 
 def test_calibration_filter_pads_with_configured_offsets():
@@ -81,8 +81,7 @@ def test_calibration_filter_margin_bars_encode_pixel_values():
 
 def test_calibration_filter_no_margins_still_produces_valid_chain():
     _reset_margins()
-    src = build_calibration_source(duration_s=60)
     fc = build_calibration_filter()
     # With zero margins, inner == full frame
-    assert "s=768x576" in src
+    assert "s=768x576" in fc
     assert "pad=768:576:0:0:color=black" in fc

@@ -573,8 +573,11 @@ class CRTCastApp(App):
         media_url = f"http://{get_local_ip()}:{config.SERVER_PORT}/media/calibration.mp4"
         try:
             if not self.chromecast.connected:
-                await self.chromecast.wait_for_connection()
+                await asyncio.wait_for(self.chromecast.wait_for_connection(), timeout=30.0)
             await asyncio.to_thread(self.chromecast.cast_url, media_url, 0.0)
+        except asyncio.TimeoutError:
+            self.notify("Chromecast non trovato.", severity="error")
+            return
         except Exception as e:
             self.notify(f"Errore cast pattern: {e}", severity="error")
             return

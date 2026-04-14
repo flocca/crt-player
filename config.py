@@ -37,11 +37,13 @@ MARGIN_RIGHT = _load_margin("CRT_MARGIN_RIGHT")
 
 
 def _clamp_axis_pair(a: int, b: int, max_sum: int) -> tuple[int, int]:
-    """If a+b > max_sum, scale both proportionally so their sum == max_sum."""
+    """If a+b > max_sum, scale both proportionally so their sum <= max_sum."""
     if a + b <= max_sum:
         return a, b
     factor = max_sum / (a + b)
-    return round(a * factor), round(b * factor)
+    ra = round(a * factor)
+    rb = min(round(b * factor), max_sum - ra)
+    return ra, rb
 
 
 _ct, _cb = _clamp_axis_pair(MARGIN_TOP, MARGIN_BOTTOM, _MAX_V_SUM)

@@ -117,7 +117,6 @@ def _build_video_filter(crop_detect: str | None = None) -> str:
     )
 
 
-
 async def _get_duration(path: str) -> float:
     """Return duration in seconds using ffprobe."""
     cmd = [

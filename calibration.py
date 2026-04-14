@@ -114,12 +114,6 @@ def build_calibration_filter(duration_s: int = 60) -> str:
     return f"{source};{pattern_chain}"
 
 
-def build_calibration_source(duration_s: int = 60) -> str:
-    """Return the ffmpeg lavfi source spec (the part after ``-i``)."""
-    inner_w, inner_h = _inner_dims()
-    return f"color=c=0x202020:s={inner_w}x{inner_h}:d={duration_s}:r=25"
-
-
 async def generate_calibration_clip(out_path: str, duration_s: int = 60) -> str:
     """Render the calibration clip to *out_path* via ffmpeg."""
     filter_complex = build_calibration_filter(duration_s)

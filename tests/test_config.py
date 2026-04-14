@@ -51,7 +51,7 @@ def test_vertical_margins_clamped_to_half_frame(monkeypatch, caplog):
     cfg = _reload_config(
         monkeypatch, CRT_MARGIN_TOP="500", CRT_MARGIN_BOTTOM="500",
     )
-    # 500+500=1000, max_sum=288, factor=0.288 → each becomes int(500*0.288)=144
+    # 500+500=1000, max_sum=288, factor=0.288 → each becomes round(500*0.288)=144
     assert cfg.MARGIN_TOP + cfg.MARGIN_BOTTOM <= 288
     assert cfg.MARGIN_TOP == 144
     assert cfg.MARGIN_BOTTOM == 144
@@ -65,3 +65,12 @@ def test_horizontal_margins_clamped_to_half_frame(monkeypatch):
     assert cfg.MARGIN_LEFT + cfg.MARGIN_RIGHT <= 384
     assert cfg.MARGIN_LEFT == 192
     assert cfg.MARGIN_RIGHT == 192
+
+
+def test_vertical_margins_asymmetric_round_respects_max_sum(monkeypatch):
+    cfg = _reload_config(
+        monkeypatch, CRT_MARGIN_TOP="77", CRT_MARGIN_BOTTOM="371",
+    )
+    # 77+371=448, factor=288/448=0.6428..., round gives 50+239=289 without clamp.
+    # With the clamp we guarantee sum <= 288.
+    assert cfg.MARGIN_TOP + cfg.MARGIN_BOTTOM <= 288
