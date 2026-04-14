@@ -172,13 +172,14 @@ async def test_integration_playback_completes(
 
         assert len(real_queue.items) == 1
 
-        # Pipeline started (handles cache hit: status may skip directly to ready)
+        # Pipeline started — fetch_title() does a network request; allow extra time
+        # in case YouTube rate-limits back-to-back requests from the test session.
         await wait_for_condition(
             pilot,
             lambda: real_queue.items[0].status in (
                 "downloading", "encoding", "ready", "casting", "playing"
             ),
-            timeout_s=60,
+            timeout_s=180,
             description="pipeline started",
         )
 
