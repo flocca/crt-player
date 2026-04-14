@@ -359,7 +359,7 @@ class CRTCastApp(App):
         # During automatic transitions (current item just ended, next not yet casting)
         # keep showing the next ready item instead of going blank.
         if not show:
-            show = self.queue.next_ready()
+            show = self.queue.first_ready()
 
         widget = self.query_one("#now-playing", NowPlayingWidget)
         is_playing = bool(playing_item and playing_item.status == "playing")

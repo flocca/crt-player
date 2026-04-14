@@ -212,20 +212,6 @@ class QueueManager:
                 return item
         return None
 
-    def next_ready(self) -> QueueItem | None:
-        """First 'ready' item that can be cast now.
-
-        Encoding items are skipped — they don't block casting a manually
-        selected ready item that was moved ahead of them.
-        Queued/downloading items do block (they haven't been prepared yet).
-        """
-        for item in self.items:
-            if item.status in ("queued", "downloading"):
-                return None
-            if item.status == "ready":
-                return item
-        return None
-
     def active_item(self) -> QueueItem | None:
         for item in self.items:
             if item.status in ACTIVE_STATUSES:
