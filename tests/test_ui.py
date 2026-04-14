@@ -2,7 +2,15 @@ import pytest
 from textual.widgets import Button, Input, ListView, Select
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import config as config_module
 from ui import CRTCastApp, NowPlayingWidget, QueueListItem, QueueListView
+
+
+@pytest.fixture(autouse=True)
+def _restore_config():
+    orig_loop = config_module.LOOP_MODE_DEFAULT
+    yield
+    config_module.LOOP_MODE_DEFAULT = orig_loop
 
 
 # --- Compose & mount ---
@@ -413,3 +421,31 @@ async def test_down_button_disabled_for_last_item(app, queue):
         item1_id = queue.items[1].id
         down_btn = app.query_one(f"#down-{item1_id}", Button)
         assert down_btn.disabled is True
+
+
+# --- Loop mode ---
+
+
+@pytest.mark.asyncio
+async def test_loop_toggle_flips_mode(app, mock_pipeline):
+    async with app.run_test() as pilot:
+        assert app.loop_mode is False
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert app.loop_mode is True
+        assert mock_pipeline.loop_mode is True
+        # Toggle back
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert app.loop_mode is False
+
+
+@pytest.mark.asyncio
+async def test_loop_toggle_shows_indicator_in_header(app):
+    async with app.run_test() as pilot:
+        from textual.widgets import Static
+        header = app.query_one("#queue-header", Static)
+        assert "⟳" not in header.content
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert "⟳" in header.content

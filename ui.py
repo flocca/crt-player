@@ -243,6 +243,7 @@ class CRTCastApp(App):
         Binding("backspace", "remove_item", "Rimuovi", show=True),
         Binding("ctrl+k", "move_up", "Su", show=True, priority=True),
         Binding("ctrl+j", "move_down", "Giù", show=True, priority=True),
+        Binding("ctrl+r", "toggle_loop", "Loop", show=True, priority=True),
         Binding("escape", "quit", "Esci", show=True, priority=True),
     ]
 
@@ -257,6 +258,7 @@ class CRTCastApp(App):
         self.pipeline = pipeline
         self.chromecast = chromecast
         self._pending_display: QueueItem | None = None
+        self.loop_mode: bool = config.LOOP_MODE_DEFAULT
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -576,6 +578,18 @@ class CRTCastApp(App):
             queue_item = list_view.highlighted_child.queue_item
             self.queue.move(queue_item.id, "down")
             self._refresh_queue_list()
+
+    def _refresh_loop_indicator(self) -> None:
+        text = " CODA ⟳" if self.loop_mode else " CODA"
+        self.query_one("#queue-header", Static).update(text)
+
+    def action_toggle_loop(self) -> None:
+        self.loop_mode = not self.loop_mode
+        self.pipeline.loop_mode = self.loop_mode
+        self._refresh_loop_indicator()
+        self.notify(f"Loop: {'ON' if self.loop_mode else 'OFF'}")
+        if self.loop_mode:
+            self.pipeline.wake()
 
     async def action_seek_back(self) -> None:
         await asyncio.to_thread(self.chromecast.seek, -15)
