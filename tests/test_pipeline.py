@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import pytest
 
 import config as config_module
-from pipeline import fetch_title, download_video, encode_video, _build_video_filter
+from pipeline import fetch_title, download_video, encode_video, _build_video_filter, _detect_crop
 from config import cached_encoded_filename
 from queue_manager import QueueItem
 
@@ -17,12 +17,14 @@ def _restore_config():
     orig_bottom = config_module.MARGIN_BOTTOM
     orig_left = config_module.MARGIN_LEFT
     orig_right = config_module.MARGIN_RIGHT
+    orig_auto_crop = config_module.AUTO_CROP
     yield
     config_module.SCALE_MODE = orig_scale
     config_module.MARGIN_TOP = orig_top
     config_module.MARGIN_BOTTOM = orig_bottom
     config_module.MARGIN_LEFT = orig_left
     config_module.MARGIN_RIGHT = orig_right
+    config_module.AUTO_CROP = orig_auto_crop
 
 
 @pytest.mark.asyncio
@@ -197,3 +199,23 @@ def test_cached_filename_pad_mode_no_margins():
     _reset_margins()
     config_module.SCALE_MODE = "pad"
     assert cached_encoded_filename("xyz") == "xyz_pal_pad.mp4"
+
+
+@pytest.mark.asyncio
+async def test_detect_crop_returns_none_when_auto_crop_disabled():
+    config_module.AUTO_CROP = False
+    # Should short-circuit without shelling out to ffmpeg at all.
+    with patch("pipeline.asyncio.create_subprocess_exec") as mock_exec:
+        result = await _detect_crop("/tmp/anything.mp4")
+    assert result is None
+    mock_exec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_detect_crop_runs_ffmpeg_when_auto_crop_enabled():
+    config_module.AUTO_CROP = True
+    mock_proc = AsyncMock()
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    with patch("pipeline.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await _detect_crop("/tmp/anything.mp4")
+    mock_exec.assert_called_once()

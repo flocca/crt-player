@@ -137,6 +137,8 @@ async def _get_duration(path: str) -> float:
 
 async def _detect_crop(input_path: str) -> str | None:
     """Run a quick cropdetect pass and return the most common crop value."""
+    if not config.AUTO_CROP:
+        return None
     cmd = [
         "ffmpeg", "-i", input_path,
         "-vf", "cropdetect=24:16:0",
