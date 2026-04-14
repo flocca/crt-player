@@ -52,3 +52,100 @@ def mock_chromecast():
 def app(queue, mock_pipeline, mock_chromecast):
     """CRTCastApp with all I/O dependencies mocked."""
     return CRTCastApp(queue, mock_pipeline, mock_chromecast)
+
+
+# ---------------------------------------------------------------------------
+# Integration fixtures — require real hardware (Chromecast + internet access)
+# Tests skip automatically when env vars are absent.
+# Run with: source .env.integration && pytest -m integration
+# ---------------------------------------------------------------------------
+
+import os
+import threading
+import time
+
+import uvicorn
+
+
+@pytest.fixture(scope="session")
+def integration_config():
+    """Read TEST_* env vars; skip entire session if required ones are missing."""
+    name = os.environ.get("TEST_CHROMECAST_NAME", "").strip()
+    url1 = os.environ.get("TEST_VIDEO_URL_1", "").strip()
+    if not name or not url1:
+        pytest.skip(
+            "Integration tests require TEST_CHROMECAST_NAME and TEST_VIDEO_URL_1 env vars. "
+            "Run: source .env.integration"
+        )
+    return {
+        "chromecast_name": name,
+        "video_url_1": url1,
+        "video_url_2": os.environ.get("TEST_VIDEO_URL_2", "").strip() or None,
+        "playback_wait_s": int(os.environ.get("TEST_PLAYBACK_WAIT_S", "300")),
+    }
+
+
+@pytest.fixture(scope="session")
+def real_tmp_dir(integration_config, tmp_path_factory):
+    """Dedicated temp dir for encoded files; starts the media server once for the session."""
+    import config as cfg
+    from media_server import create_media_app
+
+    d = tmp_path_factory.mktemp("integration_media")
+    cfg.TEMP_DIR = str(d)
+    cfg.STATE_FILE = str(d / "test_state.json")  # avoid polluting the real state file
+
+    app = create_media_app(str(d))
+    server_cfg = uvicorn.Config(
+        app, host="0.0.0.0", port=cfg.SERVER_PORT, log_level="warning"
+    )
+    server = uvicorn.Server(server_cfg)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    time.sleep(1.5)  # give uvicorn time to bind the port
+    yield str(d)
+
+
+@pytest.fixture(scope="session")
+def real_chromecast(integration_config, real_tmp_dir):
+    """Real ChromecastManager, discovered once per test session."""
+    import config as cfg
+    from chromecast_mgr import ChromecastManager
+
+    cfg.CHROMECAST_NAME = integration_config["chromecast_name"]
+    cc = ChromecastManager()
+    found = cc._discover_sync()
+    if not found:
+        pytest.skip(
+            f"Chromecast '{integration_config['chromecast_name']}' not found on network"
+        )
+    yield cc
+    cc.set_status_callback(None)
+    cc.set_connection_callback(None)
+    cc.shutdown()
+
+
+@pytest.fixture
+def real_queue():
+    """Fresh QueueManager per test — no saved state loaded."""
+    from queue_manager import QueueManager
+    return QueueManager()
+
+
+@pytest.fixture
+def real_pipeline(real_queue, real_chromecast):
+    """Fresh PipelineWorker per test.
+
+    Must be function-scoped because PipelineWorker holds an internal reference
+    to its queue; creating it fresh alongside real_queue ensures the pipeline
+    sees the same queue the test does.
+    """
+    from pipeline import PipelineWorker
+    return PipelineWorker(real_queue, real_chromecast)
+
+
+@pytest.fixture
+def integration_app(real_queue, real_pipeline, real_chromecast):
+    """Full CRTCastApp wired with real dependencies, fresh per test."""
+    from ui import CRTCastApp
+    return CRTCastApp(real_queue, real_pipeline, real_chromecast)
