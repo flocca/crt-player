@@ -1,4 +1,9 @@
+import os
+from unittest.mock import patch
+
 import pytest
+
+import config as config_module
 from queue_manager import QueueItem, QueueManager
 
 
@@ -264,3 +269,80 @@ def test_advance_cursor_no_cursor_nonempty_list():
     qm.add("https://youtube.com/watch?v=2")
     # No playing, no done — fresh playlist: return first item
     assert qm.advance_cursor(loop=False) is item1
+
+
+def test_prepare_for_play_done_with_cache_becomes_ready(tmp_path):
+    qm = QueueManager()
+    item = qm.add("https://youtube.com/watch?v=1")
+    item.status = "done"
+    fake_mp4 = tmp_path / "cached.mp4"
+    fake_mp4.touch()
+    item.filename = "cached.mp4"
+    with patch.object(config_module, "TEMP_DIR", str(tmp_path)):
+        qm.prepare_for_play(item)
+    assert item.status == "ready"
+
+
+def test_prepare_for_play_done_without_cache_becomes_queued():
+    qm = QueueManager()
+    item = qm.add("https://youtube.com/watch?v=1")
+    item.status = "done"
+    item.filename = "missing.mp4"
+    item.progress = 42.0
+    with patch.object(config_module, "TEMP_DIR", "/nonexistent/path/that/cannot/exist"):
+        qm.prepare_for_play(item)
+    assert item.status == "queued"
+    assert item.filename is None
+    assert item.progress == 0.0
+
+
+def test_prepare_for_play_error_with_cache_becomes_ready(tmp_path):
+    qm = QueueManager()
+    item = qm.add("https://youtube.com/watch?v=1")
+    item.status = "error"
+    item.error = "download failed"
+    fake_mp4 = tmp_path / "cached.mp4"
+    fake_mp4.touch()
+    item.filename = "cached.mp4"
+    with patch.object(config_module, "TEMP_DIR", str(tmp_path)):
+        qm.prepare_for_play(item)
+    assert item.status == "ready"
+    assert item.error is None
+
+
+def test_prepare_for_play_error_without_cache_becomes_queued():
+    qm = QueueManager()
+    item = qm.add("https://youtube.com/watch?v=1")
+    item.status = "error"
+    item.error = "encode failed"
+    item.filename = None
+    with patch.object(config_module, "TEMP_DIR", "/nonexistent/path/that/cannot/exist"):
+        qm.prepare_for_play(item)
+    assert item.status == "queued"
+    assert item.error is None
+
+
+def test_prepare_for_play_ready_is_unchanged():
+    qm = QueueManager()
+    item = qm.add("https://youtube.com/watch?v=1")
+    item.status = "ready"
+    item.filename = "cached.mp4"
+    qm.prepare_for_play(item)
+    assert item.status == "ready"
+    assert item.filename == "cached.mp4"
+
+
+def test_prepare_for_play_queued_is_unchanged():
+    qm = QueueManager()
+    item = qm.add("https://youtube.com/watch?v=1")
+    # status is "queued" by default
+    qm.prepare_for_play(item)
+    assert item.status == "queued"
+
+
+def test_prepare_for_play_encoding_is_unchanged():
+    qm = QueueManager()
+    item = qm.add("https://youtube.com/watch?v=1")
+    item.status = "encoding"
+    qm.prepare_for_play(item)
+    assert item.status == "encoding"

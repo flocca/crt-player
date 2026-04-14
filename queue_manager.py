@@ -137,6 +137,26 @@ class QueueManager:
             return self.items[0] if loop else None
         return self.items[next_idx]
 
+    def prepare_for_play(self, item: QueueItem) -> None:
+        """Transition item to the correct pre-play state based on cache.
+
+        done/error + cached MP4 → ready (instant replay)
+        done/error + no cache  → queued (pipeline will re-download)
+        ready / queued / downloading / encoding → unchanged
+        """
+        if item.status not in ("done", "error"):
+            return
+        if item.filename and os.path.isfile(
+            os.path.join(config.TEMP_DIR, item.filename)
+        ):
+            item.status = "ready"
+            item.error = None
+        else:
+            item.status = "queued"
+            item.filename = None
+            item.progress = 0.0
+            item.error = None
+
     def move_to_front(self, item_id: str) -> bool:
         for i, item in enumerate(self.items):
             if item.id == item_id:
