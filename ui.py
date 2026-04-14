@@ -40,16 +40,16 @@ class NowPlayingWidget(Static):
 
     def render(self) -> str:
         if not self.title:
-            return "  No video playing"
+            return "  Nessun video in riproduzione\n "
 
         max_title = max(self.size.width - 6, 10)
         title = self.title if len(self.title) <= max_title else self.title[:max_title - 1] + "…"
 
         if self.status == "error":
-            return f'  "{title}"\n  ERROR: {self.error_msg}'
+            return f'  "{title}"\n  [red]ERRORE: {self.error_msg}[/red]'
         if self.status == "casting":
-            return f'  "{title}"\n  Connessione al Chromecast...'
-        return f'  "{title}"'
+            return f'  "{title}"\n  [dim]Connessione al Chromecast...[/dim]'
+        return f'  "{title}"\n '
 
 
 class QueueListView(ListView):
@@ -196,6 +196,7 @@ class CRTCastApp(App):
         self.queue = queue
         self.pipeline = pipeline
         self.chromecast = chromecast
+        self._pending_display: QueueItem | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -323,22 +324,26 @@ class CRTCastApp(App):
         self.query_one("#btn-pause", Button).label = "⏸" if state == "PLAYING" else "▶"
 
     def _refresh_all(self) -> None:
-        error_item = None
-        for item in reversed(self.queue.items):
-            if item.status == "error":
-                error_item = item
-                break
+        playing_item = next(
+            (i for i in self.queue.items if i.status in ("casting", "playing")), None
+        )
+        # Once a real playing item appears, the pending hint is no longer needed.
+        if playing_item:
+            self._pending_display = None
+        # Discard pending hint if the item was removed from the queue.
+        if self._pending_display and not any(
+            i.id == self._pending_display.id for i in self.queue.items
+        ):
+            self._pending_display = None
 
-        active = self.queue.active_item()
-        playing_item = active if active and active.status in ("casting", "playing") else None
+        show = playing_item or self._pending_display
         widget = self.query_one("#now-playing", NowPlayingWidget)
-        show = playing_item or error_item
         is_playing = bool(playing_item and playing_item.status == "playing")
 
         if show:
             widget.title = show.title or show.url
-            widget.status = show.status
-            widget.error_msg = show.error or ""
+            widget.status = show.status if playing_item else "casting"
+            widget.error_msg = ""
         else:
             widget.title = ""
             widget.status = ""
@@ -421,12 +426,17 @@ class CRTCastApp(App):
                 target.filename = None
         # Only interrupt actual playback; leave downloading/encoding untouched.
         # playback_position is already kept current by _poll_playback_async.
-        # Must search for "playing" directly — active_item() could return target itself
-        # (now "ready") if it sits before the playing item in the queue.
-        playing = next((i for i in self.queue.items if i.status == "playing"), None)
-        if playing:
-            playing.status = "done"
+        # Must search directly — active_item() could return target itself (now "ready")
+        # if it sits before the active item. Must include "casting": if the item hasn't
+        # reached "playing" yet, it would survive here and prematurely clear
+        # _pending_display in _refresh_all before transitioning to "done".
+        active = next(
+            (i for i in self.queue.items if i.status in ("casting", "playing")), None
+        )
+        if active:
+            active.status = "done"
         self.pipeline.resume_position = target.playback_position
+        self._pending_display = target
         self.pipeline._next_item_id = target.id
         self.pipeline.cancel_cast()
         if target.status == "queued":

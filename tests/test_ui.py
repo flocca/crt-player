@@ -181,6 +181,61 @@ async def test_enter_on_ready_item_starts_play(app, queue, mock_pipeline):
 
 
 @pytest.mark.asyncio
+async def test_now_playing_no_blank_when_prev_was_playing(app, queue, mock_pipeline):
+    """now-playing must not flash empty when switching away from a playing item."""
+    item_a = queue.add("https://youtube.com/watch?v=1")
+    item_a.title = "Video A"
+    item_a.status = "playing"
+    item_b = queue.add("https://youtube.com/watch?v=2")
+    item_b.title = "Video B"
+    item_b.status = "ready"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        list_view = app.query_one("#queue-list", QueueListView)
+        list_view.focus()
+        list_view.index = 1
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        # Pipeline mid-transition: A → done, B not yet casting
+        app._refresh_all()
+        await pilot.pause()
+        np = app.query_one("#now-playing", NowPlayingWidget)
+        assert np.title == "Video B", f"Expected 'Video B', got '{np.title}'"
+
+
+@pytest.mark.asyncio
+async def test_now_playing_no_blank_when_prev_was_casting(app, queue, mock_pipeline):
+    """now-playing must not flash empty when switching away from a still-casting item.
+
+    This is the tricky case: if the old item was "casting" (not yet "playing"),
+    _refresh_all would find it as the active item and clear _pending_display before
+    the pipeline sets it to "done", leaving the widget blank.
+    """
+    item_a = queue.add("https://youtube.com/watch?v=1")
+    item_a.title = "Video A"
+    item_a.status = "casting"  # Not yet "playing"
+    item_b = queue.add("https://youtube.com/watch?v=2")
+    item_b.title = "Video B"
+    item_b.status = "ready"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        list_view = app.query_one("#queue-list", QueueListView)
+        list_view.focus()
+        list_view.index = 1
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        # Pipeline mid-transition: A → done, B not yet casting
+        app._refresh_all()
+        await pilot.pause()
+        np = app.query_one("#now-playing", NowPlayingWidget)
+        assert np.title == "Video B", f"Expected 'Video B', got '{np.title}'"
+
+
+@pytest.mark.asyncio
 async def test_enter_on_playing_item_does_nothing(app, queue, mock_pipeline):
     """Pressing Enter on an already-playing item must not trigger any action."""
     item = queue.add("https://youtube.com/watch?v=1")
