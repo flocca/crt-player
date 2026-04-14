@@ -10,9 +10,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Tests
 source .venv/bin/activate
-python -m pytest tests/ -v                        # full suite (45 tests)
+python -m pytest tests/ -v                        # full unit suite (50 tests)
 python -m pytest tests/test_queue_manager.py -v   # single file
 python -m pytest tests/test_pipeline.py::test_fetch_title -v  # single test
+
+# Integration tests (require real Chromecast + internet)
+source .env.integration                           # set TEST_CHROMECAST_NAME, TEST_VIDEO_URL_1, etc.
+python -m pytest -m integration -v -s             # runs tests/test_integration.py
 
 # Dependencies
 pip install -r requirements.txt                   # inside .venv
@@ -37,6 +41,14 @@ TUI app (Textual) that downloads YouTube videos, converts them to 4:3 PAL (768x5
 **Encoding pipeline:** `_detect_crop()` runs a cropdetect pre-pass (120 frames) to remove baked-in black bars from the source. `_build_video_filter()` then applies scale+crop or scale+pad based on `CRT_SCALE_MODE`, and stretches the result to 16:9 (1024x576) so the Chromecast doesn't add pillarboxing — the user's HW squeezes 16:9→4:3 restoring correct proportions.
 
 **Encoding cache:** Cached files are named `{video_id}_pal_{scale_mode}.mp4` in TEMP_DIR. Changing `CRT_SCALE_MODE` triggers re-encode. Files live for `FILE_TTL_HOURS` (default 24h). `fetch_title()` returns `(title, video_id)`.
+
+## Integration Tests
+
+Tests in `tests/test_integration.py` exercise the full stack with a real Chromecast and real YouTube URLs. They are opt-in (`pytest -m integration`) and skip automatically if env vars are absent.
+- Configure via `source .env.integration` (gitignored). Key vars: `TEST_CHROMECAST_NAME`, `TEST_VIDEO_URL_1`, `TEST_VIDEO_URL_2`, `TEST_ENCODE_WAIT_S` (default 600s), `TEST_PLAYBACK_WAIT_S` (default 300s).
+- `fetch_title()` always runs before the encode cache check — queue item status stays `"queued"` until the network call returns. YouTube rate-limits back-to-back `extract_info` calls; allow up to `encode_wait_s` for "pipeline started".
+- Session-scoped `real_chromecast` fixture must recreate `asyncio.Event` objects per test (different event loops). Teardown must call `chromecast.stop()` — leaving the device playing causes `poll_status()` threads in the next test to saturate the asyncio thread pool, starving `asyncio.to_thread(fetch_title)` from getting a worker slot.
+- After state transitions (cast switch, playback start), add a 3-5s settle pause + re-assert status. Catches late pychromecast status callbacks that race past the happy-path wait and regress item state.
 
 ## Debugging
 
@@ -69,6 +81,8 @@ TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Share
 - YouTube videos often have black bars baked into the pixel data (pillarbox/letterbox). `_detect_crop()` handles this automatically. Without it, crop/scale operates on the bars as if they were content.
 - `active_item()` returns the first item matching `ACTIVE_STATUSES` (which includes "ready"). To find the playing item specifically, use `next((i for i in queue.items if i.status == "playing"), None)` — avoids picking a "ready" item that sits earlier in the queue.
 - `cast_url` / `block_until_active()` may return while the player is still in "LOADING" state. A subsequent `seek_to` call can be silently ignored. Pass `current_time=position` to `play_media` instead — starts at the right position from the initial load request.
+- pychromecast `MediaStatus.idle_reason` distinguishes natural end (`"FINISHED"`) from transition-IDLE (`"CANCELLED"`/`"INTERRUPTED"` fired when loading new media). Don't treat PLAYING→IDLE as playback end without checking the reason — a late IDLE from the previous item can arrive after `reset_playback_ended()` and falsely end the new item.
+- Textual `Static` with overridden `render()` doesn't update the widget's internal `_content` size cache. Use `watch_*` reactive methods that call `self.update(...)` instead — otherwise title changes may render from stale content and `height: auto` won't adapt.
 
 ## Language
 

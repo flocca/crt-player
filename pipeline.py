@@ -352,7 +352,14 @@ class PipelineWorker:
         media_url = f"http://{local_ip}:{config.SERVER_PORT}/media/{item.filename}"
         start_pos = self.resume_position
         self.resume_position = 0.0
-        await asyncio.to_thread(self.chromecast.cast_url, media_url, start_pos)
+        try:
+            await asyncio.to_thread(self.chromecast.cast_url, media_url, start_pos)
+        except Exception as e:
+            log.exception("cast_url failed for %s", item.url)
+            item.status = "error"
+            item.error = str(e)
+            self.notify()
+            return
 
         item.status = "playing"
         self.notify()

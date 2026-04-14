@@ -85,7 +85,16 @@ class ChromecastManager:
         self.duration = status.duration or 0.0
         if status.volume_level is not None:
             self.volume = status.volume_level
-        if self.player_state == "IDLE" and previous in ("PLAYING", "BUFFERING"):
+        # Only treat IDLE as "playback ended" when the chromecast reports
+        # idle_reason=FINISHED. Other reasons (CANCELLED, INTERRUPTED, ERROR)
+        # fire during media-to-media transitions and would falsely end the
+        # next item's playback if processed after reset_playback_ended().
+        idle_reason = getattr(status, "idle_reason", None)
+        if (
+            self.player_state == "IDLE"
+            and previous in ("PLAYING", "BUFFERING")
+            and idle_reason == "FINISHED"
+        ):
             self._playback_ended_event.set()
         if self._on_status_change:
             self._on_status_change()

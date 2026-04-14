@@ -38,7 +38,7 @@ class NowPlayingWidget(Static):
     status = reactive("", layout=True)
     error_msg = reactive("", layout=True)
 
-    def render(self) -> str:
+    def _compose_content(self) -> str:
         if not self.title:
             return "  Nessun video in riproduzione\n "
 
@@ -50,6 +50,19 @@ class NowPlayingWidget(Static):
         if self.status == "casting":
             return f'  "{title}"\n  [dim]Connessione al Chromecast...[/dim]'
         return f'  "{title}"\n '
+
+    def watch_title(self) -> None:
+        self.update(self._compose_content())
+
+    def watch_status(self) -> None:
+        self.update(self._compose_content())
+
+    def watch_error_msg(self) -> None:
+        self.update(self._compose_content())
+
+    def on_resize(self) -> None:
+        # Re-render when width changes so long titles truncate correctly.
+        self.update(self._compose_content())
 
 
 class QueueListView(ListView):
@@ -327,8 +340,10 @@ class CRTCastApp(App):
         playing_item = next(
             (i for i in self.queue.items if i.status in ("casting", "playing")), None
         )
-        # Once a real playing item appears, the pending hint is no longer needed.
-        if playing_item:
+        # Only clear the pending hint once the item is actually playing, not just
+        # casting. If cast_url fails the item goes to "error" and playing_item
+        # becomes None; keeping _pending_display prevents a blank NowPlaying flash.
+        if playing_item and playing_item.status == "playing":
             self._pending_display = None
         # Discard pending hint if the item was removed from the queue.
         if self._pending_display and not any(
@@ -337,13 +352,24 @@ class CRTCastApp(App):
             self._pending_display = None
 
         show = playing_item or self._pending_display
+        # During automatic transitions (current item just ended, next not yet casting)
+        # keep showing the next ready item instead of going blank.
+        if not show:
+            show = self.queue.next_ready()
+
         widget = self.query_one("#now-playing", NowPlayingWidget)
         is_playing = bool(playing_item and playing_item.status == "playing")
 
         if show:
             widget.title = show.title or show.url
-            widget.status = show.status if playing_item else "casting"
-            widget.error_msg = ""
+            if playing_item:
+                widget.status = playing_item.status
+            elif show.status == "error":
+                widget.status = "error"
+                widget.error_msg = show.error or ""
+            else:
+                widget.status = "casting"
+                widget.error_msg = ""
         else:
             widget.title = ""
             widget.status = ""
