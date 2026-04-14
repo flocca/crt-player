@@ -570,8 +570,10 @@ class CRTCastApp(App):
             )
             return
 
-        media_url = f"http://{get_local_ip()}:{config.SERVER_PORT}/media/calibration.mp4"
         try:
+            media_url = (
+                f"http://{get_local_ip()}:{config.SERVER_PORT}/media/calibration.mp4"
+            )
             if not self.chromecast.connected:
                 await asyncio.wait_for(self.chromecast.wait_for_connection(), timeout=30.0)
             await asyncio.to_thread(self.chromecast.cast_url, media_url, 0.0)

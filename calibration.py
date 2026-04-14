@@ -38,11 +38,12 @@ def build_calibration_filter(duration_s: int = 60) -> str:
     produces a fully composed stream that the caller can mux directly into mp4
     using ffmpeg's -filter_complex and -map flags.
 
-    Margin values are encoded as edge-indicator bars: a thin bar of height
-    equal to the margin value is drawn at each inner edge in a distinct colour
-    so the user can read the pixel count visually (count the bar height).
-    The filter string therefore contains the margin values as drawbox
-    dimensions, e.g. ``drawbox=...h=T:7...`` style annotations.
+    Margin values are encoded as coloured edge-indicator bars whose
+    ``drawbox`` widths/heights are set to the numeric margin values. The user
+    reads the pixel count visually from each bar's size rather than from text
+    labels embedded in the filter string. The same margin values are also used
+    later by the pad step to expand the composed inner image back to the full
+    output frame size.
     """
     inner_w, inner_h = _inner_dims()
     cx = inner_w // 2
