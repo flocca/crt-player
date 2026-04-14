@@ -38,12 +38,17 @@ TUI app (Textual) that downloads YouTube videos, converts them to 4:3 PAL (768x5
 - `CRT_SCALE_MODE` (`crop`|`pad`, default `crop`) — crop fills the frame by cutting edges, pad adds letterbox bars.
 - `CRT_MARGIN_TOP`, `CRT_MARGIN_BOTTOM`, `CRT_MARGIN_LEFT`, `CRT_MARGIN_RIGHT` (pixels in logical 768×576 frame, default 0) — black borders to compensate for CRT overscan. Sum per axis is clamped to 50% of the frame. Press `Ctrl+T` in the TUI to cast a calibration grid. Changing any margin triggers re-encode (cache filename carries `_m{t}-{b}-{l}-{r}` suffix when non-zero).
 - `CRT_AUTO_CROP` (`1`|`0`, default `1`) — when enabled, `_detect_crop()` analyzes the first 120 frames for baked-in black bars and applies a `crop=...` before encoding. Set to `0` to skip it entirely. Useful when cropdetect misfires on videos with dark content near the edges (opening titles, night scenes), which can silently delete real pixels before the margin step.
+- `CRT_LOOP` (`1`|`0`, default `0`) — when enabled, the playlist loops back to the first item after the last item finishes. Togglable at runtime via `Ctrl+R` in the TUI (session-local, not persisted to state.json).
 
 **Persistence:** Queue state (items, history, playback position) saved to `~/.local/share/crt-player/state.json` (configurable via `CRT_STATE_FILE`). Auto-saves every 60s + on exit. On reload, mid-processing items reset to `"queued"`; playing items become `"ready"` if encoded file exists (skips download+encode).
+
+**Playlist model:** `done` is informational only — not a terminal state. The cast loop uses `advance_cursor()` on `QueueManager` to find the next item by queue position, looping back if `loop_mode=True`. `prepare_for_play()` transitions `done`/`error` items to `ready` (cache hit) or `queued` (cache miss) before casting.
 
 **Encoding pipeline:** `_detect_crop()` runs a cropdetect pre-pass (120 frames) to remove baked-in black bars from the source. `_build_video_filter()` then applies scale+crop or scale+pad based on `CRT_SCALE_MODE`, and stretches the result to 16:9 (1024x576) so the Chromecast doesn't add pillarboxing — the user's HW squeezes 16:9→4:3 restoring correct proportions.
 
 **Encoding cache:** Cached files are named `{video_id}_pal_{scale_mode}.mp4` in TEMP_DIR (back-compat shape; when any `CRT_MARGIN_*` is non-zero the name gains a `_m{top}-{bottom}-{left}-{right}` suffix). Changing `CRT_SCALE_MODE` or any margin triggers re-encode. The filename helper lives in `config.py` as `cached_encoded_filename()` so `pipeline.py` and `queue_manager.py` agree. Files live for `FILE_TTL_HOURS` (default 24h). `fetch_title()` returns `(title, video_id)`.
+
+**Queue helpers:** `advance_cursor(loop)` returns the next item by position after the current cursor (playing or last done). `prepare_for_play(item)` transitions done/error to ready/queued based on cache. `can_move(item_id, direction)` returns bool for UI disabled state. `first_queued_after_cursor()` is used by the prefetch loop to skip items before the cursor.
 
 ## Integration Tests
 
