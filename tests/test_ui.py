@@ -1,5 +1,6 @@
 import pytest
 from textual.widgets import Button, Input, ListView, Select
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ui import CRTCastApp, NowPlayingWidget, QueueListItem, QueueListView
 
@@ -279,9 +280,6 @@ async def test_remove_item(app, queue):
 # --- Calibration pattern ---
 
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-
 @pytest.mark.asyncio
 async def test_ctrl_t_triggers_calibration(app, mock_chromecast):
     """Pressing ctrl+t should generate and cast the calibration pattern."""
@@ -314,4 +312,25 @@ async def test_ctrl_t_blocked_while_video_playing(app, queue, mock_chromecast):
             await pilot.pause()
 
     gen.assert_not_awaited()
+    mock_chromecast.cast_url.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_t_aborts_if_video_starts_during_render(app, queue, mock_chromecast):
+    """If a video starts playing while the pattern is being rendered, skip the cast."""
+    mock_chromecast.connected = True
+    mock_chromecast.cast_url = MagicMock()
+
+    async def fake_generate(*_args, **_kwargs):
+        # Simulate a video starting mid-render.
+        item = queue.add("https://youtube.com/watch?v=xyz")
+        item.status = "playing"
+        return "/tmp/calibration.mp4"
+
+    with patch("ui.calibration.generate_calibration_clip", new=fake_generate), \
+         patch("ui.get_local_ip", return_value="127.0.0.1"):
+        async with app.run_test() as pilot:
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+
     mock_chromecast.cast_url.assert_not_called()

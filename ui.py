@@ -546,11 +546,12 @@ class CRTCastApp(App):
         self._refresh_all()
 
     async def action_calibrate(self) -> None:
-        active = next(
-            (i for i in self.queue.items if i.status in ("casting", "playing")),
-            None,
-        )
-        if active:
+        def _playing() -> bool:
+            return any(
+                i.status in ("casting", "playing") for i in self.queue.items
+            )
+
+        if _playing():
             self.notify("Ferma il video attuale prima di calibrare.", severity="warning")
             return
 
@@ -562,11 +563,17 @@ class CRTCastApp(App):
             self.notify(f"Errore calibrazione: {e}", severity="error")
             return
 
-        if not self.chromecast.connected:
-            await self.chromecast.wait_for_connection()
+        if _playing():
+            self.notify(
+                "Un video è iniziato durante la generazione del pattern.",
+                severity="warning",
+            )
+            return
 
         media_url = f"http://{get_local_ip()}:{config.SERVER_PORT}/media/calibration.mp4"
         try:
+            if not self.chromecast.connected:
+                await self.chromecast.wait_for_connection()
             await asyncio.to_thread(self.chromecast.cast_url, media_url, 0.0)
         except Exception as e:
             self.notify(f"Errore cast pattern: {e}", severity="error")
