@@ -152,7 +152,60 @@ async def test_integration_single_video_plays(
 async def test_integration_playback_completes(
     integration_config, integration_app, real_queue, real_chromecast_per_test
 ):
-    pass  # implemented in Task 5
+    url = integration_config["video_url_1"]
+    playback_wait_s = integration_config["playback_wait_s"]
+
+    async with integration_app.run_test(size=(120, 40)) as pilot:
+        # Submit URL via TUI
+        await pilot.click("#url-input")
+        await pilot.pause()
+        integration_app.query_one("#url-input", Input).value = url
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(real_queue.items) == 1
+
+        # Pipeline started (handles cache hit: status may skip directly to ready)
+        await wait_for_condition(
+            pilot,
+            lambda: real_queue.items[0].status in (
+                "downloading", "encoding", "ready", "casting", "playing"
+            ),
+            timeout_s=60,
+            description="pipeline started",
+        )
+
+        # Encode complete
+        await wait_for_condition(
+            pilot,
+            lambda: real_queue.items[0].status in ("ready", "casting", "playing"),
+            timeout_s=300,
+            description="status=ready (encode complete)",
+        )
+
+        # Chromecast playing
+        await wait_for_condition(
+            pilot,
+            lambda: real_chromecast_per_test.player_state == "PLAYING",
+            timeout_s=60,
+            description="player_state=PLAYING",
+        )
+
+        # Wait for full playback to complete
+        await wait_for_condition(
+            pilot,
+            lambda: real_queue.items[0].status == "done",
+            timeout_s=playback_wait_s,
+            description="status=done (playback finished)",
+        )
+
+        # TUI assertions post-playback
+        assert real_queue.items[0].status == "done"
+        playback_row = integration_app.query_one("#playback-row")
+        assert playback_row.display is False, (
+            "#playback-row should be hidden after playback completes"
+        )
 
 
 @pytest.mark.integration
@@ -161,4 +214,59 @@ async def test_integration_playback_completes(
 async def test_integration_queue_transition(
     integration_config, integration_app, real_queue, real_chromecast_per_test
 ):
-    pass  # implemented in Task 6
+    url1 = integration_config["video_url_1"]
+    url2 = integration_config["video_url_2"]
+    if not url2:
+        pytest.skip("TEST_VIDEO_URL_2 not set — queue transition test requires two videos")
+    playback_wait_s = integration_config["playback_wait_s"]
+
+    async with integration_app.run_test(size=(120, 40)) as pilot:
+        # Insert both URLs in sequence
+        await pilot.click("#url-input")
+        await pilot.pause()
+        integration_app.query_one("#url-input", Input).value = url1
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        integration_app.query_one("#url-input", Input).value = url2
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert len(real_queue.items) == 2, "Both URLs should be in the queue"
+
+        # Wait for first video to reach playing status
+        await wait_for_condition(
+            pilot,
+            lambda: real_queue.items[0].status == "playing",
+            timeout_s=420,
+            description="video1 status=playing",
+        )
+
+        title_1 = integration_app.query_one("#now-playing", NowPlayingWidget).title
+        assert title_1, "NowPlayingWidget should show first video title"
+
+        # Wait for first video to finish
+        await wait_for_condition(
+            pilot,
+            lambda: real_queue.items[0].status == "done",
+            timeout_s=playback_wait_s,
+            description="video1 status=done",
+        )
+
+        # Second video must start automatically (no user action)
+        await wait_for_condition(
+            pilot,
+            lambda: real_queue.items[1].status == "playing",
+            timeout_s=60,
+            description="video2 status=playing (automatic transition)",
+        )
+
+        # TUI: NowPlayingWidget updated to second video
+        title_2 = integration_app.query_one("#now-playing", NowPlayingWidget).title
+        assert title_2 != title_1, (
+            f"NowPlayingWidget should show second video title, still showing: '{title_2}'"
+        )
+        assert real_queue.items[0].status == "done"
+        assert real_queue.items[1].status == "playing"
