@@ -197,6 +197,7 @@ class PipelineWorker:
         self._on_update: Callable | None = None
         self.resume_position: float = 0.0
         self._cast_enabled: bool = False  # True once user explicitly starts playback
+        self._next_item_id: str | None = None  # Specific item to cast next (no reorder)
 
     def set_update_callback(self, callback: Callable) -> None:
         self._on_update = callback
@@ -240,7 +241,17 @@ class PipelineWorker:
     async def run_cast(self) -> None:
         while True:
             self._cast_cancel.clear()
-            item = self.queue.next_ready() if self._cast_enabled else None
+            item = None
+            if self._cast_enabled:
+                if self._next_item_id:
+                    nid = self._next_item_id
+                    self._next_item_id = None
+                    item = next(
+                        (i for i in self.queue.items if i.id == nid and i.status == "ready"),
+                        None,
+                    )
+                if item is None:
+                    item = self.queue.next_ready()
             if item is None:
                 self._cast_wake.clear()
                 await self._cast_wake.wait()
@@ -339,14 +350,12 @@ class PipelineWorker:
 
         local_ip = get_local_ip()
         media_url = f"http://{local_ip}:{config.SERVER_PORT}/media/{item.filename}"
-        await asyncio.to_thread(self.chromecast.cast_url, media_url)
+        start_pos = self.resume_position
+        self.resume_position = 0.0
+        await asyncio.to_thread(self.chromecast.cast_url, media_url, start_pos)
 
         item.status = "playing"
         self.notify()
-
-        if self.resume_position > 0:
-            await asyncio.to_thread(self.chromecast.seek_to, self.resume_position)
-            self.resume_position = 0.0
 
         await self._wait_for_playback_end()
 

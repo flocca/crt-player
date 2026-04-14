@@ -119,11 +119,11 @@ class ChromecastManager:
             if status.volume_level is not None:
                 self.volume = status.volume_level
 
-    def cast_url(self, url: str) -> None:
+    def cast_url(self, url: str, start_position: float = 0.0) -> None:
         if not self.cast:
             raise RuntimeError("Chromecast not connected")
         mc = self.cast.media_controller
-        mc.play_media(url, "video/mp4")
+        mc.play_media(url, "video/mp4", current_time=start_position)
         mc.block_until_active()
 
     def _safe_cmd(self, fn: object) -> None:

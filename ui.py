@@ -297,9 +297,9 @@ class CRTCastApp(App):
 
     async def _poll_playback_async(self) -> None:
         await asyncio.to_thread(self.chromecast.poll_status)
-        active = self.queue.active_item()
-        if active and active.status == "playing":
-            active.playback_position = self.chromecast.current_time
+        playing = next((i for i in self.queue.items if i.status == "playing"), None)
+        if playing:
+            playing.playback_position = self.chromecast.current_time
         self._update_playback()
 
     def _update_playback(self) -> None:
@@ -421,14 +421,16 @@ class CRTCastApp(App):
                 target.filename = None
         # Only interrupt actual playback; leave downloading/encoding untouched.
         # playback_position is already kept current by _poll_playback_async.
-        active = self.queue.active_item()
-        if active and active.status == "playing":
-            active.status = "done"
+        # Must search for "playing" directly — active_item() could return target itself
+        # (now "ready") if it sits before the playing item in the queue.
+        playing = next((i for i in self.queue.items if i.status == "playing"), None)
+        if playing:
+            playing.status = "done"
         self.pipeline.resume_position = target.playback_position
+        self.pipeline._next_item_id = target.id
         self.pipeline.cancel_cast()
         if target.status == "queued":
             self.pipeline.cancel_prepare()
-        self.queue.move_to_front(target.id)
         self.pipeline.wake()
         self._refresh_all()
 

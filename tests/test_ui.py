@@ -173,9 +173,11 @@ async def test_enter_on_ready_item_starts_play(app, queue, mock_pipeline):
         mock_pipeline.wake.reset_mock()
         await pilot.press("enter")
         await pilot.pause()
-        # Pipeline woken and ready item moved to front
+        # Pipeline woken with the specific item to play; queue order unchanged
         mock_pipeline.wake.assert_called_once()
-        assert queue.items[0].title == "Ready"
+        assert mock_pipeline._next_item_id == item2.id
+        # Queue order preserved (playing item stays first)
+        assert queue.items[0].title == "Playing"
 
 
 @pytest.mark.asyncio
