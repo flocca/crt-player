@@ -47,7 +47,7 @@ Scan for Chromecasts: `python -c "import pychromecast, time; ccs, b = pychromeca
 
 TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Shared fixtures in `tests/conftest.py`.
 - `QueueManager` is used as-is (pure data). `PipelineWorker` and `ChromecastManager` are `MagicMock` with `AsyncMock` for async methods — this neutralizes `on_mount`'s infinite-loop tasks.
-- `on_mount` only calls `_refresh_all` when `next_pending()` finds a queued item. To test UI state for "playing"/"ready" items, call `app._refresh_all()` manually after mount.
+- `on_mount` calls `_refresh_all` when `queue.items` is non-empty and focuses the queue list; otherwise focuses the URL input. `wake()` only fires if `next_pending()` exists. To test UI state for "playing"/"ready" items without pre-populating the queue, call `app._refresh_all()` manually after mount.
 - Always `await pilot.pause()` after interactions (`press`, `click`, value changes) — handlers run asynchronously.
 - Textual `ListView` is falsy when empty. Don't `assert widget` — use `query_one()` (raises `NoMatches` if absent).
 
@@ -67,6 +67,8 @@ TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Share
 - Textual `Static.render()` text is not clickable. Any interactive element (button) must be a real `Button` widget inside `compose()`. Events bubble up to the `App` via `on_button_pressed`.
 - Chromecast always outputs a 16:9 signal. Sending a 4:3 file results in pillarboxing. Encode to 16:9 (1024x576) with stretched 4:3 content so the user's HW squeeze restores correct proportions. This is handled by `_build_video_filter()`.
 - YouTube videos often have black bars baked into the pixel data (pillarbox/letterbox). `_detect_crop()` handles this automatically. Without it, crop/scale operates on the bars as if they were content.
+- `active_item()` returns the first item matching `ACTIVE_STATUSES` (which includes "ready"). To find the playing item specifically, use `next((i for i in queue.items if i.status == "playing"), None)` — avoids picking a "ready" item that sits earlier in the queue.
+- `cast_url` / `block_until_active()` may return while the player is still in "LOADING" state. A subsequent `seek_to` call can be silently ignored. Pass `current_time=position` to `play_media` instead — starts at the right position from the initial load request.
 
 ## Language
 
