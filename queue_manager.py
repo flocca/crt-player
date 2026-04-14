@@ -107,6 +107,36 @@ class QueueManager:
                     return i < len(self.items) - 1
         return False
 
+    def advance_cursor(self, loop: bool) -> "QueueItem | None":
+        """Return the next item to play, or None if end of playlist (stop mode).
+
+        Cursor = first item with status 'playing', or last item with status 'done'.
+        Returns items[cursor_idx + 1], wrapping to items[0] if loop=True,
+        or None if loop=False and the cursor is at the last position.
+        If no cursor exists (fresh playlist), returns items[0] or None if empty.
+        Does NOT mutate any item state.
+        """
+        cursor_idx: int | None = None
+        last_done_idx: int | None = None
+
+        for i, item in enumerate(self.items):
+            if item.status == "playing":
+                cursor_idx = i
+                break
+            if item.status == "done":
+                last_done_idx = i
+
+        if cursor_idx is None:
+            cursor_idx = last_done_idx
+
+        if cursor_idx is None:
+            return self.items[0] if self.items else None
+
+        next_idx = cursor_idx + 1
+        if next_idx >= len(self.items):
+            return self.items[0] if loop else None
+        return self.items[next_idx]
+
     def move_to_front(self, item_id: str) -> bool:
         for i, item in enumerate(self.items):
             if item.id == item_id:

@@ -194,3 +194,73 @@ def test_active_item():
     assert qm.active_item() is item1
     item1.status = "done"
     assert qm.active_item() is None
+
+
+def test_advance_cursor_returns_next_after_playing():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "playing"
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    assert qm.advance_cursor(loop=False) is item2
+
+
+def test_advance_cursor_returns_next_after_last_done():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "done"
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    qm.add("https://youtube.com/watch?v=3")
+    # last done = item1 (index 0), next = item2 (index 1)
+    assert qm.advance_cursor(loop=False) is item2
+
+
+def test_advance_cursor_uses_last_done_when_multiple():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "done"
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "done"
+    item3 = qm.add("https://youtube.com/watch?v=3")
+    # last done = item2 (index 1), next = item3 (index 2)
+    assert qm.advance_cursor(loop=False) is item3
+
+
+def test_advance_cursor_playing_takes_priority_over_done():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "done"
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "playing"
+    item3 = qm.add("https://youtube.com/watch?v=3")
+    # playing = item2 (index 1), next = item3 (index 2)
+    assert qm.advance_cursor(loop=False) is item3
+
+
+def test_advance_cursor_stop_mode_returns_none_at_end():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item1.status = "done"
+    # cursor at last item (index 0), no next → None
+    assert qm.advance_cursor(loop=False) is None
+
+
+def test_advance_cursor_loop_mode_wraps_to_first():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    item2 = qm.add("https://youtube.com/watch?v=2")
+    item2.status = "playing"  # last item is playing
+    assert qm.advance_cursor(loop=True) is item1
+
+
+def test_advance_cursor_no_cursor_empty_list():
+    qm = QueueManager()
+    assert qm.advance_cursor(loop=False) is None
+    assert qm.advance_cursor(loop=True) is None
+
+
+def test_advance_cursor_no_cursor_nonempty_list():
+    qm = QueueManager()
+    item1 = qm.add("https://youtube.com/watch?v=1")
+    qm.add("https://youtube.com/watch?v=2")
+    # No playing, no done — fresh playlist: return first item
+    assert qm.advance_cursor(loop=False) is item1
