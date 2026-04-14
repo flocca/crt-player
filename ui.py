@@ -331,6 +331,7 @@ class CRTCastApp(App):
                 self.pipeline.wake_prepare()
         else:
             self.query_one("#url-input", Input).focus()
+        self._refresh_loop_indicator()
 
     def _on_chromecast_connection(self) -> None:
         self._safe_call(self._update_connection)

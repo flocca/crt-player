@@ -1,5 +1,5 @@
 import pytest
-from textual.widgets import Button, Input, ListView, Select
+from textual.widgets import Button, Input, ListView, Select, Static
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import config as config_module
@@ -438,12 +438,12 @@ async def test_loop_toggle_flips_mode(app, mock_pipeline):
         await pilot.press("ctrl+r")
         await pilot.pause()
         assert app.loop_mode is False
+        assert mock_pipeline.loop_mode is False
 
 
 @pytest.mark.asyncio
 async def test_loop_toggle_shows_indicator_in_header(app):
     async with app.run_test() as pilot:
-        from textual.widgets import Static
         header = app.query_one("#queue-header", Static)
         assert "⟳" not in header.content
         await pilot.press("ctrl+r")
