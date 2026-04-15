@@ -24,6 +24,7 @@ def mock_pipeline():
     p.set_update_callback = MagicMock()
     p.resume_position = 0.0
     p.loop_mode = False
+    p._cast_enabled = False
     return p
 
 
