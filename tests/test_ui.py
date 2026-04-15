@@ -1,8 +1,17 @@
 import pytest
-from textual.widgets import Button, Input, ListView, Select
+from textual.widgets import Button, Input, ListView, Select, Static
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import config as config_module
 from ui import CRTCastApp, NowPlayingWidget, QueueListItem, QueueListView
+
+
+@pytest.fixture(autouse=True)
+def _restore_config():
+    orig_loop = config_module.LOOP_MODE_DEFAULT
+    config_module.LOOP_MODE_DEFAULT = False  # pin to False so tests don't depend on CRT_LOOP env
+    yield
+    config_module.LOOP_MODE_DEFAULT = orig_loop
 
 
 # --- Compose & mount ---
@@ -334,3 +343,110 @@ async def test_ctrl_t_aborts_if_video_starts_during_render(app, queue, mock_chro
             await pilot.pause()
 
     mock_chromecast.cast_url.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_queue_list_item_has_up_down_buttons(app, queue):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        items = list(app.query(QueueListItem))
+        assert len(items) == 2
+        item0_id = queue.items[0].id
+        item1_id = queue.items[1].id
+        items[0].query_one(f"#up-{item0_id}", Button)
+        items[0].query_one(f"#down-{item0_id}", Button)
+        items[1].query_one(f"#up-{item1_id}", Button)
+        items[1].query_one(f"#down-{item1_id}", Button)
+
+
+@pytest.mark.asyncio
+async def test_up_button_moves_item_up(app, queue, mock_pipeline):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        item1_id = queue.items[0].id
+        item2_id = queue.items[1].id
+        await pilot.click(f"#up-{item2_id}")
+        await pilot.pause()
+        assert queue.items[0].id == item2_id
+        assert queue.items[1].id == item1_id
+
+
+@pytest.mark.asyncio
+async def test_down_button_moves_item_down(app, queue, mock_pipeline):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        item1_id = queue.items[0].id
+        await pilot.click(f"#down-{item1_id}")
+        await pilot.pause()
+        assert queue.items[1].id == item1_id
+
+
+@pytest.mark.asyncio
+async def test_up_button_disabled_for_first_item(app, queue):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        item0_id = queue.items[0].id
+        up_btn = app.query_one(f"#up-{item0_id}", Button)
+        assert up_btn.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_down_button_disabled_for_last_item(app, queue):
+    queue.add("https://youtube.com/watch?v=1")
+    queue.items[0].title = "First"
+    queue.add("https://youtube.com/watch?v=2")
+    queue.items[1].title = "Second"
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        item1_id = queue.items[1].id
+        down_btn = app.query_one(f"#down-{item1_id}", Button)
+        assert down_btn.disabled is True
+
+
+# --- Loop mode ---
+
+
+@pytest.mark.asyncio
+async def test_loop_toggle_flips_mode(app, mock_pipeline):
+    async with app.run_test() as pilot:
+        assert app.loop_mode is False
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert app.loop_mode is True
+        assert mock_pipeline.loop_mode is True
+        # Toggle back
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert app.loop_mode is False
+        assert mock_pipeline.loop_mode is False
+
+
+@pytest.mark.asyncio
+async def test_loop_toggle_shows_indicator_in_header(app):
+    async with app.run_test() as pilot:
+        header = app.query_one("#queue-header", Static)
+        assert "⟳" not in header.content
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert "⟳" in header.content

@@ -88,16 +88,77 @@ class QueueManager:
     def move(self, item_id: str, direction: str) -> bool:
         for i, item in enumerate(self.items):
             if item.id == item_id:
-                if item.status != "queued":
-                    return False
-                if direction == "up" and i > 0 and self.items[i - 1].status == "queued":
+                if direction == "up" and i > 0:
                     self.items[i], self.items[i - 1] = self.items[i - 1], self.items[i]
                     return True
-                if direction == "down" and i < len(self.items) - 1 and self.items[i + 1].status == "queued":
+                if direction == "down" and i < len(self.items) - 1:
                     self.items[i], self.items[i + 1] = self.items[i + 1], self.items[i]
                     return True
                 return False
         return False
+
+    def can_move(self, item_id: str, direction: str) -> bool:
+        """Return True if item can be moved in that direction (border check only)."""
+        for i, item in enumerate(self.items):
+            if item.id == item_id:
+                if direction == "up":
+                    return i > 0
+                if direction == "down":
+                    return i < len(self.items) - 1
+        return False
+
+    def advance_cursor(self, loop: bool) -> "QueueItem | None":
+        """Return the next item to play, or None if end of playlist (stop mode).
+
+        Cursor = first item with status 'playing', or last item with status 'done'.
+        Returns items[cursor_idx + 1], wrapping to items[0] if loop=True,
+        or None if loop=False and the cursor is at the last position.
+        If no cursor exists (fresh playlist), returns items[0] or None if empty.
+        Does NOT mutate any item state.
+
+        When multiple items are 'done', the cursor is the LAST done item in the list.
+        Items that precede the cursor (even if 'queued') are skipped until manually selected.
+        """
+        cursor_idx: int | None = None
+        last_done_idx: int | None = None
+
+        for i, item in enumerate(self.items):
+            if item.status == "playing":
+                cursor_idx = i
+                break
+            if item.status == "done":
+                last_done_idx = i
+
+        if cursor_idx is None:
+            cursor_idx = last_done_idx
+
+        if cursor_idx is None:
+            return self.items[0] if self.items else None
+
+        next_idx = cursor_idx + 1
+        if next_idx >= len(self.items):
+            return self.items[0] if loop else None
+        return self.items[next_idx]
+
+    def prepare_for_play(self, item: QueueItem) -> None:
+        """Transition item to the correct pre-play state based on cache.
+
+        done/error + cached MP4 → ready (instant replay)
+        done/error + no cache  → queued (pipeline will re-download)
+        ready / queued / downloading / encoding → unchanged
+        """
+        if item.status not in ("done", "error"):
+            return
+        if item.filename and os.path.isfile(
+            os.path.join(config.TEMP_DIR, item.filename)
+        ):
+            item.status = "ready"
+            item.error = None
+        else:
+            item.status = "queued"
+            item.filename = None
+            item.progress = 0.0
+            item.error = None
 
     def move_to_front(self, item_id: str) -> bool:
         for i, item in enumerate(self.items):
@@ -120,16 +181,36 @@ class QueueManager:
                 return item
         return None
 
-    def next_ready(self) -> QueueItem | None:
-        """First 'ready' item that can be cast now.
+    def first_queued_after_cursor(self) -> QueueItem | None:
+        """First 'queued' item after the cursor position.
 
-        Encoding items are skipped — they don't block casting a manually
-        selected ready item that was moved ahead of them.
-        Queued/downloading items do block (they haven't been prepared yet).
+        Cursor = first playing item, or last done item. If no cursor,
+        searches from the beginning (equivalent to first_queued()).
+        Used by the prepare loop so prefetch targets only items ahead of
+        the current playback position.
         """
+        cursor_idx: int | None = None
+        last_done_idx: int | None = None
+
+        for i, item in enumerate(self.items):
+            if item.status == "playing":
+                cursor_idx = i
+                break
+            if item.status == "done":
+                last_done_idx = i
+
+        if cursor_idx is None:
+            cursor_idx = last_done_idx
+
+        start = (cursor_idx + 1) if cursor_idx is not None else 0
+        for item in self.items[start:]:
+            if item.status == "queued":
+                return item
+        return None
+
+    def first_ready(self) -> QueueItem | None:
+        """First item with status 'ready', for display purposes."""
         for item in self.items:
-            if item.status in ("queued", "downloading"):
-                return None
             if item.status == "ready":
                 return item
         return None

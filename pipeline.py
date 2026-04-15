@@ -228,6 +228,7 @@ class PipelineWorker:
         self._on_update: Callable | None = None
         self.resume_position: float = 0.0
         self._cast_enabled: bool = False  # True once user explicitly starts playback
+        self.loop_mode: bool = config.LOOP_MODE_DEFAULT
         self._next_item_id: str | None = None  # Specific item to cast next (no reorder)
 
     def set_update_callback(self, callback: Callable) -> None:
@@ -261,7 +262,21 @@ class PipelineWorker:
     async def run_prepare(self) -> None:
         while True:
             self._prepare_cancel.clear()
-            item = self.queue.first_queued()
+            # Prioritise an explicitly-requested item (set via _next_item_id)
+            # so it gets prepared even if it sits before the cursor.
+            item = None
+            if self._next_item_id:
+                item = next(
+                    (i for i in self.queue.items if i.id == self._next_item_id and i.status == "queued"),
+                    None,
+                )
+            if item is None:
+                item = self.queue.first_queued_after_cursor()
+            # Fallback: after a loop-wrap, the next candidate may be before the
+            # cursor (e.g. items[0] after all items are done). first_queued()
+            # finds it while first_queued_after_cursor() would not.
+            if item is None:
+                item = self.queue.first_queued()
             if item is None:
                 self._prepare_wake.clear()
                 await self._prepare_wake.wait()
@@ -276,13 +291,26 @@ class PipelineWorker:
             if self._cast_enabled:
                 if self._next_item_id:
                     nid = self._next_item_id
-                    self._next_item_id = None
-                    item = next(
-                        (i for i in self.queue.items if i.id == nid and i.status == "ready"),
-                        None,
-                    )
-                if item is None:
-                    item = self.queue.next_ready()
+                    target = next((i for i in self.queue.items if i.id == nid), None)
+                    if target is None or target.status == "error":
+                        # Item was removed or failed to prepare — clear the pending
+                        # selection so normal cursor-based playback can resume.
+                        self._next_item_id = None
+                    elif target.status == "ready":
+                        item = target
+                        self._next_item_id = None
+                # Only advance cursor when no explicit selection is pending.
+                # If _next_item_id is set but item isn't ready yet, we wait
+                # for the prepare loop to finish encoding it.
+                if item is None and not self._next_item_id:
+                    candidate = self.queue.advance_cursor(loop=self.loop_mode)
+                    if candidate is not None:
+                        self.queue.prepare_for_play(candidate)
+                        if candidate.status == "ready":
+                            item = candidate
+                        elif candidate.status == "queued":
+                            # Cache miss: wake prepare loop so it encodes the item.
+                            self.wake_prepare()
             if item is None:
                 self._cast_wake.clear()
                 await self._cast_wake.wait()

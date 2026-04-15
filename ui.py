@@ -83,10 +83,12 @@ class QueueListView(ListView):
 
 
 class QueueListItem(ListItem):
-    def __init__(self, item: QueueItem, index: int) -> None:
+    def __init__(self, item: QueueItem, index: int, can_up: bool = True, can_down: bool = True) -> None:
         super().__init__()
         self.queue_item = item
         self.index = index
+        self._can_up = can_up
+        self._can_down = can_down
 
     def _build_label(self) -> str:
         title = self.queue_item.title or self.queue_item.url
@@ -115,10 +117,28 @@ class QueueListItem(ListItem):
         return f"  {prefix} {self.index + 1}. {title}{suffix}"
 
     def compose(self) -> ComposeResult:
-        yield Label(self._build_label())
+        with Horizontal(classes="queue-row"):
+            yield Label(self._build_label(), classes="queue-title")
+            with Horizontal(classes="queue-actions"):
+                yield Button(
+                    "↑",
+                    id=f"up-{self.queue_item.id}",
+                    classes="queue-action-btn",
+                    disabled=not self._can_up,
+                )
+                yield Button(
+                    "↓",
+                    id=f"down-{self.queue_item.id}",
+                    classes="queue-action-btn",
+                    disabled=not self._can_down,
+                )
 
     def refresh_label(self) -> None:
-        self.query_one(Label).update(self._build_label())
+        self.query_one(".queue-title", Label).update(self._build_label())
+
+    def update_buttons(self, can_up: bool, can_down: bool) -> None:
+        self.query_one(f"#up-{self.queue_item.id}", Button).disabled = not can_up
+        self.query_one(f"#down-{self.queue_item.id}", Button).disabled = not can_down
 
 
 class CRTCastApp(App):
@@ -182,6 +202,31 @@ class CRTCastApp(App):
         border: solid $accent;
         margin: 1 2;
     }
+    .queue-row {
+        height: 1;
+    }
+    .queue-title {
+        width: 1fr;
+    }
+    .queue-actions {
+        width: auto;
+        height: 1;
+    }
+    .queue-action-btn {
+        min-width: 3;
+        height: 1;
+        border: none;
+        background: transparent;
+        color: $text;
+        padding: 0;
+        margin: 0 0 0 1;
+    }
+    .queue-action-btn:hover {
+        background: $accent;
+    }
+    .queue-action-btn:disabled {
+        color: $text-disabled;
+    }
     """
 
     BINDINGS = [
@@ -198,6 +243,7 @@ class CRTCastApp(App):
         Binding("backspace", "remove_item", "Rimuovi", show=True),
         Binding("ctrl+k", "move_up", "Su", show=True, priority=True),
         Binding("ctrl+j", "move_down", "Giù", show=True, priority=True),
+        Binding("ctrl+r", "toggle_loop", "Loop", show=True, priority=True),
         Binding("escape", "quit", "Esci", show=True, priority=True),
     ]
 
@@ -212,6 +258,7 @@ class CRTCastApp(App):
         self.pipeline = pipeline
         self.chromecast = chromecast
         self._pending_display: QueueItem | None = None
+        self.loop_mode: bool = config.LOOP_MODE_DEFAULT
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -249,7 +296,7 @@ class CRTCastApp(App):
         sel = self._highlighted_status()
         has_sel = sel is not None
         if action == "play_selected":
-            return True if sel in ("queued", "ready", "done") else False
+            return True if sel in ("queued", "ready", "done", "error") else False
         if action in ("stop", "pause", "seek_back", "seek_forward", "next_video", "prev_video"):
             return True if playing else False
         if action in ("remove_item", "move_up", "move_down"):
@@ -284,6 +331,7 @@ class CRTCastApp(App):
                 self.pipeline.wake_prepare()
         else:
             self.query_one("#url-input", Input).focus()
+        self._refresh_loop_indicator()
 
     def _on_chromecast_connection(self) -> None:
         self._safe_call(self._update_connection)
@@ -356,10 +404,10 @@ class CRTCastApp(App):
             self._pending_display = None
 
         show = playing_item or self._pending_display
-        # During automatic transitions (current item just ended, next not yet casting)
-        # keep showing the next ready item instead of going blank.
+        # During automatic transitions (current item just ended, next not yet casting),
+        # keep showing the first ready item in the queue instead of going blank.
         if not show:
-            show = self.queue.next_ready()
+            show = self.queue.first_ready()
 
         widget = self.query_one("#now-playing", NowPlayingWidget)
         is_playing = bool(playing_item and playing_item.status == "playing")
@@ -393,20 +441,39 @@ class CRTCastApp(App):
         queue_ids = [item.id for item in self.queue.items]
         existing_ids = [li.queue_item.id for li in existing]
 
+        n = len(self.queue.items)
         if queue_ids == existing_ids:
             for i, (li, item) in enumerate(zip(existing, self.queue.items)):
                 li.queue_item = item
                 li.index = i
                 li.refresh_label()
+                li.update_buttons(can_up=i > 0, can_down=i < n - 1)
             return
 
-        prev_index = list_view.index
+        # Preserve selection by item id so the highlight follows the moved item.
+        highlighted_id = (
+            list_view.highlighted_child.queue_item.id
+            if list_view.highlighted_child is not None
+            else None
+        )
         had_focus = list_view.has_focus
+        prev_index = list_view.index
         list_view.clear()
         for i, item in enumerate(self.queue.items):
-            list_view.append(QueueListItem(item, i))
+            list_view.append(QueueListItem(
+                item, i,
+                can_up=i > 0,
+                can_down=i < n - 1,
+            ))
         if self.queue.items:
-            list_view.index = min(prev_index or 0, len(self.queue.items) - 1)
+            if highlighted_id is not None:
+                new_idx = next(
+                    (i for i, it in enumerate(self.queue.items) if it.id == highlighted_id),
+                    None,
+                )
+                list_view.index = new_idx if new_idx is not None else min(prev_index or 0, n - 1)
+            else:
+                list_view.index = min(prev_index or 0, n - 1)
         if had_focus:
             list_view.focus()
 
@@ -427,7 +494,16 @@ class CRTCastApp(App):
         self._refresh_all()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        btn_id = event.button.id
+        btn_id = event.button.id or ""
+        # Queue reorder buttons (↑/↓ on each row)
+        if btn_id.startswith("up-") or btn_id.startswith("down-"):
+            direction, _, item_id = btn_id.partition("-")
+            if self.queue.move(item_id, direction):
+                self._refresh_queue_list()
+                self.pipeline.wake_prepare()
+            event.stop()
+            return
+        # Playback control buttons
         if btn_id == "btn-prev":
             self.action_prev_video()
         elif btn_id == "btn-back":
@@ -443,17 +519,9 @@ class CRTCastApp(App):
         if not isinstance(event.item, QueueListItem):
             return
         target = event.item.queue_item
-        if target.status not in ("queued", "ready", "done"):
+        if target.status not in ("queued", "ready", "done", "error"):
             return
-        # Restore a "done" item to its playable state before proceeding.
-        if target.status == "done":
-            if target.filename and os.path.isfile(
-                os.path.join(config.TEMP_DIR, target.filename)
-            ):
-                target.status = "ready"
-            else:
-                target.status = "queued"
-                target.filename = None
+        self.queue.prepare_for_play(target)
         # Only interrupt actual playback; leave downloading/encoding untouched.
         # playback_position is already kept current by _poll_playback_async.
         # Must search directly — active_item() could return target itself (now "ready")
@@ -512,15 +580,29 @@ class CRTCastApp(App):
         list_view = self.query_one("#queue-list", ListView)
         if list_view.highlighted_child is not None:
             queue_item = list_view.highlighted_child.queue_item
-            self.queue.move(queue_item.id, "up")
-            self._refresh_queue_list()
+            if self.queue.move(queue_item.id, "up"):
+                self._refresh_queue_list()
+                self.pipeline.wake_prepare()
 
     def action_move_down(self) -> None:
         list_view = self.query_one("#queue-list", ListView)
         if list_view.highlighted_child is not None:
             queue_item = list_view.highlighted_child.queue_item
-            self.queue.move(queue_item.id, "down")
-            self._refresh_queue_list()
+            if self.queue.move(queue_item.id, "down"):
+                self._refresh_queue_list()
+                self.pipeline.wake_prepare()
+
+    def _refresh_loop_indicator(self) -> None:
+        text = " CODA ⟳" if self.loop_mode else " CODA"
+        self.query_one("#queue-header", Static).update(text)
+
+    def action_toggle_loop(self) -> None:
+        self.loop_mode = not self.loop_mode
+        self.pipeline.loop_mode = self.loop_mode
+        self._refresh_loop_indicator()
+        self.notify(f"Loop: {'ON' if self.loop_mode else 'OFF'}")
+        if self.loop_mode and self.pipeline._cast_enabled:
+            self.pipeline.wake()
 
     async def action_seek_back(self) -> None:
         await asyncio.to_thread(self.chromecast.seek, -15)
