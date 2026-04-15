@@ -404,8 +404,8 @@ class CRTCastApp(App):
             self._pending_display = None
 
         show = playing_item or self._pending_display
-        # During automatic transitions (current item just ended, next not yet casting)
-        # keep showing the next ready item instead of going blank.
+        # During automatic transitions (current item just ended, next not yet casting),
+        # keep showing the first ready item in the queue instead of going blank.
         if not show:
             show = self.queue.first_ready()
 
@@ -441,26 +441,23 @@ class CRTCastApp(App):
         queue_ids = [item.id for item in self.queue.items]
         existing_ids = [li.queue_item.id for li in existing]
 
+        n = len(self.queue.items)
         if queue_ids == existing_ids:
             for i, (li, item) in enumerate(zip(existing, self.queue.items)):
                 li.queue_item = item
                 li.index = i
                 li.refresh_label()
-                li.update_buttons(
-                    can_up=self.queue.can_move(item.id, "up"),
-                    can_down=self.queue.can_move(item.id, "down"),
-                )
+                li.update_buttons(can_up=i > 0, can_down=i < n - 1)
             return
 
         prev_index = list_view.index
         had_focus = list_view.has_focus
         list_view.clear()
-        n = len(self.queue.items)
         for i, item in enumerate(self.queue.items):
             list_view.append(QueueListItem(
                 item, i,
-                can_up=self.queue.can_move(item.id, "up"),
-                can_down=self.queue.can_move(item.id, "down"),
+                can_up=i > 0,
+                can_down=i < n - 1,
             ))
         if self.queue.items:
             list_view.index = min(prev_index or 0, n - 1)
@@ -591,7 +588,7 @@ class CRTCastApp(App):
         self.pipeline.loop_mode = self.loop_mode
         self._refresh_loop_indicator()
         self.notify(f"Loop: {'ON' if self.loop_mode else 'OFF'}")
-        if self.loop_mode:
+        if self.loop_mode and self.pipeline._cast_enabled:
             self.pipeline.wake()
 
     async def action_seek_back(self) -> None:

@@ -291,12 +291,14 @@ class PipelineWorker:
             if self._cast_enabled:
                 if self._next_item_id:
                     nid = self._next_item_id
-                    item = next(
-                        (i for i in self.queue.items if i.id == nid and i.status == "ready"),
-                        None,
-                    )
-                    if item is not None:
-                        self._next_item_id = None  # consume only when actually used
+                    target = next((i for i in self.queue.items if i.id == nid), None)
+                    if target is None or target.status == "error":
+                        # Item was removed or failed to prepare — clear the pending
+                        # selection so normal cursor-based playback can resume.
+                        self._next_item_id = None
+                    elif target.status == "ready":
+                        item = target
+                        self._next_item_id = None
                 # Only advance cursor when no explicit selection is pending.
                 # If _next_item_id is set but item isn't ready yet, we wait
                 # for the prepare loop to finish encoding it.

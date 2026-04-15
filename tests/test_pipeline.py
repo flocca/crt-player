@@ -226,6 +226,7 @@ async def test_detect_crop_runs_ffmpeg_when_auto_crop_enabled():
 def test_pipeline_worker_loop_mode_defaults_to_false():
     from pipeline import PipelineWorker
     from unittest.mock import MagicMock
+    config_module.LOOP_MODE_DEFAULT = False  # pin so test is not CRT_LOOP-env-dependent
     worker = PipelineWorker(MagicMock(), MagicMock())
     assert worker.loop_mode is False
 

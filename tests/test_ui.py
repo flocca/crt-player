@@ -9,6 +9,7 @@ from ui import CRTCastApp, NowPlayingWidget, QueueListItem, QueueListView
 @pytest.fixture(autouse=True)
 def _restore_config():
     orig_loop = config_module.LOOP_MODE_DEFAULT
+    config_module.LOOP_MODE_DEFAULT = False  # pin to False so tests don't depend on CRT_LOOP env
     yield
     config_module.LOOP_MODE_DEFAULT = orig_loop
 
