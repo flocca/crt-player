@@ -450,8 +450,14 @@ class CRTCastApp(App):
                 li.update_buttons(can_up=i > 0, can_down=i < n - 1)
             return
 
-        prev_index = list_view.index
+        # Preserve selection by item id so the highlight follows the moved item.
+        highlighted_id = (
+            list_view.highlighted_child.queue_item.id
+            if list_view.highlighted_child is not None
+            else None
+        )
         had_focus = list_view.has_focus
+        prev_index = list_view.index
         list_view.clear()
         for i, item in enumerate(self.queue.items):
             list_view.append(QueueListItem(
@@ -460,7 +466,14 @@ class CRTCastApp(App):
                 can_down=i < n - 1,
             ))
         if self.queue.items:
-            list_view.index = min(prev_index or 0, n - 1)
+            if highlighted_id is not None:
+                new_idx = next(
+                    (i for i, it in enumerate(self.queue.items) if it.id == highlighted_id),
+                    None,
+                )
+                list_view.index = new_idx if new_idx is not None else min(prev_index or 0, n - 1)
+            else:
+                list_view.index = min(prev_index or 0, n - 1)
         if had_focus:
             list_view.focus()
 
