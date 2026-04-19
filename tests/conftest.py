@@ -40,6 +40,8 @@ def mock_chromecast():
     c.duration = 0.0
     c.poll_status = MagicMock()
     c.pause_or_resume = MagicMock()
+    c.is_session_lost = MagicMock(return_value=False)
+    c.cast_url = MagicMock()
     c.stop = MagicMock()
     c.seek = MagicMock()
     c.adjust_volume = MagicMock()

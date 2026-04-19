@@ -432,6 +432,7 @@ class PipelineWorker:
 
     async def _wait_for_playback_end(self) -> None:
         self.chromecast.reset_playback_ended()
+        log.info("pipeline: waiting for playback end (event cleared)")
         cancel_task = asyncio.create_task(self._cast_cancel.wait())
         playback_task = asyncio.create_task(self.chromecast.wait_for_playback_end())
         done, pending = await asyncio.wait(
@@ -439,3 +440,5 @@ class PipelineWorker:
         )
         for task in pending:
             task.cancel()
+        reason = "cancel" if cancel_task in done else "playback_end"
+        log.info("pipeline: _wait_for_playback_end returned (reason=%s)", reason)

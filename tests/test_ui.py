@@ -116,6 +116,109 @@ async def test_pause_button(app, queue, mock_chromecast):
 
 
 @pytest.mark.asyncio
+async def test_pause_recasts_when_session_lost(app, queue, mock_chromecast):
+    """Long pause → Chromecast returns to backdrop → resume must relaunch the
+    current item from its saved position, not call pause_or_resume."""
+    item = queue.add("https://youtube.com/watch?v=1")
+    item.title = "Video"
+    item.status = "playing"
+    item.filename = "abc_pal_crop.mp4"
+    item.playback_position = 123.4
+    mock_chromecast.is_session_lost.return_value = True
+    async with app.run_test() as pilot:
+        app._refresh_all()
+        await pilot.pause()
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        mock_chromecast.pause_or_resume.assert_not_called()
+        mock_chromecast.cast_url.assert_called_once()
+        args, _ = mock_chromecast.cast_url.call_args
+        assert args[0].endswith("/media/abc_pal_crop.mp4")
+        assert args[1] == 123.4
+
+
+def test_is_session_lost_backdrop():
+    """app_id None or IDLE_APP_ID (E8C28D3C) → session lost."""
+    from unittest.mock import MagicMock
+    import pychromecast
+
+    from chromecast_mgr import ChromecastManager
+
+    mgr = ChromecastManager()
+    mgr.cast = MagicMock()
+    mgr.cast.app_id = None
+    mgr.cast.is_idle = True
+    assert mgr.is_session_lost() is True
+
+    mgr.cast.app_id = pychromecast.IDLE_APP_ID
+    assert mgr.is_session_lost() is True
+
+
+def test_is_session_lost_receiver_but_unknown_state():
+    """After long-pause timeout pychromecast auto-relaunches CC1AD845 but no
+    media is loaded — player_state stays UNKNOWN. We must still detect this
+    as a lost session, otherwise pause/play become no-ops."""
+    from unittest.mock import MagicMock
+
+    from chromecast_mgr import ChromecastManager
+
+    mgr = ChromecastManager()
+    mgr.cast = MagicMock()
+    mgr.cast.app_id = "CC1AD845"  # Default Media Receiver relaunched
+    mgr.cast.is_idle = False
+    mgr.player_state = "UNKNOWN"
+    assert mgr.is_session_lost() is True
+
+    mgr.player_state = "IDLE"
+    assert mgr.is_session_lost() is True
+
+
+def test_on_media_status_preserves_current_time_on_session_death():
+    """When the Chromecast reports PAUSED -> UNKNOWN with current_time=0 (session
+    torn down after long pause), the last valid current_time must survive so
+    the recast resumes from the pause position instead of the beginning."""
+    from unittest.mock import MagicMock
+
+    from chromecast_mgr import ChromecastManager
+
+    mgr = ChromecastManager()
+    mgr.cast = MagicMock()
+    mgr.cast.app_id = "CC1AD845"
+
+    # Simulate normal pause
+    paused_status = MagicMock(
+        player_state="PAUSED", current_time=11.2, duration=600.0, volume_level=None,
+        idle_reason=None,
+    )
+    mgr._on_media_status(paused_status)
+    assert mgr.current_time == 11.2
+
+    # Simulate session teardown: player_state=None, current_time=0
+    dead_status = MagicMock(
+        player_state=None, current_time=0.0, duration=0.0, volume_level=None,
+        idle_reason=None,
+    )
+    mgr._on_media_status(dead_status)
+    assert mgr.player_state == "UNKNOWN"
+    assert mgr.current_time == 11.2, "pause position must survive session teardown"
+
+
+def test_is_session_lost_healthy_playback():
+    """Active media session → not lost."""
+    from unittest.mock import MagicMock
+
+    from chromecast_mgr import ChromecastManager
+
+    mgr = ChromecastManager()
+    mgr.cast = MagicMock()
+    mgr.cast.app_id = "CC1AD845"
+    mgr.cast.is_idle = False
+    for state in ("PLAYING", "PAUSED", "BUFFERING"):
+        mgr.player_state = state
+        assert mgr.is_session_lost() is False, state
+
+
+@pytest.mark.asyncio
 async def test_keybinding_seek_forward(app, queue, mock_chromecast):
     item = queue.add("https://youtube.com/watch?v=1")
     item.status = "playing"

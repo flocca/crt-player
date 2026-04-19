@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 from textual.app import App, ComposeResult
@@ -24,6 +25,8 @@ import config
 from chromecast_mgr import ChromecastManager
 from pipeline import PipelineWorker, get_local_ip
 from queue_manager import ACTIVE_STATUSES, QueueItem, QueueManager
+
+log = logging.getLogger(__name__)
 
 
 def _format_time(secs: float) -> str:
@@ -364,7 +367,11 @@ class CRTCastApp(App):
     async def _poll_playback_async(self) -> None:
         await asyncio.to_thread(self.chromecast.poll_status)
         playing = next((i for i in self.queue.items if i.status == "playing"), None)
-        if playing:
+        # Only persist position when the Chromecast reports a real playback
+        # state. UNKNOWN/IDLE during a session teardown carries a bogus
+        # current_time=0 that would otherwise clobber the pause position and
+        # make the recast restart from the beginning.
+        if playing and self.chromecast.player_state in ("PLAYING", "PAUSED", "BUFFERING"):
             playing.playback_position = self.chromecast.current_time
         self._update_playback()
 
@@ -547,7 +554,51 @@ class CRTCastApp(App):
         await asyncio.to_thread(self.chromecast.stop)
 
     async def action_pause(self) -> None:
+        log.info(
+            "action_pause invoked (player_state=%s connected=%s)",
+            self.chromecast.player_state,
+            self.chromecast.connected,
+        )
+        if self.chromecast.is_session_lost():
+            log.info("action_pause: session lost -> recasting from saved position")
+            await self._recast_current_from_saved_position()
+            return
+        log.info("action_pause: session alive -> pause_or_resume")
         await asyncio.to_thread(self.chromecast.pause_or_resume)
+
+    async def _recast_current_from_saved_position(self) -> None:
+        """Re-launch the current playing item from its last known position.
+
+        Used when pausing for long enough that the Chromecast torn down the
+        media session and returned to the backdrop — pause/play commands no
+        longer reach anything, so we have to issue a fresh play_media."""
+        playing = next(
+            (i for i in self.queue.items if i.status == "playing"), None
+        )
+        if playing is None or not playing.filename:
+            log.warning(
+                "recast: no playing item or missing filename (playing=%s)",
+                playing.id if playing else None,
+            )
+            return
+        media_url = (
+            f"http://{get_local_ip()}:{config.SERVER_PORT}/media/{playing.filename}"
+        )
+        log.info(
+            "recast: item=%s filename=%s position=%.1f url=%s",
+            playing.id,
+            playing.filename,
+            playing.playback_position,
+            media_url,
+        )
+        try:
+            await asyncio.to_thread(
+                self.chromecast.cast_url, media_url, playing.playback_position
+            )
+            log.info("recast: cast_url completed")
+        except Exception as e:
+            log.exception("recast: cast_url raised")
+            self.notify(f"Errore ripresa: {e}", severity="error")
 
     def action_volume_up(self) -> None:
         self.chromecast.adjust_volume(10)
