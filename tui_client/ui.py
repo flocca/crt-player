@@ -92,17 +92,26 @@ class CRTCastApp(App):
             marker = ">>" if item.get("is_cursor") else "  "
             label = f"{marker} {item['status']:>10s}  {item['title']}"
             list_view.append(ListItem(Label(label)))
+        # loop_mode lives in library_state; refresh the status bar to reflect it.
+        self._render_status_bar()
 
     def watch_status_state(self, value: dict) -> None:
+        self._render_status_bar()
+
+    def _render_status_bar(self) -> None:
         try:
             bar = self.query_one("#status_bar", Static)
         except Exception:
             return
-        yt = value.get("youtube", {})
-        pl = value.get("player", {})
+        status = self.status_state or {}
+        library = self.library_state or {}
+        yt = status.get("youtube", {})
+        pl = status.get("player", {})
+        loop_label = "loop ON" if library.get("loop_mode") else "loop off"
         bar.update(
             f"YT: {yt.get('state', '?')} (last sync: {yt.get('last_sync_at') or 'never'})  |  "
-            f"Player: {pl.get('state', '?')}  |  CC: {pl.get('chromecast', '?')}"
+            f"Player: {pl.get('state', '?')}  |  CC: {pl.get('chromecast', '?')}  |  "
+            f"{loop_label}"
         )
 
     async def action_toggle(self) -> None:
