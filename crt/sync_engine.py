@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ class SyncEngine:
         self.last_sync_at: str | None = None
         self.last_error: str | None = None
         self.state: str = "ok"
+        self._kick: asyncio.Event | None = None  # created lazily in run_loop
 
     def run_sync_once(self) -> None:
         """Fetch playlist snapshot and apply diff to library. Synchronous."""
@@ -101,6 +103,30 @@ class SyncEngine:
         if self.library.cursor_video_id == video_id:
             self.library.cursor_video_id = None
         log.info("Removed: %s", video_id)
+
+    async def run_loop(self, interval_s: int = 300, initial_delay_s: int = 10) -> None:
+        """Periodic sync. Cancellable via task.cancel()."""
+        self._kick = asyncio.Event()
+        await asyncio.sleep(initial_delay_s)
+        backoff = 0
+        while True:
+            await asyncio.to_thread(self.run_sync_once)
+            if self.state == "degraded":
+                backoff = min((backoff or 30) * 2, 1800)  # 30s → 60s → ... → 30m
+                wait = backoff
+            else:
+                backoff = 0
+                wait = interval_s
+            try:
+                await asyncio.wait_for(self._kick.wait(), timeout=wait)
+                self._kick.clear()
+            except asyncio.TimeoutError:
+                pass
+
+    def kick(self) -> None:
+        """Force the next iteration to run immediately."""
+        if self._kick is not None:
+            self._kick.set()
 
     def _delete_cache_files(self, item: QueueItem) -> None:
         if item.filename:

@@ -322,6 +322,10 @@ class CRTCastApp(App):
         asyncio.create_task(self.chromecast.discover_loop())
         asyncio.create_task(self.pipeline.run_prepare())
         asyncio.create_task(self.pipeline.run_cast())
+        if getattr(self, "_sync_engine", None) is not None:
+            self._sync_task = asyncio.create_task(
+                self._sync_engine.run_loop(interval_s=self._sync_interval)
+            )
         self.set_interval(1, self._poll_playback)
         self.set_interval(60, self._auto_save)
         if self.queue.items:

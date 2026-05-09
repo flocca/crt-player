@@ -64,10 +64,24 @@ def main() -> None:
     pipeline = PipelineWorker(queue, chromecast)
     pipeline.resume_position = saved_position
 
+    from crt.youtube_client import YouTubeClient, YouTubeAuthError
+    from crt.sync_engine import SyncEngine
+
+    sync_engine = None
+    if config.YT_PLAYLIST_ID:
+        try:
+            yt_client = YouTubeClient.from_token_file(config.YT_TOKEN_FILE, config.YT_CLIENT_SECRETS)
+            sync_engine = SyncEngine(queue, yt_client, config.YT_PLAYLIST_ID)
+            log.info("SyncEngine ready (playlist=%s, interval=%ds)", config.YT_PLAYLIST_ID, config.SYNC_INTERVAL_S)
+        except (YouTubeAuthError, FileNotFoundError) as e:
+            log.warning("SyncEngine disabled: %s", e)
+
     # Create and run the TUI app
     # Background tasks (chromecast discovery, pipeline worker) are started
     # from CRTCastApp.on_mount() which runs inside Textual's asyncio loop
     app = CRTCastApp(queue, pipeline, chromecast)
+    app._sync_engine = sync_engine
+    app._sync_interval = config.SYNC_INTERVAL_S
     app.run()
 
     # Save state before shutdown

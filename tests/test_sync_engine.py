@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -147,3 +148,78 @@ def test_run_sync_once_records_timestamp_on_success():
     assert engine.last_sync_at is not None
     assert engine.state == "ok"
     assert engine.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_runs_sync_at_interval():
+    library = LibraryStore()
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = []
+    engine = SyncEngine(library, yt_client, playlist_id="PL")
+
+    sync_calls = []
+    orig_sync = engine.run_sync_once
+    def counting_sync():
+        sync_calls.append(1)
+        orig_sync()
+    engine.run_sync_once = counting_sync
+
+    task = asyncio.create_task(engine.run_loop(interval_s=0.05, initial_delay_s=0))
+    await asyncio.sleep(0.18)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert len(sync_calls) >= 3
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_backs_off_on_error():
+    library = LibraryStore()
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.side_effect = RuntimeError("transient")
+    engine = SyncEngine(library, yt_client, playlist_id="PL")
+
+    task = asyncio.create_task(engine.run_loop(interval_s=0.05, initial_delay_s=0))
+    await asyncio.sleep(0.15)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert engine.state == "degraded"
+    assert "transient" in engine.last_error
+
+
+@pytest.mark.asyncio
+async def test_kick_forces_immediate_iteration():
+    library = LibraryStore()
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = []
+    engine = SyncEngine(library, yt_client, playlist_id="PL")
+
+    sync_count = []
+    orig = engine.run_sync_once
+    def counting():
+        sync_count.append(1)
+        orig()
+    engine.run_sync_once = counting
+
+    # Long interval (60s) but kick should fire next iteration immediately
+    task = asyncio.create_task(engine.run_loop(interval_s=60, initial_delay_s=0))
+    await asyncio.sleep(0.05)  # let first iteration run
+    initial_count = len(sync_count)
+    engine.kick()
+    await asyncio.sleep(0.05)  # let kicked iteration run
+    final_count = len(sync_count)
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert final_count > initial_count
