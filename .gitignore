@@ -6,6 +6,7 @@ __pycache__/
 .env
 crt_cast.log
 state.json
+state.json.*
 .worktrees/
 .env.integration
 *.egg-info/
