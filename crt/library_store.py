@@ -61,6 +61,8 @@ class LibraryStore:
     def __init__(self) -> None:
         self.items: list[QueueItem] = []
         self.history: list[QueueItem] = []
+        self.cursor_video_id: str | None = None
+        self.loop_mode: bool = config.LOOP_MODE_DEFAULT
 
     def push_to_history(self, item: QueueItem) -> None:
         self.history.append(item)

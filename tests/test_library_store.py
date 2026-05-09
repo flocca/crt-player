@@ -431,3 +431,19 @@ def test_queue_item_from_dict_restores_video_id():
 def test_queue_item_from_dict_defaults_video_id_when_absent():
     item = QueueItem.from_dict({"url": "https://youtube.com/watch?v=abc"})
     assert item.video_id == ""
+
+
+def test_library_store_has_cursor_video_id():
+    ls = LibraryStore()
+    assert ls.cursor_video_id is None
+
+
+def test_library_store_has_loop_mode():
+    ls = LibraryStore()
+    assert ls.loop_mode is False
+
+
+def test_library_store_set_cursor():
+    ls = LibraryStore()
+    ls.cursor_video_id = "abc"
+    assert ls.cursor_video_id == "abc"
