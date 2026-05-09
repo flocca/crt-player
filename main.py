@@ -8,7 +8,7 @@ import time
 
 import uvicorn
 
-import config
+from crt import config
 from chromecast_mgr import ChromecastManager
 from media_server import create_media_app
 from pipeline import PipelineWorker

@@ -8,7 +8,7 @@ from typing import Callable
 import pychromecast
 from pychromecast.controllers.media import MediaStatusListener
 
-import config
+from crt import config
 
 log = logging.getLogger(__name__)
 

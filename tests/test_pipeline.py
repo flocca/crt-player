@@ -4,9 +4,9 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
-import config as config_module
+import crt.config as config_module
 from pipeline import fetch_title, download_video, encode_video, _build_video_filter, _detect_crop
-from config import cached_encoded_filename
+from crt.config import cached_encoded_filename
 from queue_manager import QueueItem
 
 

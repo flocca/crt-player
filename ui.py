@@ -21,7 +21,7 @@ from textual.widgets import (
 )
 
 import calibration
-import config
+from crt import config
 from chromecast_mgr import ChromecastManager
 from pipeline import PipelineWorker, get_local_ip
 from queue_manager import ACTIVE_STATUSES, QueueItem, QueueManager

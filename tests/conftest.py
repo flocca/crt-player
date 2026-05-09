@@ -93,7 +93,7 @@ def integration_config():
 @pytest.fixture(scope="session")
 def real_tmp_dir(integration_config, tmp_path_factory):
     """Dedicated temp dir for encoded files; starts the media server once for the session."""
-    import config as cfg
+    import crt.config as cfg
     from media_server import create_media_app
 
     d = tmp_path_factory.mktemp("integration_media")
@@ -122,7 +122,7 @@ def real_tmp_dir(integration_config, tmp_path_factory):
 @pytest.fixture(scope="session")
 def real_chromecast(integration_config, real_tmp_dir):
     """Real ChromecastManager, discovered once per test session."""
-    import config as cfg
+    import crt.config as cfg
     from chromecast_mgr import ChromecastManager
 
     cfg.CHROMECAST_NAME = integration_config["chromecast_name"]

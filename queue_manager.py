@@ -7,7 +7,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 
-import config
+from crt import config
 
 log = logging.getLogger(__name__)
 

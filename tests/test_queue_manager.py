@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
-import config as config_module
+import crt.config as config_module
 from queue_manager import QueueItem, QueueManager
 
 

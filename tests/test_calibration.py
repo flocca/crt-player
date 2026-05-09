@@ -1,5 +1,5 @@
 import pytest
-import config as config_module
+import crt.config as config_module
 from calibration import build_calibration_filter
 
 

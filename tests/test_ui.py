@@ -2,7 +2,7 @@ import pytest
 from textual.widgets import Button, Input, ListView, Select, Static
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import config as config_module
+import crt.config as config_module
 from ui import CRTCastApp, NowPlayingWidget, QueueListItem, QueueListView
 
 

@@ -13,7 +13,7 @@ def _reload_config(monkeypatch, **env):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    import config
+    import crt.config as config
     importlib.reload(config)
     return config
 

@@ -98,7 +98,7 @@ def test_load_fixup_playing_with_file(tmp_path, monkeypatch):
     temp_dir = str(tmp_path / "media")
     os.makedirs(temp_dir)
     open(os.path.join(temp_dir, "vid_pal.mp4"), "w").close()
-    monkeypatch.setattr("config.TEMP_DIR", temp_dir)
+    monkeypatch.setattr("crt.config.TEMP_DIR", temp_dir)
 
     path = str(tmp_path / "state.json")
     data = {
@@ -124,7 +124,7 @@ def test_load_fixup_playing_with_file(tmp_path, monkeypatch):
 def test_load_fixup_playing_without_file(tmp_path, monkeypatch):
     temp_dir = str(tmp_path / "media")
     os.makedirs(temp_dir)
-    monkeypatch.setattr("config.TEMP_DIR", temp_dir)
+    monkeypatch.setattr("crt.config.TEMP_DIR", temp_dir)
 
     path = str(tmp_path / "state.json")
     data = {

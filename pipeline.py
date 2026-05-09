@@ -8,7 +8,7 @@ from typing import Callable
 
 import yt_dlp
 
-import config
+from crt import config
 from chromecast_mgr import ChromecastManager
 from queue_manager import QueueItem, QueueManager
 

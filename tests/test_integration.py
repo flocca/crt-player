@@ -101,7 +101,7 @@ async def get_video_info(path: str) -> dict:
 async def test_integration_single_video_plays(
     integration_config, integration_app, real_queue, real_chromecast_per_test
 ):
-    import config
+    import crt.config as config
     url = integration_config["video_url_1"]
     encode_wait_s = integration_config["encode_wait_s"]
 
