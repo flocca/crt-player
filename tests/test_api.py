@@ -236,3 +236,38 @@ def test_post_control_sync_when_engine_unavailable_returns_503():
 
     resp = client.post("/control/sync")
     assert resp.status_code == 503
+
+
+# ─── /media ──────────────────────────────────────────────
+
+def test_get_media_serves_file(tmp_path):
+    f = tmp_path / "test.mp4"
+    f.write_bytes(b"FAKE_MP4_BYTES")
+
+    library = LibraryStore()
+    app = create_app(library, media_dir=str(tmp_path))
+    client = TestClient(app)
+
+    resp = client.get("/media/test.mp4")
+
+    assert resp.status_code == 200
+    assert resp.content == b"FAKE_MP4_BYTES"
+    assert resp.headers["content-type"].startswith("video/mp4")
+
+
+def test_get_media_404_for_missing(tmp_path):
+    library = LibraryStore()
+    app = create_app(library, media_dir=str(tmp_path))
+    client = TestClient(app)
+
+    resp = client.get("/media/missing.mp4")
+    assert resp.status_code == 404
+
+
+def test_get_media_rejects_path_traversal(tmp_path):
+    library = LibraryStore()
+    app = create_app(library, media_dir=str(tmp_path))
+    client = TestClient(app)
+
+    resp = client.get("/media/..%2Fetc%2Fpasswd")
+    assert resp.status_code == 404

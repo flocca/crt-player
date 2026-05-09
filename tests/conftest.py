@@ -94,7 +94,8 @@ def integration_config():
 def real_tmp_dir(integration_config, tmp_path_factory):
     """Dedicated temp dir for encoded files; starts the media server once for the session."""
     import crt.config as cfg
-    from crt.media_server import create_media_app
+    from crt.api import create_app
+    from crt.library_store import LibraryStore
 
     d = tmp_path_factory.mktemp("integration_media")
     _orig_temp_dir = cfg.TEMP_DIR
@@ -102,7 +103,7 @@ def real_tmp_dir(integration_config, tmp_path_factory):
     cfg.TEMP_DIR = str(d)
     cfg.STATE_FILE = str(d / "test_state.json")  # avoid polluting the real state file
 
-    app = create_media_app(str(d))
+    app = create_app(LibraryStore(), media_dir=str(d))
     server_cfg = uvicorn.Config(
         app, host="0.0.0.0", port=cfg.SERVER_PORT, log_level="warning"
     )

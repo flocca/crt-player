@@ -1,28 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import signal
 import sys
-import threading
 import time
 
 import uvicorn
 
 from crt import config
+from crt.api import create_app
 from crt.chromecast_mgr import ChromecastManager
-from crt.media_server import create_media_app
-from crt.pipeline import PipelineWorker
 from crt.library_store import LibraryStore
-from crt.ui import CRTCastApp
+from crt.pipeline import PipelineWorker
+from crt.player_core import PlayerCore
+from crt.sync_engine import SyncEngine
+from crt.youtube_client import YouTubeAuthError, YouTubeClient
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "crt_cast.log")
 _log_fh = open(LOG_FILE, "w")
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(name)s %(levelname)s: %(message)s",
     stream=_log_fh,
 )
-# Redirect stderr to log file so unhandled exceptions are captured
 sys.stderr = _log_fh
 log = logging.getLogger(__name__)
 
@@ -37,61 +39,79 @@ def cleanup_temp_files() -> None:
         fpath = os.path.join(config.TEMP_DIR, fname)
         if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
             log.info("Removing old temp file: %s", fname)
-            os.remove(fpath)
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
 
 
-def start_media_server() -> None:
-    app = create_media_app(config.TEMP_DIR)
-    server_config = uvicorn.Config(
-        app, host="0.0.0.0", port=config.SERVER_PORT, log_level="warning"
-    )
-    server = uvicorn.Server(server_config)
-    server.run()
-
-
-def main() -> None:
+async def main_async() -> None:
     os.makedirs(config.TEMP_DIR, exist_ok=True)
     cleanup_temp_files()
 
-    # Start media server in background thread
-    media_thread = threading.Thread(target=start_media_server, daemon=True)
-    media_thread.start()
-
-    # Create core components and restore saved state
-    queue = LibraryStore()
-    saved_position = queue.load_state(config.STATE_FILE)
+    library = LibraryStore()
+    library.load_state(config.STATE_FILE)
     chromecast = ChromecastManager()
-    pipeline = PipelineWorker(queue, chromecast)
-    pipeline.resume_position = saved_position
-
-    from crt.youtube_client import YouTubeClient, YouTubeAuthError
-    from crt.sync_engine import SyncEngine
+    pipeline = PipelineWorker(library, chromecast)
+    player = PlayerCore(library, chromecast)
 
     sync_engine = None
     if config.YT_PLAYLIST_ID:
         try:
             yt_client = YouTubeClient.from_token_file(config.YT_TOKEN_FILE, config.YT_CLIENT_SECRETS)
-            sync_engine = SyncEngine(queue, yt_client, config.YT_PLAYLIST_ID)
-            log.info("SyncEngine ready (playlist=%s, interval=%ds)", config.YT_PLAYLIST_ID, config.SYNC_INTERVAL_S)
+
+            def _on_yt_remove(video_id: str):
+                loop = asyncio.get_event_loop()
+                asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), loop)
+
+            sync_engine = SyncEngine(library, yt_client, config.YT_PLAYLIST_ID, on_remove=_on_yt_remove)
+            log.info("SyncEngine ready (playlist=%s)", config.YT_PLAYLIST_ID)
         except (YouTubeAuthError, FileNotFoundError) as e:
             log.warning("SyncEngine disabled: %s", e)
 
-    # Create and run the TUI app
-    # Background tasks (chromecast discovery, pipeline worker) are started
-    # from CRTCastApp.on_mount() which runs inside Textual's asyncio loop
-    app = CRTCastApp(queue, pipeline, chromecast)
-    app._sync_engine = sync_engine
-    app._sync_interval = config.SYNC_INTERVAL_S
-    app.run()
+    app = create_app(
+        library=library,
+        player=player,
+        sync_engine=sync_engine,
+        pipeline=pipeline,
+        media_dir=config.TEMP_DIR,
+    )
+    app.state.chromecast = chromecast
 
-    # Save state before shutdown
-    queue.save_state(config.STATE_FILE, playback_position=chromecast.current_time)
+    server_cfg = uvicorn.Config(
+        app, host="0.0.0.0", port=config.SERVER_PORT, log_level="warning",
+    )
+    server = uvicorn.Server(server_cfg)
 
-    # Detach callbacks so pychromecast status updates don't hit dead widgets
+    tasks = [
+        asyncio.create_task(server.serve(), name="uvicorn"),
+        asyncio.create_task(chromecast.discover_loop(), name="cc_discovery"),
+        asyncio.create_task(pipeline.run_prepare(), name="pipeline_prepare"),
+    ]
+    if sync_engine is not None:
+        tasks.append(asyncio.create_task(
+            sync_engine.run_loop(interval_s=config.SYNC_INTERVAL_S),
+            name="sync_loop",
+        ))
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+
+    log.info("Daemon ready on port %d", config.SERVER_PORT)
+    await stop_event.wait()
+    log.info("Shutdown signal received")
+
+    server.should_exit = True
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    library.save_state(config.STATE_FILE, playback_position=chromecast.current_time)
     chromecast.set_status_callback(None)
     chromecast.set_connection_callback(None)
-
-    # Graceful shutdown
     pipeline.cancel_current()
     if chromecast.cast:
         try:
@@ -99,6 +119,11 @@ def main() -> None:
         except Exception:
             pass
     chromecast.shutdown()
+    log.info("Daemon stopped")
+
+
+def main() -> None:
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":

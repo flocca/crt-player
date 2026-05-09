@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import os
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 log = logging.getLogger(__name__)
 
@@ -15,7 +16,10 @@ def create_app(
     pipeline=None,
     media_dir: str | None = None,
 ) -> FastAPI:
-    """Build the unified FastAPI app exposing /library, /control, /status (and /media in task 4.6)."""
+    """Build the unified FastAPI app exposing /library, /control, /status and /media."""
+    if media_dir is None:
+        from crt import config
+        media_dir = config.TEMP_DIR
     app = FastAPI(title="crt-player daemon")
 
     # ─── Read endpoints ─────────────────────────────────────────────
@@ -126,5 +130,16 @@ def create_app(
             raise HTTPException(503, "player unavailable")
         await player.calibrate()
         return {"ok": True}
+
+    # ─── Media file serving ────────────────────────────────────────
+
+    @app.get("/media/{filename}")
+    async def serve_media(filename: str):
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(404, "not found")
+        filepath = os.path.join(media_dir, filename)
+        if not os.path.isfile(filepath):
+            raise HTTPException(404, "not found")
+        return FileResponse(filepath, media_type="video/mp4")
 
     return app
