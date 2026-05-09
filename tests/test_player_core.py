@@ -219,8 +219,7 @@ async def test_cast_current_calls_chromecast_cast_url(monkeypatch):
     cc.wait_for_connection.assert_awaited()
     args, kwargs = cc.cast_url.call_args
     assert "A.mp4" in args[0]
-    assert kwargs.get("title") == "A"
-    assert kwargs.get("current_time") == 42.0
+    assert kwargs.get("start_position") == 42.0
 
 
 @pytest.mark.asyncio

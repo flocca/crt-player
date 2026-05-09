@@ -174,8 +174,7 @@ class PlayerCore:
         await asyncio.to_thread(
             self.chromecast.cast_url,
             url,
-            title=item.title,
-            current_time=item.playback_position,
+            start_position=item.playback_position,
         )
         self.state = "casting"
         item.status = "playing"
