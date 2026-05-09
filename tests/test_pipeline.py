@@ -7,7 +7,7 @@ import pytest
 import crt.config as config_module
 from crt.pipeline import fetch_title, download_video, encode_video, _build_video_filter, _detect_crop
 from crt.config import cached_encoded_filename
-from crt.queue_manager import QueueItem
+from crt.library_store import QueueItem
 
 
 @pytest.fixture(autouse=True)

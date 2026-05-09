@@ -23,7 +23,7 @@ from textual.widgets import (
 from crt import calibration, config
 from crt.chromecast_mgr import ChromecastManager
 from crt.pipeline import PipelineWorker, get_local_ip
-from crt.queue_manager import ACTIVE_STATUSES, QueueItem, QueueManager
+from crt.library_store import ACTIVE_STATUSES, QueueItem, LibraryStore
 
 log = logging.getLogger(__name__)
 
@@ -251,7 +251,7 @@ class CRTCastApp(App):
 
     def __init__(
         self,
-        queue: QueueManager,
+        queue: LibraryStore,
         pipeline: PipelineWorker,
         chromecast: ChromecastManager,
     ) -> None:

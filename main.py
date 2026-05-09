@@ -12,7 +12,7 @@ from crt import config
 from crt.chromecast_mgr import ChromecastManager
 from crt.media_server import create_media_app
 from crt.pipeline import PipelineWorker
-from crt.queue_manager import QueueManager
+from crt.library_store import LibraryStore
 from crt.ui import CRTCastApp
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "crt_cast.log")
@@ -58,7 +58,7 @@ def main() -> None:
     media_thread.start()
 
     # Create core components and restore saved state
-    queue = QueueManager()
+    queue = LibraryStore()
     saved_position = queue.load_state(config.STATE_FILE)
     chromecast = ChromecastManager()
     pipeline = PipelineWorker(queue, chromecast)

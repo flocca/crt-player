@@ -10,7 +10,7 @@ import yt_dlp
 
 from crt import config
 from crt.chromecast_mgr import ChromecastManager
-from crt.queue_manager import QueueItem, QueueManager
+from crt.library_store import QueueItem, LibraryStore
 
 log = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ async def encode_video(
 
 class PipelineWorker:
     def __init__(
-        self, queue: QueueManager, chromecast: ChromecastManager
+        self, queue: LibraryStore, chromecast: ChromecastManager
     ) -> None:
         self.queue = queue
         self.chromecast = chromecast

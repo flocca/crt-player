@@ -2,14 +2,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from crt.queue_manager import QueueManager
+from crt.library_store import LibraryStore
 from crt.ui import CRTCastApp
 
 
 @pytest.fixture
 def queue():
-    """Real QueueManager — pure data, no I/O."""
-    return QueueManager()
+    """Real LibraryStore — pure data, no I/O."""
+    return LibraryStore()
 
 
 @pytest.fixture
@@ -166,9 +166,9 @@ def real_chromecast_per_test(real_chromecast):
 
 @pytest.fixture
 def real_queue():
-    """Fresh QueueManager per test — no saved state loaded."""
-    from crt.queue_manager import QueueManager
-    return QueueManager()
+    """Fresh LibraryStore per test — no saved state loaded."""
+    from crt.library_store import LibraryStore
+    return LibraryStore()
 
 
 @pytest.fixture

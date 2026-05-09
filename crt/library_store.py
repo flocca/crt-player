@@ -54,7 +54,7 @@ class QueueItem:
         )
 
 
-class QueueManager:
+class LibraryStore:
     def __init__(self) -> None:
         self.items: list[QueueItem] = []
         self.history: list[QueueItem] = []
