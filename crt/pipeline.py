@@ -320,6 +320,8 @@ class PipelineWorker:
     async def _prepare_one(self, item: QueueItem) -> None:
         try:
             item.title, video_id = await fetch_title(item.url)
+            if video_id:
+                item.video_id = video_id
             self.notify()
 
             # Check for cached encoded file

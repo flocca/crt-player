@@ -8,3 +8,4 @@ crt_cast.log
 state.json
 .worktrees/
 .env.integration
+*.egg-info/

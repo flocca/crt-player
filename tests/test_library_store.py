@@ -426,3 +426,8 @@ def test_queue_item_from_dict_restores_video_id():
         "id": "550e8400-e29b-41d4-a716-446655440000",
     })
     assert item.video_id == "dQw4w9WgXcQ"
+
+
+def test_queue_item_from_dict_defaults_video_id_when_absent():
+    item = QueueItem.from_dict({"url": "https://youtube.com/watch?v=abc"})
+    assert item.video_id == ""
