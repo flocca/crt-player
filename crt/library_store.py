@@ -234,8 +234,9 @@ class LibraryStore:
 
     def save_state(self, path: str, playback_position: float = 0.0) -> None:
         data = {
-            "version": 1,
-            "playback_position": playback_position,
+            "version": 2,
+            "cursor_video_id": self.cursor_video_id,
+            "loop_mode": self.loop_mode,
             "items": [item.to_dict() for item in self.items],
             "history": [item.to_dict() for item in self.history],
         }
@@ -253,7 +254,7 @@ class LibraryStore:
                 pass
 
     def load_state(self, path: str) -> float:
-        """Load queue state from disk. Returns saved playback position."""
+        """Load queue state from disk. Returns 0.0 (playback position unused in v2)."""
         if not os.path.isfile(path):
             return 0.0
         try:
@@ -263,7 +264,18 @@ class LibraryStore:
             log.warning("Corrupt or unreadable state file %s, starting fresh", path)
             return 0.0
 
-        playback_position = data.get("playback_position", 0.0)
+        version = data.get("version", 1)
+        if version != 2:
+            backup = path + ".v1.bak"
+            log.warning(
+                "Migrating state.json v%s → empty v2; old state saved to %s",
+                version, backup,
+            )
+            os.replace(path, backup)
+            return 0.0
+
+        self.cursor_video_id = data.get("cursor_video_id")
+        self.loop_mode = data.get("loop_mode", False)
 
         for raw in data.get("items", []):
             item = QueueItem.from_dict(raw)
@@ -313,7 +325,7 @@ class LibraryStore:
             self.history.append(QueueItem.from_dict(raw))
 
         log.info(
-            "Loaded state: %d items, %d history, resume at %.1fs",
-            len(self.items), len(self.history), playback_position,
+            "Loaded state v2: %d items, %d history, cursor=%s, loop=%s",
+            len(self.items), len(self.history), self.cursor_video_id, self.loop_mode,
         )
-        return playback_position
+        return 0.0

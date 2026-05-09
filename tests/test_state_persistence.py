@@ -53,12 +53,12 @@ def test_save_and_load_roundtrip(tmp_path):
     item2.status = "done"
     qm.push_to_history(item2)
 
-    qm.save_state(path, playback_position=42.5)
+    qm.save_state(path)
 
     qm2 = LibraryStore()
     pos = qm2.load_state(path)
 
-    assert pos == 42.5
+    assert pos == 0.0
     assert len(qm2.items) == 2
     assert qm2.items[0].title == "Video 1"
     assert qm2.items[0].status == "queued"
@@ -69,8 +69,9 @@ def test_save_and_load_roundtrip(tmp_path):
 def test_load_fixup_downloading_to_queued(tmp_path):
     path = str(tmp_path / "state.json")
     data = {
-        "version": 1,
-        "playback_position": 0.0,
+        "version": 2,
+        "cursor_video_id": None,
+        "loop_mode": False,
         "items": [
             {"url": "http://a", "id": "1", "title": "A",
              "status": "downloading", "progress": 55.0, "filename": "a.mp4"},
@@ -102,8 +103,9 @@ def test_load_fixup_playing_with_file(tmp_path, monkeypatch):
 
     path = str(tmp_path / "state.json")
     data = {
-        "version": 1,
-        "playback_position": 120.0,
+        "version": 2,
+        "cursor_video_id": None,
+        "loop_mode": False,
         "items": [
             {"url": "http://v", "id": "1", "title": "Vid",
              "status": "playing", "progress": 0.0, "filename": "vid_pal.mp4"},
@@ -116,7 +118,7 @@ def test_load_fixup_playing_with_file(tmp_path, monkeypatch):
     qm = LibraryStore()
     pos = qm.load_state(path)
 
-    assert pos == 120.0
+    assert pos == 0.0
     assert qm.items[0].status == "ready"
     assert qm.items[0].filename == "vid_pal.mp4"
 
@@ -128,8 +130,9 @@ def test_load_fixup_playing_without_file(tmp_path, monkeypatch):
 
     path = str(tmp_path / "state.json")
     data = {
-        "version": 1,
-        "playback_position": 120.0,
+        "version": 2,
+        "cursor_video_id": None,
+        "loop_mode": False,
         "items": [
             {"url": "http://v", "id": "1", "title": "Vid",
              "status": "playing", "progress": 0.0, "filename": "vid_pal.mp4"},
@@ -142,7 +145,7 @@ def test_load_fixup_playing_without_file(tmp_path, monkeypatch):
     qm = LibraryStore()
     pos = qm.load_state(path)
 
-    assert pos == 120.0
+    assert pos == 0.0
     assert qm.items[0].status == "queued"
     assert qm.items[0].filename is None
 
@@ -188,8 +191,9 @@ def test_next_pending_returns_ready_items():
 def test_done_and_error_items_preserved(tmp_path):
     path = str(tmp_path / "state.json")
     data = {
-        "version": 1,
-        "playback_position": 0.0,
+        "version": 2,
+        "cursor_video_id": None,
+        "loop_mode": False,
         "items": [
             {"url": "http://d", "id": "1", "title": "D", "status": "done"},
             {"url": "http://e", "id": "2", "title": "E", "status": "error",
