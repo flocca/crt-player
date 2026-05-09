@@ -1,0 +1,23 @@
+services:
+  crt-daemon:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: crt-player:latest
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CRT_YT_PLAYLIST_ID: "${CRT_YT_PLAYLIST_ID}"
+      CRT_CHROMECAST_NAME: "${CRT_CHROMECAST_NAME:-Living Room TV}"
+      CRT_SCALE_MODE: "${CRT_SCALE_MODE:-crop}"
+      CRT_AUTO_CROP: "${CRT_AUTO_CROP:-1}"
+      CRT_SYNC_INTERVAL_S: "${CRT_SYNC_INTERVAL_S:-300}"
+      CRT_LOG_LEVEL: "${CRT_LOG_LEVEL:-INFO}"
+      CRT_MARGIN_TOP: "${CRT_MARGIN_TOP:-0}"
+      CRT_MARGIN_BOTTOM: "${CRT_MARGIN_BOTTOM:-0}"
+      CRT_MARGIN_LEFT: "${CRT_MARGIN_LEFT:-0}"
+      CRT_MARGIN_RIGHT: "${CRT_MARGIN_RIGHT:-0}"
+    volumes:
+      - ./data/cache:/data/cache
+      - ./data/state:/data/state
+      - ./data/secrets:/data/secrets:ro

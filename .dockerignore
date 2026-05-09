@@ -1,0 +1,13 @@
+.venv
+.git
+.env*
+*.log
+state.json
+state.json.v1.bak
+__pycache__
+*.egg-info
+tests
+docs
+docker
+.pytest_cache
+.worktrees
