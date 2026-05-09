@@ -185,6 +185,9 @@ class PlayerCore:
         local_ip = _get_local_ip()
         url = f"http://{local_ip}:{config.SERVER_PORT}/media/{item.filename}"
         item.status = "casting"
+        # Defensive: clear any stale "FINISHED" flag from the previous item so
+        # the natural-end watcher doesn't fire immediately for the new cast.
+        self.chromecast.reset_playback_ended()
         await asyncio.to_thread(
             self.chromecast.cast_url,
             url,
@@ -193,6 +196,20 @@ class PlayerCore:
         self.state = "casting"
         item.status = "playing"
         log.info("Casting %s (resume from %.1fs)", item.video_id, item.playback_position)
+
+    async def watch_natural_end(self) -> None:
+        """Background loop: when the Chromecast reports natural end of the
+        current item (idle_reason == 'FINISHED'), advance the cursor and autoplay.
+
+        Daemon spawns this as a long-running task. Does not return until
+        cancelled via task.cancel()."""
+        while True:
+            await self.chromecast.wait_for_playback_end()
+            self.chromecast.reset_playback_ended()
+            try:
+                await self.on_playback_finished()
+            except Exception:
+                log.exception("on_playback_finished failed")
 
     async def calibrate(self) -> None:
         """Cast a calibration pattern to the Chromecast.

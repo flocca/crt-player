@@ -99,6 +99,7 @@ async def main_async() -> None:
         asyncio.create_task(server.serve(), name="uvicorn"),
         asyncio.create_task(chromecast.discover_loop(), name="cc_discovery"),
         asyncio.create_task(pipeline.run_prepare(), name="pipeline_prepare"),
+        asyncio.create_task(player.watch_natural_end(), name="player_natural_end"),
     ]
     if sync_engine is not None:
         tasks.append(asyncio.create_task(

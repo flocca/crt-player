@@ -323,3 +323,42 @@ async def test_toggle_after_stop_recasts_cursor_item(monkeypatch):
     cc.cast_url.assert_called_once()
     assert pc.state == "casting"
     assert library.cursor_video_id == "A"
+
+
+@pytest.mark.asyncio
+async def test_watch_natural_end_advances_cursor_on_finished_event():
+    """Regression: il watcher deve invocare on_playback_finished quando
+    chromecast.wait_for_playback_end() ritorna."""
+    import asyncio
+
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    library.items[0].status = "playing"
+
+    cc = _make_chromecast()
+    cc.connected = True
+    # Simula natural end. L'event viene set una sola volta; reset_playback_ended
+    # lo cancella, così la 2a iterazione del watcher si blocca in attesa.
+    end_event = asyncio.Event()
+    end_event.set()
+
+    async def _wait_end():
+        await end_event.wait()
+
+    cc.wait_for_playback_end = _wait_end
+    cc.reset_playback_ended = MagicMock(side_effect=end_event.clear)
+
+    pc = PlayerCore(library, cc)
+    task = asyncio.create_task(pc.watch_natural_end())
+    # Lascia girare una sola iterazione: dopo reset, l'event è clear → la 2a
+    # iterazione si blocca su await end_event.wait(). Cancelliamo il task.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert library.items[0].status == "done"
+    assert library.cursor_video_id == "B"
+    cc.reset_playback_ended.assert_called()
