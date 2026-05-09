@@ -64,7 +64,14 @@ async def main_async() -> None:
                 loop = asyncio.get_event_loop()
                 asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), loop)
 
-            sync_engine = SyncEngine(library, yt_client, config.YT_PLAYLIST_ID, on_remove=_on_yt_remove)
+            def _on_yt_add():
+                pipeline.wake_prepare()
+
+            sync_engine = SyncEngine(
+                library, yt_client, config.YT_PLAYLIST_ID,
+                on_remove=_on_yt_remove,
+                on_add=_on_yt_add,
+            )
             log.info("SyncEngine ready (playlist=%s)", config.YT_PLAYLIST_ID)
         except (YouTubeAuthError, FileNotFoundError) as e:
             log.warning("SyncEngine disabled: %s", e)
@@ -93,6 +100,12 @@ async def main_async() -> None:
             sync_engine.run_loop(interval_s=config.SYNC_INTERVAL_S),
             name="sync_loop",
         ))
+
+    # If load_state restored items in `queued` (or the first sync already populated
+    # the library before run_prepare entered its wait), kick the pipeline once so
+    # it picks them up immediately.
+    if any(i.status == "queued" for i in library.items):
+        pipeline.wake_prepare()
 
     stop_event = asyncio.Event()
     loop = asyncio.get_event_loop()

@@ -28,13 +28,19 @@ class SyncEngine:
         yt_client: YouTubeClient,
         playlist_id: str,
         on_remove=None,
+        on_add=None,
     ):
-        """on_remove: optional callback(video_id) invoked BEFORE an item is removed.
-        Lets PlayerCore stop playback if the removed item is currently playing."""
+        """on_remove: callback(video_id) invoked BEFORE an item is removed.
+        Lets PlayerCore stop playback if the removed item is currently playing.
+
+        on_add: callback() invoked AFTER one or more items are added to the library.
+        Wakes the PipelineWorker so it picks up the new queued items immediately
+        instead of waiting for an external signal."""
         self.library = library
         self.yt = yt_client
         self.playlist_id = playlist_id
         self._on_remove = on_remove
+        self._on_add = on_add
         self.last_sync_at: str | None = None
         self.last_error: str | None = None
         self.state: str = "ok"
@@ -72,13 +78,21 @@ class SyncEngine:
 
         # Add new items
         existing_after_remove = {item.video_id for item in self.library.items}
+        added_any = False
         for entry in snapshot:
             if entry.video_id not in existing_after_remove:
                 self._add_item(entry)
+                added_any = True
 
         # Reorder to match snapshot order
         items_by_id = {item.video_id: item for item in self.library.items}
         self.library.items = [items_by_id[vid] for vid in snapshot_ids if vid in items_by_id]
+
+        if added_any and self._on_add is not None:
+            try:
+                self._on_add()
+            except Exception:
+                log.exception("on_add callback failed")
 
     def _add_item(self, entry: PlaylistEntry) -> None:
         url = f"https://www.youtube.com/watch?v={entry.video_id}"
