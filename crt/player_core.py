@@ -209,5 +209,5 @@ class PlayerCore:
         local_ip = _get_local_ip()
         filename = os.path.basename(out_path)
         url = f"http://{local_ip}:{config.SERVER_PORT}/media/{filename}"
-        await asyncio.to_thread(self.chromecast.cast_url, url, title="Calibration")
+        await asyncio.to_thread(self.chromecast.cast_url, url, start_position=0.0)
         log.info("Calibration pattern cast to Chromecast")

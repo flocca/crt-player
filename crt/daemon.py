@@ -55,14 +55,19 @@ async def main_async() -> None:
     pipeline = PipelineWorker(library, chromecast)
     player = PlayerCore(library, chromecast)
 
+    # Capture the running loop here so callbacks invoked from worker threads
+    # (e.g. SyncEngine.run_sync_once dispatched via asyncio.to_thread) can
+    # schedule coroutines back onto it. asyncio.get_event_loop() does not
+    # work from non-event-loop threads in Python 3.12+.
+    main_loop = asyncio.get_running_loop()
+
     sync_engine = None
     if config.YT_PLAYLIST_ID:
         try:
             yt_client = YouTubeClient.from_token_file(config.YT_TOKEN_FILE, config.YT_CLIENT_SECRETS)
 
             def _on_yt_remove(video_id: str):
-                loop = asyncio.get_event_loop()
-                asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), loop)
+                asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), main_loop)
 
             def _on_yt_add():
                 pipeline.wake_prepare()

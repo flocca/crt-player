@@ -101,9 +101,13 @@ class SyncEngine:
         log.info("Added: %s (%s)", entry.title, entry.video_id)
 
     def _remove_item(self, video_id: str) -> None:
-        item = next((i for i in self.library.items if i.video_id == video_id), None)
-        if item is None:
+        idx = next(
+            (i for i, it in enumerate(self.library.items) if it.video_id == video_id),
+            None,
+        )
+        if idx is None:
             return
+        item = self.library.items[idx]
 
         if self._on_remove is not None:
             try:
@@ -113,9 +117,19 @@ class SyncEngine:
 
         self._delete_cache_files(item)
 
-        self.library.items = [i for i in self.library.items if i.video_id != video_id]
-        if self.library.cursor_video_id == video_id:
-            self.library.cursor_video_id = None
+        cursor_was_here = self.library.cursor_video_id == video_id
+        self.library.items.pop(idx)
+
+        if cursor_was_here:
+            # Move cursor to the natural successor (post-removal idx points to
+            # what was at idx+1). If we just removed the last item, fall back
+            # to the new last; if the list is now empty, clear the cursor.
+            if not self.library.items:
+                self.library.cursor_video_id = None
+            else:
+                new_idx = min(idx, len(self.library.items) - 1)
+                self.library.cursor_video_id = self.library.items[new_idx].video_id
+
         log.info("Removed: %s", video_id)
 
     async def run_loop(self, interval_s: int = 300, initial_delay_s: int = 10) -> None:

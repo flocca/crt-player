@@ -86,7 +86,7 @@ def test_remove_invokes_on_remove_callback():
     on_remove.assert_called_once_with("vid_old")
 
 
-def test_remove_clears_cursor_if_was_pointing_at_removed():
+def test_remove_clears_cursor_if_list_becomes_empty():
     library = LibraryStore()
     library.items.append(QueueItem(url="u", video_id="vid_old"))
     library.cursor_video_id = "vid_old"
@@ -97,6 +97,42 @@ def test_remove_clears_cursor_if_was_pointing_at_removed():
     engine.run_sync_once()
 
     assert library.cursor_video_id is None
+
+
+def test_remove_advances_cursor_to_successor():
+    library = LibraryStore()
+    library.items.append(QueueItem(url="u", video_id="A"))
+    library.items.append(QueueItem(url="u", video_id="B"))
+    library.items.append(QueueItem(url="u", video_id="C"))
+    library.cursor_video_id = "B"
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [
+        PlaylistEntry(video_id="A", title="A", position=0),
+        PlaylistEntry(video_id="C", title="C", position=1),
+    ]
+    engine = SyncEngine(library, yt_client, playlist_id="PL")
+
+    engine.run_sync_once()
+
+    # B was at index 1; after removal C is at index 1 → cursor = C
+    assert library.cursor_video_id == "C"
+
+
+def test_remove_last_item_with_cursor_falls_back_to_new_last():
+    library = LibraryStore()
+    library.items.append(QueueItem(url="u", video_id="A"))
+    library.items.append(QueueItem(url="u", video_id="B"))
+    library.cursor_video_id = "B"
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [
+        PlaylistEntry(video_id="A", title="A", position=0),
+    ]
+    engine = SyncEngine(library, yt_client, playlist_id="PL")
+
+    engine.run_sync_once()
+
+    # B was last; after removal cursor falls back to new last (A)
+    assert library.cursor_video_id == "A"
 
 
 def test_remove_deletes_cache_files(tmp_path, monkeypatch):
