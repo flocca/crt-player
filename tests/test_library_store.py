@@ -406,3 +406,23 @@ def test_first_ready_returns_none_when_no_ready():
     qm = LibraryStore()
     qm.add("https://youtube.com/watch?v=1")
     assert qm.first_ready() is None
+
+
+def test_queue_item_has_video_id():
+    item = QueueItem(video_id="dQw4w9WgXcQ", url="https://youtube.com/watch?v=dQw4w9WgXcQ")
+    assert item.video_id == "dQw4w9WgXcQ"
+
+
+def test_queue_item_to_dict_includes_video_id():
+    item = QueueItem(video_id="dQw4w9WgXcQ", url="https://youtube.com/watch?v=dQw4w9WgXcQ")
+    d = item.to_dict()
+    assert d["video_id"] == "dQw4w9WgXcQ"
+
+
+def test_queue_item_from_dict_restores_video_id():
+    item = QueueItem.from_dict({
+        "url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
+        "video_id": "dQw4w9WgXcQ",
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+    })
+    assert item.video_id == "dQw4w9WgXcQ"

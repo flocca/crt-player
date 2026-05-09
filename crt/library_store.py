@@ -17,6 +17,7 @@ ACTIVE_STATUSES = {"downloading", "encoding", "casting", "playing", "ready"}
 @dataclass
 class QueueItem:
     url: str
+    video_id: str = ""
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     title: str = ""
     status: str = "queued"
@@ -29,6 +30,7 @@ class QueueItem:
     def to_dict(self) -> dict:
         return {
             "url": self.url,
+            "video_id": self.video_id,
             "id": self.id,
             "title": self.title,
             "status": self.status,
@@ -43,6 +45,7 @@ class QueueItem:
     def from_dict(cls, d: dict) -> QueueItem:
         return cls(
             url=d["url"],
+            video_id=d.get("video_id", ""),
             id=d.get("id", str(uuid.uuid4())),
             title=d.get("title", ""),
             status=d.get("status", "queued"),
