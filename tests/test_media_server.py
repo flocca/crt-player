@@ -4,7 +4,7 @@ import tempfile
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from media_server import create_media_app
+from crt.media_server import create_media_app
 
 
 @pytest.fixture

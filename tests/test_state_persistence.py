@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from queue_manager import QueueItem, QueueManager
+from crt.queue_manager import QueueItem, QueueManager
 
 
 def test_queue_item_to_dict():

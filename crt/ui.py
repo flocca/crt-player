@@ -20,11 +20,10 @@ from textual.widgets import (
     Static,
 )
 
-import calibration
-from crt import config
-from chromecast_mgr import ChromecastManager
-from pipeline import PipelineWorker, get_local_ip
-from queue_manager import ACTIVE_STATUSES, QueueItem, QueueManager
+from crt import calibration, config
+from crt.chromecast_mgr import ChromecastManager
+from crt.pipeline import PipelineWorker, get_local_ip
+from crt.queue_manager import ACTIVE_STATUSES, QueueItem, QueueManager
 
 log = logging.getLogger(__name__)
 

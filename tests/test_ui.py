@@ -3,7 +3,7 @@ from textual.widgets import Button, Input, ListView, Select, Static
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import crt.config as config_module
-from ui import CRTCastApp, NowPlayingWidget, QueueListItem, QueueListView
+from crt.ui import CRTCastApp, NowPlayingWidget, QueueListItem, QueueListView
 
 
 @pytest.fixture(autouse=True)
@@ -142,7 +142,7 @@ def test_is_session_lost_backdrop():
     from unittest.mock import MagicMock
     import pychromecast
 
-    from chromecast_mgr import ChromecastManager
+    from crt.chromecast_mgr import ChromecastManager
 
     mgr = ChromecastManager()
     mgr.cast = MagicMock()
@@ -160,7 +160,7 @@ def test_is_session_lost_receiver_but_unknown_state():
     as a lost session, otherwise pause/play become no-ops."""
     from unittest.mock import MagicMock
 
-    from chromecast_mgr import ChromecastManager
+    from crt.chromecast_mgr import ChromecastManager
 
     mgr = ChromecastManager()
     mgr.cast = MagicMock()
@@ -179,7 +179,7 @@ def test_on_media_status_preserves_current_time_on_session_death():
     the recast resumes from the pause position instead of the beginning."""
     from unittest.mock import MagicMock
 
-    from chromecast_mgr import ChromecastManager
+    from crt.chromecast_mgr import ChromecastManager
 
     mgr = ChromecastManager()
     mgr.cast = MagicMock()
@@ -207,7 +207,7 @@ def test_is_session_lost_healthy_playback():
     """Active media session → not lost."""
     from unittest.mock import MagicMock
 
-    from chromecast_mgr import ChromecastManager
+    from crt.chromecast_mgr import ChromecastManager
 
     mgr = ChromecastManager()
     mgr.cast = MagicMock()
@@ -399,8 +399,8 @@ async def test_ctrl_t_triggers_calibration(app, mock_chromecast):
     mock_chromecast.wait_for_connection = AsyncMock()
     mock_chromecast.cast_url = MagicMock()
 
-    with patch("ui.calibration.generate_calibration_clip", new=AsyncMock()) as gen, \
-         patch("ui.get_local_ip", return_value="127.0.0.1"):
+    with patch("crt.ui.calibration.generate_calibration_clip", new=AsyncMock()) as gen, \
+         patch("crt.ui.get_local_ip", return_value="127.0.0.1"):
         async with app.run_test() as pilot:
             await pilot.press("ctrl+t")
             await pilot.pause()
@@ -418,7 +418,7 @@ async def test_ctrl_t_blocked_while_video_playing(app, queue, mock_chromecast):
     item.status = "playing"
     mock_chromecast.cast_url = MagicMock()
 
-    with patch("ui.calibration.generate_calibration_clip", new=AsyncMock()) as gen:
+    with patch("crt.ui.calibration.generate_calibration_clip", new=AsyncMock()) as gen:
         async with app.run_test() as pilot:
             await pilot.press("ctrl+t")
             await pilot.pause()
@@ -439,8 +439,8 @@ async def test_ctrl_t_aborts_if_video_starts_during_render(app, queue, mock_chro
         item.status = "playing"
         return "/tmp/calibration.mp4"
 
-    with patch("ui.calibration.generate_calibration_clip", new=fake_generate), \
-         patch("ui.get_local_ip", return_value="127.0.0.1"):
+    with patch("crt.ui.calibration.generate_calibration_clip", new=fake_generate), \
+         patch("crt.ui.get_local_ip", return_value="127.0.0.1"):
         async with app.run_test() as pilot:
             await pilot.press("ctrl+t")
             await pilot.pause()

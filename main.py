@@ -9,11 +9,11 @@ import time
 import uvicorn
 
 from crt import config
-from chromecast_mgr import ChromecastManager
-from media_server import create_media_app
-from pipeline import PipelineWorker
-from queue_manager import QueueManager
-from ui import CRTCastApp
+from crt.chromecast_mgr import ChromecastManager
+from crt.media_server import create_media_app
+from crt.pipeline import PipelineWorker
+from crt.queue_manager import QueueManager
+from crt.ui import CRTCastApp
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "crt_cast.log")
 _log_fh = open(LOG_FILE, "w")

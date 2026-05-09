@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 
 import crt.config as config_module
-from queue_manager import QueueItem, QueueManager
+from crt.queue_manager import QueueItem, QueueManager
 
 
 def test_queue_item_creation():

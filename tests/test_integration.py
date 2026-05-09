@@ -15,7 +15,7 @@ import json
 import pytest
 from textual.widgets import Input, Static
 
-from ui import CRTCastApp, NowPlayingWidget, QueueListView
+from crt.ui import CRTCastApp, NowPlayingWidget, QueueListView
 
 
 # ---------------------------------------------------------------------------

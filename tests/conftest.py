@@ -2,8 +2,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from queue_manager import QueueManager
-from ui import CRTCastApp
+from crt.queue_manager import QueueManager
+from crt.ui import CRTCastApp
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ def integration_config():
 def real_tmp_dir(integration_config, tmp_path_factory):
     """Dedicated temp dir for encoded files; starts the media server once for the session."""
     import crt.config as cfg
-    from media_server import create_media_app
+    from crt.media_server import create_media_app
 
     d = tmp_path_factory.mktemp("integration_media")
     _orig_temp_dir = cfg.TEMP_DIR
@@ -123,7 +123,7 @@ def real_tmp_dir(integration_config, tmp_path_factory):
 def real_chromecast(integration_config, real_tmp_dir):
     """Real ChromecastManager, discovered once per test session."""
     import crt.config as cfg
-    from chromecast_mgr import ChromecastManager
+    from crt.chromecast_mgr import ChromecastManager
 
     cfg.CHROMECAST_NAME = integration_config["chromecast_name"]
     cc = ChromecastManager()
@@ -167,7 +167,7 @@ def real_chromecast_per_test(real_chromecast):
 @pytest.fixture
 def real_queue():
     """Fresh QueueManager per test — no saved state loaded."""
-    from queue_manager import QueueManager
+    from crt.queue_manager import QueueManager
     return QueueManager()
 
 
@@ -179,12 +179,12 @@ def real_pipeline(real_queue, real_chromecast_per_test):
     to its queue; creating it fresh alongside real_queue ensures the pipeline
     sees the same queue the test does.
     """
-    from pipeline import PipelineWorker
+    from crt.pipeline import PipelineWorker
     return PipelineWorker(real_queue, real_chromecast_per_test)
 
 
 @pytest.fixture
 def integration_app(real_queue, real_pipeline, real_chromecast_per_test):
     """Full CRTCastApp wired with real dependencies, fresh per test."""
-    from ui import CRTCastApp
+    from crt.ui import CRTCastApp
     return CRTCastApp(real_queue, real_pipeline, real_chromecast_per_test)

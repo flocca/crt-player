@@ -9,8 +9,8 @@ from typing import Callable
 import yt_dlp
 
 from crt import config
-from chromecast_mgr import ChromecastManager
-from queue_manager import QueueItem, QueueManager
+from crt.chromecast_mgr import ChromecastManager
+from crt.queue_manager import QueueItem, QueueManager
 
 log = logging.getLogger(__name__)
 
