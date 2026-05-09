@@ -1,9 +1,11 @@
-from unittest.mock import AsyncMock, MagicMock
+import os
+import threading
+import time
 
 import pytest
+import uvicorn
 
 from crt.library_store import LibraryStore
-from crt.ui import CRTCastApp
 
 
 @pytest.fixture
@@ -12,63 +14,11 @@ def queue():
     return LibraryStore()
 
 
-@pytest.fixture
-def mock_pipeline():
-    """Fully mocked PipelineWorker. Async entry points return immediately."""
-    p = MagicMock()
-    p.run_prepare = AsyncMock()
-    p.run_cast = AsyncMock()
-    p.wake = MagicMock()
-    p.cancel_cast = MagicMock()
-    p.cancel_prepare = MagicMock()
-    p.set_update_callback = MagicMock()
-    p.resume_position = 0.0
-    p.loop_mode = False
-    p._cast_enabled = False
-    return p
-
-
-@pytest.fixture
-def mock_chromecast():
-    """Fully mocked ChromecastManager. Defaults to disconnected."""
-    c = MagicMock()
-    c.discover_loop = AsyncMock()
-    c.connected = False
-    c.device_name = ""
-    c.player_state = "UNKNOWN"
-    c.current_time = 0.0
-    c.duration = 0.0
-    c.poll_status = MagicMock()
-    c.pause_or_resume = MagicMock()
-    c.is_session_lost = MagicMock(return_value=False)
-    c.cast_url = MagicMock()
-    c.stop = MagicMock()
-    c.seek = MagicMock()
-    c.adjust_volume = MagicMock()
-    c.set_status_callback = MagicMock()
-    c.set_connection_callback = MagicMock()
-    c.wait_for_connection = AsyncMock()
-    c.quit_app = MagicMock()
-    return c
-
-
-@pytest.fixture
-def app(queue, mock_pipeline, mock_chromecast):
-    """CRTCastApp with all I/O dependencies mocked."""
-    return CRTCastApp(queue, mock_pipeline, mock_chromecast)
-
-
 # ---------------------------------------------------------------------------
 # Integration fixtures — require real hardware (Chromecast + internet access)
 # Tests skip automatically when env vars are absent.
 # Run with: source .env.integration && pytest -m integration
 # ---------------------------------------------------------------------------
-
-import os
-import threading
-import time
-
-import uvicorn
 
 
 @pytest.fixture(scope="session")
@@ -95,7 +45,6 @@ def real_tmp_dir(integration_config, tmp_path_factory):
     """Dedicated temp dir for encoded files; starts the media server once for the session."""
     import crt.config as cfg
     from crt.api import create_app
-    from crt.library_store import LibraryStore
 
     d = tmp_path_factory.mktemp("integration_media")
     _orig_temp_dir = cfg.TEMP_DIR
@@ -168,7 +117,6 @@ def real_chromecast_per_test(real_chromecast):
 @pytest.fixture
 def real_queue():
     """Fresh LibraryStore per test — no saved state loaded."""
-    from crt.library_store import LibraryStore
     return LibraryStore()
 
 
@@ -184,8 +132,6 @@ def real_pipeline(real_queue, real_chromecast_per_test):
     return PipelineWorker(real_queue, real_chromecast_per_test)
 
 
-@pytest.fixture
-def integration_app(real_queue, real_pipeline, real_chromecast_per_test):
-    """Full CRTCastApp wired with real dependencies, fresh per test."""
-    from crt.ui import CRTCastApp
-    return CRTCastApp(real_queue, real_pipeline, real_chromecast_per_test)
+# TODO Phase 7: integration_app fixture will be rewritten to use the daemon HTTP API
+# instead of the in-process TUI. For now it is intentionally omitted so that
+# test_integration.py fails at collection time (skipped by -m integration anyway).
