@@ -259,3 +259,67 @@ async def test_on_playback_finished_at_end_with_loop_wraps():
     await pc.on_playback_finished()
 
     assert library.cursor_video_id == "A"
+
+
+@pytest.mark.asyncio
+async def test_prev_recasts_item_previously_playing(monkeypatch):
+    """Regression: prev su item che era stato in 'playing' deve ri-castare,
+    non bloccare con 'cursor not ready'. Il file è ancora in cache."""
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_library(["A", "B"])
+    library.items[0].status = "playing"  # A era playing prima del next
+    library.items[1].status = "playing"  # B sta playing ora
+    library.cursor_video_id = "B"
+
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    await pc.prev()
+
+    assert library.cursor_video_id == "A"
+    cc.cast_url.assert_called_once()
+    assert library.items[0].status == "playing"  # ora è di nuovo current
+    assert library.items[1].status == "ready"  # de-staled
+
+
+@pytest.mark.asyncio
+async def test_stop_resets_current_item_to_ready():
+    """Regression: dopo stop il cursor item torna 'ready' così un toggle/play
+    successivo lo ri-casta invece di skipparlo."""
+    library = _make_library(["A"])
+    library.items[0].status = "playing"
+    library.cursor_video_id = "A"
+
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+    pc.state = "playing"
+
+    await pc.stop()
+
+    assert pc.state == "idle"
+    assert library.items[0].status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_toggle_after_stop_recasts_cursor_item(monkeypatch):
+    """Regression: toggle dopo stop deve ricastare l'item corrente."""
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    library.items[0].status = "ready"  # post-stop
+
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+    pc.state = "idle"
+
+    await pc.toggle()
+
+    cc.cast_url.assert_called_once()
+    assert pc.state == "casting"
+    assert library.cursor_video_id == "A"

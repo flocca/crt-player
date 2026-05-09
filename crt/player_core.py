@@ -107,9 +107,15 @@ class PlayerCore:
         await self._cast_current()
 
     async def stop(self) -> None:
-        """Stop playback and set state to idle."""
+        """Stop playback and set state to idle. Cursor stays on the current item;
+        its status reverts to 'ready' so a subsequent toggle/play can re-cast it."""
         await asyncio.to_thread(self.chromecast.stop)
         self.state = "idle"
+        idx = self._cursor_index()
+        if idx is not None:
+            item = self.library.items[idx]
+            if item.status in ("playing", "casting", "paused"):
+                item.status = "ready"
 
     async def stop_and_remove(self, video_id: str) -> None:
         """If video_id is the currently playing/casting/paused item, stop it.
@@ -160,13 +166,21 @@ class PlayerCore:
         if idx is None:
             return
         item = self.library.items[idx]
-        if item.status != "ready" or not item.filename:
+        if not item.filename:
             log.info(
-                "Cursor item %s not ready (status=%s); waiting",
+                "Cursor item %s has no cache file (status=%s); waiting",
                 item.video_id,
                 item.status,
             )
             return
+
+        # Any item currently labelled playing/casting/paused but that's no longer
+        # the cursor is stale — revert to "ready" so a future cursor move back
+        # doesn't trip the "already playing" guard.
+        for other in self.library.items:
+            if other is not item and other.status in ("playing", "casting", "paused"):
+                other.status = "ready"
+
         await self.chromecast.wait_for_connection()
         local_ip = _get_local_ip()
         url = f"http://{local_ip}:{config.SERVER_PORT}/media/{item.filename}"
