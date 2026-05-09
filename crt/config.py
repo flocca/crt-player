@@ -16,6 +16,20 @@ STATE_FILE = os.environ.get(
 )
 LOOP_MODE_DEFAULT: bool = os.environ.get("CRT_LOOP", "0") == "1"
 
+# YouTube sync (Phase 2)
+YT_PLAYLIST_ID = os.environ.get("CRT_YT_PLAYLIST_ID", "")
+YT_CLIENT_SECRETS = os.environ.get(
+    "CRT_YT_CLIENT_SECRETS",
+    os.path.join(os.path.expanduser("~"), ".local", "share", "crt-player", "client_secrets.json"),
+)
+YT_TOKEN_FILE = os.environ.get(
+    "CRT_YT_TOKEN_FILE",
+    os.path.join(os.path.expanduser("~"), ".local", "share", "crt-player", "oauth_token.json"),
+)
+SYNC_INTERVAL_S = int(os.environ.get("CRT_SYNC_INTERVAL_S", "300"))
+LOG_LEVEL = os.environ.get("CRT_LOG_LEVEL", "INFO")
+DAEMON_URL = os.environ.get("CRT_DAEMON_URL", "http://localhost:8765")
+
 # Logical frame is 768x576 (4:3). Margins are pixels in that frame that will be
 # rendered as black borders to compensate for CRT overscan.
 _FRAME_W = 768
