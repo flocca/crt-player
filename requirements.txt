@@ -7,3 +7,6 @@ pytest
 httpx
 pytest-asyncio
 pytest-timeout
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
