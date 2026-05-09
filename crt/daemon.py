@@ -15,7 +15,7 @@ from crt.pipeline import PipelineWorker
 from crt.library_store import LibraryStore
 from crt.ui import CRTCastApp
 
-LOG_FILE = os.path.join(os.path.dirname(__file__), "crt_cast.log")
+LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "crt_cast.log")
 _log_fh = open(LOG_FILE, "w")
 logging.basicConfig(
     level=logging.INFO,
