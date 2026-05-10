@@ -4,7 +4,16 @@
 
 #include <bt/bt_service/bt.h>
 #include <furi_hal_bt.h>
-#include <profiles/serial_profile.h>
+#include <storage/storage.h>
+
+// Local fork of the Flipper Serial profile (from Momentum FW, via
+// EmmerichFrog/home_remote_public). Diverges from the stock profile in two
+// crucial ways: it uses a custom MAC (default ^ mac_xor) and a custom
+// advertise name. With a non-default MAC the firmware's BtSrv RPC handler
+// — which is hooked to the default profile/MAC — never opens an RPC
+// connection on top of our session, so our TX bytes flow cleanly to the
+// central without spurious preamble or premature disconnects.
+#include "libs/serial_profile.h"
 
 #define TAG "crt_remote"
 
@@ -46,16 +55,22 @@ static void ble_serial_send_byte(CrtRemoteApp* app, uint8_t byte_val) {
 static bool ble_serial_start(CrtRemoteApp* app) {
     app->bt = furi_record_open(RECORD_BT);
     bt_disconnect(app->bt);
-    furi_delay_ms(200);
-    app->profile = bt_profile_start(app->bt, ble_profile_serial, NULL);
+    // Use a separate keys storage so our bond doesn't collide with the
+    // system Flipper bond (qFlipper Mac/iOS).
+    bt_keys_storage_set_storage_path(app->bt, APP_DATA_PATH(".bt_serial.keys"));
+
+    BleProfileSerialParams params = {
+        .device_name_prefix = "CRTRem",  // <8 chars per the SDK comment
+        .mac_xor = 0x0042,               // arbitrary — picks a different MAC
+    };
+    app->profile = bt_profile_start(app->bt, ble_profile_serial, &params);
     if(app->profile == NULL) {
         FURI_LOG_E(TAG, "bt_profile_start failed");
         app->ble_ok = false;
         return false;
     }
-    ble_profile_serial_set_rpc_active(app->profile, false);
     furi_hal_bt_start_advertising();
-    FURI_LOG_I(TAG, "BLE Serial active, advertising, RPC disabled");
+    FURI_LOG_I(TAG, "BLE Serial active (forked profile, custom MAC)");
     app->ble_ok = true;
     return true;
 }
@@ -64,6 +79,7 @@ static void ble_serial_stop(CrtRemoteApp* app) {
     if(app->bt != NULL) {
         bt_disconnect(app->bt);
         furi_delay_ms(200);
+        bt_keys_storage_set_default_path(app->bt);
         bt_profile_restore_default(app->bt);
         furi_record_close(RECORD_BT);
         app->bt = NULL;
