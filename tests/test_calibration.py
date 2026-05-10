@@ -1,6 +1,6 @@
 import pytest
-import config as config_module
-from calibration import build_calibration_filter
+import crt.config as config_module
+from crt.calibration import build_calibration_filter
 
 
 @pytest.fixture(autouse=True)

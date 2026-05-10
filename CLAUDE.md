@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Tests
 source .venv/bin/activate
 python -m pytest tests/ -v                        # full unit suite (50 tests)
-python -m pytest tests/test_queue_manager.py -v   # single file
+python -m pytest tests/test_library_store.py -v   # single file
 python -m pytest tests/test_pipeline.py::test_fetch_title -v  # single test
 
 # Integration tests (require real Chromecast + internet)
@@ -28,7 +28,7 @@ External dependency: `ffmpeg` must be installed (`brew install ffmpeg`).
 
 TUI app (Textual) that downloads YouTube videos, converts them to 4:3 PAL (768x576, 25fps), and casts to a Chromecast via pychromecast.
 
-**Data flow:** User adds URL in TUI -> QueueManager stores item -> PipelineWorker picks it up -> yt-dlp downloads -> ffmpeg encodes -> pychromecast casts -> MediaStatusListener detects playback end -> next item.
+**Data flow:** User adds URL in TUI -> LibraryStore stores item -> PipelineWorker picks it up -> yt-dlp downloads -> ffmpeg encodes -> pychromecast casts -> MediaStatusListener detects playback end -> next item.
 
 **Threading model:** Textual runs the asyncio event loop. The pipeline worker runs as an asyncio task in that loop. Blocking operations (yt-dlp download, pychromecast calls) use `asyncio.to_thread()`. A minimal FastAPI/uvicorn server runs in a separate daemon thread solely to serve MP4 files to the Chromecast.
 
@@ -42,11 +42,11 @@ TUI app (Textual) that downloads YouTube videos, converts them to 4:3 PAL (768x5
 
 **Persistence:** Queue state (items, history, playback position) saved to `~/.local/share/crt-player/state.json` (configurable via `CRT_STATE_FILE`). Auto-saves every 60s + on exit. On reload, mid-processing items reset to `"queued"`; playing items become `"ready"` if encoded file exists (skips download+encode).
 
-**Playlist model:** `done` is informational only — not a terminal state. The cast loop uses `advance_cursor()` on `QueueManager` to find the next item by queue position, looping back if `loop_mode=True`. `prepare_for_play()` transitions `done`/`error` items to `ready` (cache hit) or `queued` (cache miss) before casting.
+**Playlist model:** `done` is informational only — not a terminal state. The cast loop uses `advance_cursor()` on `LibraryStore` to find the next item by queue position, looping back if `loop_mode=True`. `prepare_for_play()` transitions `done`/`error` items to `ready` (cache hit) or `queued` (cache miss) before casting.
 
 **Encoding pipeline:** `_detect_crop()` runs a cropdetect pre-pass (120 frames) to remove baked-in black bars from the source. `_build_video_filter()` then applies scale+crop or scale+pad based on `CRT_SCALE_MODE`, and stretches the result to 16:9 (1024x576) so the Chromecast doesn't add pillarboxing — the user's HW squeezes 16:9→4:3 restoring correct proportions.
 
-**Encoding cache:** Cached files are named `{video_id}_pal_{scale_mode}.mp4` in TEMP_DIR (back-compat shape; when any `CRT_MARGIN_*` is non-zero the name gains a `_m{top}-{bottom}-{left}-{right}` suffix). Changing `CRT_SCALE_MODE` or any margin triggers re-encode. The filename helper lives in `config.py` as `cached_encoded_filename()` so `pipeline.py` and `queue_manager.py` agree. Files live for `FILE_TTL_HOURS` (default 24h). `fetch_title()` returns `(title, video_id)`.
+**Encoding cache:** Cached files are named `{video_id}_pal_{scale_mode}.mp4` in TEMP_DIR (back-compat shape; when any `CRT_MARGIN_*` is non-zero the name gains a `_m{top}-{bottom}-{left}-{right}` suffix). Changing `CRT_SCALE_MODE` or any margin triggers re-encode. The filename helper lives in `crt/config.py` as `cached_encoded_filename()` so `crt/pipeline.py` and `crt/library_store.py` agree. Files live for `FILE_TTL_HOURS` (default 24h). `fetch_title()` returns `(title, video_id)`.
 
 **Queue helpers:** `advance_cursor(loop)` returns the next item by position after the current cursor (playing or last done). `prepare_for_play(item)` transitions done/error to ready/queued based on cache. `can_move(item_id, direction)` returns bool for UI disabled state. `first_queued_after_cursor()` is used by the prefetch loop to skip items before the cursor.
 
@@ -66,7 +66,7 @@ Scan for Chromecasts: `python -c "import pychromecast, time; ccs, b = pychromeca
 ## Testing
 
 TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Shared fixtures in `tests/conftest.py`.
-- `QueueManager` is used as-is (pure data). `PipelineWorker` and `ChromecastManager` are `MagicMock` with `AsyncMock` for async methods — this neutralizes `on_mount`'s infinite-loop tasks.
+- `LibraryStore` is used as-is (pure data). `PipelineWorker` and `ChromecastManager` are `MagicMock` with `AsyncMock` for async methods — this neutralizes `on_mount`'s infinite-loop tasks.
 - `on_mount` calls `_refresh_all` when `queue.items` is non-empty and focuses the queue list; otherwise focuses the URL input. `wake()` only fires if `next_pending()` exists. To test UI state for "playing"/"ready" items without pre-populating the queue, call `app._refresh_all()` manually after mount.
 - Always `await pilot.pause()` after interactions (`press`, `click`, value changes) — handlers run asynchronously.
 - Textual `ListView` is falsy when empty. Don't `assert widget` — use `query_one()` (raises `NoMatches` if absent).

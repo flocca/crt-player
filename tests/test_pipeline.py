@@ -4,10 +4,10 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
-import config as config_module
-from pipeline import fetch_title, download_video, encode_video, _build_video_filter, _detect_crop
-from config import cached_encoded_filename
-from queue_manager import QueueItem
+import crt.config as config_module
+from crt.pipeline import fetch_title, download_video, encode_video, _build_video_filter, _detect_crop
+from crt.config import cached_encoded_filename
+from crt.library_store import QueueItem
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +32,7 @@ def _restore_config():
 @pytest.mark.asyncio
 async def test_fetch_title():
     mock_info = {"title": "Test Video Title", "id": "abc"}
-    with patch("pipeline.yt_dlp.YoutubeDL") as MockYDL:
+    with patch("crt.pipeline.yt_dlp.YoutubeDL") as MockYDL:
         instance = MockYDL.return_value.__enter__.return_value
         instance.extract_info.return_value = mock_info
         title, video_id = await fetch_title("https://youtube.com/watch?v=abc")
@@ -67,7 +67,7 @@ async def test_download_video():
         context_mock.__exit__.return_value = False
         return context_mock
 
-    with patch("pipeline.yt_dlp.YoutubeDL", side_effect=capture_init):
+    with patch("crt.pipeline.yt_dlp.YoutubeDL", side_effect=capture_init):
         filepath, duration = await download_video(
             "https://youtube.com/watch?v=abc", "/tmp/test", on_progress
         )
@@ -108,8 +108,8 @@ async def test_encode_video(tmp_path):
     mock_process.stdout.readline = mock_readline
     mock_process.wait = AsyncMock(return_value=0)
 
-    with patch("pipeline._detect_crop", return_value=None), \
-         patch("pipeline.asyncio.create_subprocess_exec", return_value=mock_process):
+    with patch("crt.pipeline._detect_crop", return_value=None), \
+         patch("crt.pipeline.asyncio.create_subprocess_exec", return_value=mock_process):
         result = await encode_video(input_file, output_file, 10.0, on_progress)
 
     assert result == output_file
@@ -207,7 +207,7 @@ def test_cached_filename_pad_mode_no_margins():
 async def test_detect_crop_returns_none_when_auto_crop_disabled():
     config_module.AUTO_CROP = False
     # Should short-circuit without shelling out to ffmpeg at all.
-    with patch("pipeline.asyncio.create_subprocess_exec") as mock_exec:
+    with patch("crt.pipeline.asyncio.create_subprocess_exec") as mock_exec:
         result = await _detect_crop("/tmp/anything.mp4")
     assert result is None
     mock_exec.assert_not_called()
@@ -218,13 +218,13 @@ async def test_detect_crop_runs_ffmpeg_when_auto_crop_enabled():
     config_module.AUTO_CROP = True
     mock_proc = AsyncMock()
     mock_proc.communicate = AsyncMock(return_value=(b"", b""))
-    with patch("pipeline.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("crt.pipeline.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         await _detect_crop("/tmp/anything.mp4")
     mock_exec.assert_called_once()
 
 
 def test_pipeline_worker_loop_mode_defaults_to_false():
-    from pipeline import PipelineWorker
+    from crt.pipeline import PipelineWorker
     from unittest.mock import MagicMock
     config_module.LOOP_MODE_DEFAULT = False  # pin so test is not CRT_LOOP-env-dependent
     worker = PipelineWorker(MagicMock(), MagicMock())
@@ -233,7 +233,7 @@ def test_pipeline_worker_loop_mode_defaults_to_false():
 
 def test_pipeline_worker_loop_mode_reads_from_config(monkeypatch):
     monkeypatch.setattr(config_module, "LOOP_MODE_DEFAULT", True)
-    from pipeline import PipelineWorker
+    from crt.pipeline import PipelineWorker
     from unittest.mock import MagicMock
     worker = PipelineWorker(MagicMock(), MagicMock())
     assert worker.loop_mode is True

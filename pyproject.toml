@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crt-player"
+version = "0.1.0"
+description = "Headless YouTube → Chromecast bridge with Flipper-controllable playback"
+requires-python = ">=3.12"
+dependencies = [
+    "textual",
+    "fastapi",
+    "uvicorn",
+    "yt-dlp",
+    "pychromecast",
+    "httpx",
+    "google-api-python-client",
+    "google-auth-oauthlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "pytest-timeout"]
+
+[project.scripts]
+crt-daemon = "crt.daemon:main"
+crt-bootstrap = "crt.bootstrap:main"
+crt-tui = "tui_client.main:main"
+
+[tool.setuptools.packages.find]
+include = ["crt*", "tui_client*"]
+exclude = ["tests*", "docker*"]

@@ -13,7 +13,7 @@ def _reload_config(monkeypatch, **env):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    import config
+    import crt.config as config
     importlib.reload(config)
     return config
 
@@ -74,3 +74,31 @@ def test_vertical_margins_asymmetric_round_respects_max_sum(monkeypatch):
     # 77+371=448, factor=288/448=0.6428..., round gives 50+239=289 without clamp.
     # With the clamp we guarantee sum <= 288.
     assert cfg.MARGIN_TOP + cfg.MARGIN_BOTTOM <= 288
+
+
+def test_youtube_env_vars_loaded(monkeypatch):
+    cfg = _reload_config(
+        monkeypatch,
+        CRT_YT_PLAYLIST_ID="PLtestxxx",
+        CRT_YT_CLIENT_SECRETS="/x/secrets.json",
+        CRT_YT_TOKEN_FILE="/x/token.json",
+        CRT_SYNC_INTERVAL_S="60",
+        CRT_LOG_LEVEL="DEBUG",
+    )
+    assert cfg.YT_PLAYLIST_ID == "PLtestxxx"
+    assert cfg.YT_CLIENT_SECRETS == "/x/secrets.json"
+    assert cfg.YT_TOKEN_FILE == "/x/token.json"
+    assert cfg.SYNC_INTERVAL_S == 60
+    assert cfg.LOG_LEVEL == "DEBUG"
+
+
+def test_youtube_env_vars_have_defaults(monkeypatch):
+    for k in ("CRT_YT_PLAYLIST_ID", "CRT_YT_CLIENT_SECRETS", "CRT_YT_TOKEN_FILE",
+              "CRT_SYNC_INTERVAL_S", "CRT_LOG_LEVEL"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = _reload_config(monkeypatch)
+    assert cfg.YT_PLAYLIST_ID == ""
+    assert cfg.SYNC_INTERVAL_S == 300
+    assert cfg.LOG_LEVEL == "INFO"
+    assert "client_secrets.json" in cfg.YT_CLIENT_SECRETS
+    assert "oauth_token.json" in cfg.YT_TOKEN_FILE

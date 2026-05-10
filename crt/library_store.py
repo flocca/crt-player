@@ -7,7 +7,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 
-import config
+from crt import config
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +17,7 @@ ACTIVE_STATUSES = {"downloading", "encoding", "casting", "playing", "ready"}
 @dataclass
 class QueueItem:
     url: str
+    video_id: str = ""
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     title: str = ""
     status: str = "queued"
@@ -29,6 +30,7 @@ class QueueItem:
     def to_dict(self) -> dict:
         return {
             "url": self.url,
+            "video_id": self.video_id,
             "id": self.id,
             "title": self.title,
             "status": self.status,
@@ -43,6 +45,7 @@ class QueueItem:
     def from_dict(cls, d: dict) -> QueueItem:
         return cls(
             url=d["url"],
+            video_id=d.get("video_id", ""),
             id=d.get("id", str(uuid.uuid4())),
             title=d.get("title", ""),
             status=d.get("status", "queued"),
@@ -54,10 +57,12 @@ class QueueItem:
         )
 
 
-class QueueManager:
+class LibraryStore:
     def __init__(self) -> None:
         self.items: list[QueueItem] = []
         self.history: list[QueueItem] = []
+        self.cursor_video_id: str | None = None
+        self.loop_mode: bool = config.LOOP_MODE_DEFAULT
 
     def push_to_history(self, item: QueueItem) -> None:
         self.history.append(item)
@@ -229,8 +234,9 @@ class QueueManager:
 
     def save_state(self, path: str, playback_position: float = 0.0) -> None:
         data = {
-            "version": 1,
-            "playback_position": playback_position,
+            "version": 2,
+            "cursor_video_id": self.cursor_video_id,
+            "loop_mode": self.loop_mode,
             "items": [item.to_dict() for item in self.items],
             "history": [item.to_dict() for item in self.history],
         }
@@ -248,7 +254,7 @@ class QueueManager:
                 pass
 
     def load_state(self, path: str) -> float:
-        """Load queue state from disk. Returns saved playback position."""
+        """Load queue state from disk. Returns 0.0 (playback position unused in v2)."""
         if not os.path.isfile(path):
             return 0.0
         try:
@@ -258,7 +264,18 @@ class QueueManager:
             log.warning("Corrupt or unreadable state file %s, starting fresh", path)
             return 0.0
 
-        playback_position = data.get("playback_position", 0.0)
+        version = data.get("version", 1)
+        if version != 2:
+            backup = path + ".v1.bak"
+            log.warning(
+                "Migrating state.json v%s → empty v2; old state saved to %s",
+                version, backup,
+            )
+            os.replace(path, backup)
+            return 0.0
+
+        self.cursor_video_id = data.get("cursor_video_id")
+        self.loop_mode = data.get("loop_mode", False)
 
         for raw in data.get("items", []):
             item = QueueItem.from_dict(raw)
@@ -308,7 +325,7 @@ class QueueManager:
             self.history.append(QueueItem.from_dict(raw))
 
         log.info(
-            "Loaded state: %d items, %d history, resume at %.1fs",
-            len(self.items), len(self.history), playback_position,
+            "Loaded state v2: %d items, %d history, cursor=%s, loop=%s",
+            len(self.items), len(self.history), self.cursor_video_id, self.loop_mode,
         )
-        return playback_position
+        return 0.0

@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import config
+from crt import config
 
 log = logging.getLogger(__name__)
 

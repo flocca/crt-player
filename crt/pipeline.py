@@ -8,9 +8,9 @@ from typing import Callable
 
 import yt_dlp
 
-import config
-from chromecast_mgr import ChromecastManager
-from queue_manager import QueueItem, QueueManager
+from crt import config
+from crt.chromecast_mgr import ChromecastManager
+from crt.library_store import QueueItem, LibraryStore
 
 log = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ async def encode_video(
 
 class PipelineWorker:
     def __init__(
-        self, queue: QueueManager, chromecast: ChromecastManager
+        self, queue: LibraryStore, chromecast: ChromecastManager
     ) -> None:
         self.queue = queue
         self.chromecast = chromecast
@@ -320,6 +320,8 @@ class PipelineWorker:
     async def _prepare_one(self, item: QueueItem) -> None:
         try:
             item.title, video_id = await fetch_title(item.url)
+            if video_id:
+                item.video_id = video_id
             self.notify()
 
             # Check for cached encoded file
