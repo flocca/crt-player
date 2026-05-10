@@ -54,8 +54,8 @@ void ble_profile_serial_notify_buffer_is_empty(FuriHalBleProfileBase* profile);
 /** Set Serial service events callback
  *
  * @param profile       Profile instance
- * @param buffer_size   Applicaition buffer size
- * @param calback       FuriHalBtSerialCallback instance
+ * @param buffer_size   Application buffer size
+ * @param callback      FuriHalBtSerialCallback instance
  * @param context       pointer to context
  */
 void ble_profile_serial_set_event_callback(
