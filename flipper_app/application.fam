@@ -1,0 +1,11 @@
+App(
+    appid="crt_remote",
+    name="CRT Remote",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="crt_remote_app",
+    requires=["gui"],
+    stack_size=2 * 1024,
+    fap_category="Tools",
+    fap_description="Remote control for crt-player via BLE Serial bridge.",
+    fap_version="0.1",
+)
