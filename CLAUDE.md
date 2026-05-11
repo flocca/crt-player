@@ -54,6 +54,24 @@ TUI app (Textual) that downloads YouTube videos, converts them to 4:3 PAL (768x5
 
 **Queue helpers:** `advance_cursor(loop)` returns the next item by position after the current cursor (playing or last done). `prepare_for_play(item)` transitions done/error to ready/queued based on cache. `can_move(item_id, direction)` returns bool for UI disabled state. `first_queued_after_cursor()` is used by the prefetch loop to skip items before the cursor.
 
+## Production deployment (Lodge)
+
+Daemon runs in Docker on a Raspberry Pi 5 ("Lodge") via the sibling `lodge-tools` repo at `services/crt-player/`. Ops/gotchas detail: [`../lodge-tools/services/crt-player/CLAUDE.md`](../lodge-tools/services/crt-player/CLAUDE.md). Integration spec: `../lodge-tools/docs/superpowers/specs/2026-05-11-crt-services-integration-design.md`.
+
+**Container layout:** `network_mode: host` (mDNS Chromecast discovery + direct MP4 stream require multicast/no-NAT), `cpus: 2.0` + `cpu_shares: 256` (deprioritized vs OpenClaw/HA/Matrix — ffmpeg ~2x slower but system stays responsive). Bind mounts: `/opt/lodge/crt-player/{cache,state,secrets}` → `/data/{cache,state,secrets}`. **`secrets` mount is `:ro`** — token refresh is in-memory only (verified 2026-05-11; if upstream changes write path, symptom is 401s + "Read-only file system" in logs).
+
+**Baked container env** (set in `docker/Dockerfile`, do NOT set in `.env`): `CRT_TEMP_DIR=/data/cache`, `CRT_STATE_FILE=/data/state/library.json`, `CRT_YT_CLIENT_SECRETS=/data/secrets/client_secrets.json`, `CRT_YT_TOKEN_FILE=/data/secrets/oauth_token.json`.
+
+**Tailnet access from Mac:** `CRT_DAEMON_URL=http://lodge.<tailnet>.ts.net:8765 crt-tui`. Daemon listens on `0.0.0.0:8765` but has no UFW LAN rule since 2026-05-11 — external access only via Tailscale.
+
+**HTTP control surface** consumed by TUI + Flipper bridge: `GET /status`, `GET /library/items`, `POST /control/{next,prev,toggle,stop,loop/toggle,sync,calibrate}`.
+
+**OAuth bootstrap** (one-time, manual on Mac): `python -m crt.bootstrap` opens browser → writes `~/.local/share/crt-player/{client_secrets,oauth_token}.json`. `lodge crt-player install` validates these exist on the Mac then `scp`s them to `/opt/lodge/crt-player/secrets/` with `chmod 600`.
+
+**Backup boundary** (restic on Pi, daily 04:00): only `secrets/` + `.env` + `docker-compose.yml`. `cache/` (encoded MP4) and `state/` (library DB) are regenerable from the YouTube playlist.
+
+**Flipper command byte → HTTP endpoint** (in `../lodge-tools/services/crt-flipper-bridge/bridge.py` COMMAND_TABLE): `0x01`→next, `0x02`→prev, `0x03`→toggle, `0x04`→stop, `0x05`→loop/toggle, `0x06`→sync, `0x07`→calibrate. Bridge runs in Docker on the same Pi (host network + `/run/dbus` mount + `NET_ADMIN`). When you add/rename a `/control/*` endpoint in this repo, mirror the change in the bridge's COMMAND_TABLE. Bridge ops: [`../lodge-tools/services/crt-flipper-bridge/CLAUDE.md`](../lodge-tools/services/crt-flipper-bridge/CLAUDE.md).
+
 ## Integration Tests
 
 Tests in `tests/test_integration.py` exercise the full stack with a real Chromecast and real YouTube URLs. They are opt-in (`pytest -m integration`) and skip automatically if env vars are absent.
