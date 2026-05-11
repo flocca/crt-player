@@ -8,7 +8,7 @@
 
 Inoltre il profilo `ble_profile_serial` linkato dal SDK è quello "RPC-entangled" di Flipper. Per ottenere TX/RX puliti senza interferenza del `BtSrv` RPC handler, abbiamo portato localmente una versione forkata da Momentum FW (`flipper_app/libs/serial_profile.{c,h}`) con MAC custom (`mac_xor`). Vedi [serial_profile.c](../../../flipper_app/libs/serial_profile.c) per il lifecycle.
 
-Button press invocano `ble_profile_serial_tx()` con 1 byte verso il bridge. Lato RX dal bridge le write sono attualmente disabilitate (vedi spec doc). ViewPort/Canvas standard per la GUI.
+Button press invocano `ble_profile_serial_tx()` con 1 byte verso il bridge. Il path RX dal bridge (status/last_result) è definito nella spec ma **non implementato in questa versione**: la FAP non registra alcuna `ble_profile_serial_set_event_callback`, e il bridge è configurato in no-op sulle write RX. Tutta l'infra (frame types `0x01`/`0x02`, allocazione del callback, sincronizzazione UI) è già pianificata negli step skippati; basterà ri-applicarli quando si vuole il feedback. ViewPort/Canvas standard per la GUI.
 
 **Tech Stack:** C99, Flipper SDK (firmware ufficiale `dev` branch), `ufbt` toolchain, FuriHAL BT, Serial Profile.
 

@@ -30,8 +30,10 @@ ufbt cli log      # leggi i log seriali del Flipper
 4. Pulsanti: Up=next, Down=prev, OK=play/pause, Back-long=stop, Right=loop,
    Left=sync, OK-long=calibrate.
 5. La riga di stato sul Flipper mostra solo lo stato BLE
-   (starting/active/failed) — non lo stato del player (feedback RX
-   disabilitato per limitazione del firmware, vedi spec).
+   (starting/active/failed) — non lo stato del player. Il path RX dal bridge
+   (status/last_result) è definito nella spec ma **non implementato in questa
+   versione della FAP** (nessuna callback registrata e bridge in no-op).
+   Re-abilitabile quando serve, vedi spec.
 
 ## Spec
 

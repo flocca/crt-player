@@ -89,6 +89,11 @@ static bool ble_serial_start(CrtRemoteApp* app) {
     app->profile = bt_profile_start(app->bt, ble_profile_serial, &params);
     if(app->profile == NULL) {
         FURI_LOG_E(TAG, "bt_profile_start failed");
+        // Restore default keys storage so subsequent BT use (system Flipper,
+        // qFlipper) doesn't pair against our custom store.
+        bt_keys_storage_set_default_path(app->bt);
+        furi_record_close(RECORD_BT);
+        app->bt = NULL;
         app->ble_state = BleStateFailed;
         return false;
     }

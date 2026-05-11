@@ -20,5 +20,5 @@ As a result, **the entire `flipper_app/` directory is distributed under
 GPL-3.0-or-later**, regardless of any other license that may apply to the rest
 of the `crt-player` repository.
 
-Full text of the GNU General Public License v3.0:
-  https://www.gnu.org/licenses/gpl-3.0.txt
+Full text of the GNU General Public License v3.0 is vendored alongside this
+file in `flipper_app/LICENSE`. Upstream copy: https://www.gnu.org/licenses/gpl-3.0.txt
