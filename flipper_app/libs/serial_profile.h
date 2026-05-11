@@ -1,6 +1,7 @@
 
 #pragma once
-// From Momentum FW
+// From Momentum FW. License: GPL-3.0 (see ../COPYING).
+#include <stdbool.h>
 #include <stdint.h>
 typedef struct {
     const char* device_name_prefix; /**< Prefix for device name. Length must be less than 8 */

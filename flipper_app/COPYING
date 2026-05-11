@@ -1,0 +1,24 @@
+GPL-3.0 NOTICE
+==============
+
+This subdirectory (`flipper_app/`) contains the `crt_remote` Flipper Zero FAP.
+The file `libs/serial_profile.c` (and its header `libs/serial_profile.h`) is a
+modified copy of code originating in:
+
+    flipperdevices/flipperzero-firmware
+      targets/f7/ble_glue/profiles/serial_profile.c
+
+which is licensed under GPL-3.0. The "custom-MAC + device_name_prefix"
+variant was sourced through:
+
+    EmmerichFrog/home_remote_public
+      libs/serial_profile.{c,h}
+
+This file therefore inherits GPL-3.0.
+
+As a result, **the entire `flipper_app/` directory is distributed under
+GPL-3.0-or-later**, regardless of any other license that may apply to the rest
+of the `crt-player` repository.
+
+Full text of the GNU General Public License v3.0:
+  https://www.gnu.org/licenses/gpl-3.0.txt

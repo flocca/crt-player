@@ -4,7 +4,11 @@
 
 **Goal:** Costruire una FAP nativa C per Flipper Zero che attiva il profilo BLE Serial (Nordic UART), invia comandi 1-byte al bridge su Lodge alla pressione di pulsanti, e mostra lo stato del player su display + feedback per ogni comando.
 
-**Architecture:** App C in `flipper_app/` (questo repo), build con `ufbt`. Usa `furi_hal_bt_change_app(ble_profile_serial, ...)` per switchare al NUS profile. Una callback registrata via `ble_profile_serial_set_event_callback` riceve i byte dal bridge (RX); button press invocano `ble_profile_serial_tx()` con 1 byte. ViewPort/Canvas standard per la GUI.
+**Architecture:** App C in `flipper_app/` (questo repo), build con `ufbt`. Usa il **`Bt` record service** del firmware (`bt_profile_start(bt, ble_profile_serial, &params)` + `bt_profile_restore_default(bt)`) — non `furi_hal_bt_change_app(...)` come la prima bozza di questo plan suggeriva. La differenza: `bt_profile_start` gestisce il restore della default profile a uscita, lo storage keys è isolabile via `bt_keys_storage_set_storage_path()`, ed è il path "ufficiale" usato dalle FAP community (FlipBuddy, home_remote_public, ecc.).
+
+Inoltre il profilo `ble_profile_serial` linkato dal SDK è quello "RPC-entangled" di Flipper. Per ottenere TX/RX puliti senza interferenza del `BtSrv` RPC handler, abbiamo portato localmente una versione forkata da Momentum FW (`flipper_app/libs/serial_profile.{c,h}`) con MAC custom (`mac_xor`). Vedi [serial_profile.c](../../../flipper_app/libs/serial_profile.c) per il lifecycle.
+
+Button press invocano `ble_profile_serial_tx()` con 1 byte verso il bridge. Lato RX dal bridge le write sono attualmente disabilitate (vedi spec doc). ViewPort/Canvas standard per la GUI.
 
 **Tech Stack:** C99, Flipper SDK (firmware ufficiale `dev` branch), `ufbt` toolchain, FuriHAL BT, Serial Profile.
 

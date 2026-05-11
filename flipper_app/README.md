@@ -16,13 +16,17 @@ ufbt cli log      # leggi i log seriali del Flipper
 
 1. Sul Flipper: Apps → Tools → CRT Remote.
 2. La app attiva il profilo BLE Serial con MAC derivato e advertise come
-   **"CRTRem Dlignone"** (sostituisci "Dlignone" col nome del tuo device).
+   `<X>CRTRem <NAME>` — dove `<X>` è il primo char del device name (es. `F`
+   per "Flipper", quindi tipicamente `FCRTRem <NAME>`) e `<NAME>` è il nome
+   del tuo Flipper (es. "Dlignone"). Il prefisso esatto dipende dal char
+   iniziale del device — cerca la **substring `CRTRem`** per essere robusto.
 3. Sull'homeserver: il `crt-flipper-bridge` (vedi repo `lodge-tools`) si
    connette al MAC della FAP. Questo MAC **non** è quello del menu Bluetooth
    del Flipper — è derivato (`base ^ mac_xor`, byte 2 incrementato; default
-   `mac_xor = 0x0042`). Scoprilo via `bluetoothctl scan on` cercando il device
-   con nome `CRTRem ...`. Vedi `services/crt-flipper-bridge/CLAUDE.md` nel
-   repo lodge-tools per il pairing iniziale (Numeric Comparison).
+   `mac_xor = 0x0042`). Scoprilo via `bluetoothctl scan on` cercando un
+   device il cui nome contiene `CRTRem`. Vedi
+   `services/crt-flipper-bridge/CLAUDE.md` nel repo lodge-tools per il
+   pairing iniziale (Numeric Comparison).
 4. Pulsanti: Up=next, Down=prev, OK=play/pause, Back-long=stop, Right=loop,
    Left=sync, OK-long=calibrate.
 5. La riga di stato sul Flipper mostra solo lo stato BLE

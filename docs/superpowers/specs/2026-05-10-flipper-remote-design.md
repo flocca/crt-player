@@ -25,7 +25,8 @@ Questo doc copre i due componenti rimanenti: il **bridge BLE→HTTP** (Python su
 
 4. **Protocollo: BLE Nordic UART Service (NUS) con il Flipper come peripheral.** La FAP attiva il profilo `Serial` built-in del firmware Flipper (NUS standard). Il bridge è il central, sottoscrive a TX notify per ricevere comandi, scrive su RX per inviare status/feedback. La pivot da "GATT custom" è imposta dal firmware stock — vedi sezione "Pivot: niente GATT custom" sotto.
 
-5. **No autenticazione né su HTTP né su BLE.** Estensione coerente della scelta F1 ("trust the LAN") già presa per il daemon. La superficie BLE è limitata a chi è in raggio di Lodge.
+5. **No autenticazione applicativa né su HTTP né su BLE.** Estensione coerente della scelta F1 ("trust the LAN") già presa per il daemon. La superficie BLE è limitata a chi è in raggio di Lodge.
+   *Nota:* a livello BLE il profilo Serial richiede comunque pairing+bonding tra Lodge e Flipper (`bonding_mode = true`, `pairing_method = GapPairingPinCodeVerifyYesNo` — Numeric Comparison). Il bond va fatto una tantum via `bluetoothctl` (vedi `services/crt-flipper-bridge/CLAUDE.md` lato lodge-tools). Questo è imposto dal firmware e non è auth "applicativa" — sopra il link cifrato non c'è alcun token, ACL o handshake aggiuntivo.
 
 ## Topologia runtime
 
@@ -136,7 +137,9 @@ services/crt-flipper-bridge/
 # MAC della FAP "CRT Remote" — è un MAC DERIVATO dal MAC base del Flipper:
 # byte 2 incrementato + byte 0/1 XORati con `mac_xor` (vedi flipper_app/libs/serial_profile.c).
 # NON è il MAC del menu Bluetooth del Flipper.
-# Scoprilo con `bluetoothctl scan on` cercando il device "CRTRem Dlignone".
+# Scoprilo con `bluetoothctl scan on` cercando un device il cui nome contiene la
+# substring `CRTRem` (il prefisso completo è `<X>CRTRem <NAME>`, dove <X> è il
+# primo char del device name e <NAME> il nome del Flipper).
 FLIPPER_MAC=
 
 # URL del daemon crt-player. Su Lodge col daemon nello stesso host: http://localhost:8765.
