@@ -133,7 +133,10 @@ services/crt-flipper-bridge/
 ### Configurazione (.env.template)
 
 ```
-# MAC address del Flipper Zero. Trovalo dal menu Bluetooth del Flipper.
+# MAC della FAP "CRT Remote" — è un MAC DERIVATO dal MAC base del Flipper:
+# byte 2 incrementato + byte 0/1 XORati con `mac_xor` (vedi flipper_app/libs/serial_profile.c).
+# NON è il MAC del menu Bluetooth del Flipper.
+# Scoprilo con `bluetoothctl scan on` cercando il device "CRTRem Dlignone".
 FLIPPER_MAC=
 
 # URL del daemon crt-player. Su Lodge col daemon nello stesso host: http://localhost:8765.

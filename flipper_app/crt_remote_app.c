@@ -17,13 +17,29 @@
 
 #define TAG "crt_remote"
 
+// Command codes sent over BLE Serial TX. Must match the bridge's parse_command
+// table in lodge-tools/services/crt-flipper-bridge/bridge.py.
+#define CMD_NEXT       0x01
+#define CMD_PREV       0x02
+#define CMD_TOGGLE     0x03
+#define CMD_STOP       0x04
+#define CMD_LOOP       0x05
+#define CMD_SYNC       0x06
+#define CMD_CALIBRATE  0x07
+
+typedef enum {
+    BleStateStarting = 0,
+    BleStateActive,
+    BleStateFailed,
+} BleState;
+
 typedef struct {
     FuriMessageQueue* input_queue;
     ViewPort* view_port;
     Gui* gui;
     Bt* bt;
     FuriHalBleProfileBase* profile;
-    bool ble_ok;
+    BleState ble_state;
 } CrtRemoteApp;
 
 static void draw_callback(Canvas* canvas, void* ctx) {
@@ -32,7 +48,14 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 2, 12, "CRT Remote");
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 2, 28, app->ble_ok ? "BLE: Serial active" : "BLE: starting...");
+    const char* state_line;
+    switch(app->ble_state) {
+        case BleStateActive:   state_line = "BLE: Serial active"; break;
+        case BleStateFailed:   state_line = "BLE: init failed";   break;
+        case BleStateStarting:
+        default:               state_line = "BLE: starting...";   break;
+    }
+    canvas_draw_str(canvas, 2, 28, state_line);
     canvas_draw_str(canvas, 2, 44, "Up/Dn/OK/L/R/Hold");
     canvas_draw_str(canvas, 2, 60, "Back to exit");
 }
@@ -66,12 +89,12 @@ static bool ble_serial_start(CrtRemoteApp* app) {
     app->profile = bt_profile_start(app->bt, ble_profile_serial, &params);
     if(app->profile == NULL) {
         FURI_LOG_E(TAG, "bt_profile_start failed");
-        app->ble_ok = false;
+        app->ble_state = BleStateFailed;
         return false;
     }
     furi_hal_bt_start_advertising();
     FURI_LOG_I(TAG, "BLE Serial active (forked profile, custom MAC)");
-    app->ble_ok = true;
+    app->ble_state = BleStateActive;
     return true;
 }
 
@@ -108,18 +131,18 @@ int32_t crt_remote_app(void* p) {
         if(furi_message_queue_get(app.input_queue, &event, FuriWaitForever) == FuriStatusOk) {
             if(event.type == InputTypeShort) {
                 switch(event.key) {
-                    case InputKeyUp:    ble_serial_send_byte(&app, 0x01); break;
-                    case InputKeyDown:  ble_serial_send_byte(&app, 0x02); break;
-                    case InputKeyOk:    ble_serial_send_byte(&app, 0x03); break;
-                    case InputKeyRight: ble_serial_send_byte(&app, 0x05); break;
-                    case InputKeyLeft:  ble_serial_send_byte(&app, 0x06); break;
+                    case InputKeyUp:    ble_serial_send_byte(&app, CMD_NEXT);   break;
+                    case InputKeyDown:  ble_serial_send_byte(&app, CMD_PREV);   break;
+                    case InputKeyOk:    ble_serial_send_byte(&app, CMD_TOGGLE); break;
+                    case InputKeyRight: ble_serial_send_byte(&app, CMD_LOOP);   break;
+                    case InputKeyLeft:  ble_serial_send_byte(&app, CMD_SYNC);   break;
                     case InputKeyBack:  running = false; break;
                     default: break;
                 }
             } else if(event.type == InputTypeLong) {
                 switch(event.key) {
-                    case InputKeyBack: ble_serial_send_byte(&app, 0x04); break;
-                    case InputKeyOk:   ble_serial_send_byte(&app, 0x07); break;
+                    case InputKeyBack: ble_serial_send_byte(&app, CMD_STOP);      break;
+                    case InputKeyOk:   ble_serial_send_byte(&app, CMD_CALIBRATE); break;
                     default: break;
                 }
             }

@@ -1,4 +1,19 @@
-// From Momentum FW
+/*
+ * Local fork of the Flipper Zero Serial profile (with the custom-MAC /
+ * device_name_prefix extension popularised by Momentum FW).
+ *
+ * Original upstream:
+ *   flipperdevices/flipperzero-firmware
+ *     targets/f7/ble_glue/profiles/serial_profile.c
+ *   License: GPL-3.0
+ *
+ * Custom-params variant (BleProfileSerialParams with mac_xor and
+ * device_name_prefix) — first seen in Momentum-derived firmwares; this
+ * exact copy was sourced via EmmerichFrog/home_remote_public:libs/serial_profile.c
+ * which is GPL-3.0-derivative work.
+ *
+ * This file therefore inherits GPL-3.0 from upstream.
+ */
 #include "serial_profile.h"
 
 #include <gap.h>
@@ -22,6 +37,9 @@ static FuriHalBleProfileBase* ble_profile_serial_start(FuriHalBleProfileParams p
     UNUSED(profile_params);
 
     BleProfileSerial* profile = malloc(sizeof(BleProfileSerial));
+    if(profile == NULL) {
+        return NULL;
+    }
 
     profile->base.config = ble_profile_serial;
 
