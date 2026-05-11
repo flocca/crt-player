@@ -20,6 +20,10 @@ python -m pytest -m integration -v -s             # runs tests/test_integration.
 
 # Dependencies
 pip install -r requirements.txt                   # inside .venv
+
+# Flipper FAP (subproject in flipper_app/, opt-in — Flipper Zero remote)
+cd flipper_app && ufbt              # build → dist/crt_remote.fap
+cd flipper_app && ufbt launch       # flash + run on Flipper via USB
 ```
 
 External dependency: `ffmpeg` must be installed (`brew install ffmpeg`).
@@ -97,6 +101,8 @@ TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Share
 - pychromecast `MediaStatus.idle_reason` distinguishes natural end (`"FINISHED"`) from transition-IDLE (`"CANCELLED"`/`"INTERRUPTED"` fired when loading new media). Don't treat PLAYING→IDLE as playback end without checking the reason — a late IDLE from the previous item can arrive after `reset_playback_ended()` and falsely end the new item.
 - Textual `Static` with overridden `render()` doesn't update the widget's internal `_content` size cache. Use `watch_*` reactive methods that call `self.update(...)` instead — otherwise title changes may render from stale content and `height: auto` won't adapt.
 - Running scripts standalone (outside `./run.sh`) needs `set -a; source .env; set +a` before `python ...` — the `.env` file has no `export` prefix, so a plain `source` only sets shell-local vars and Python won't see them.
+- The `flipper_app/` Flipper FAP is its own subproject: `ufbt` SDK, no Python tests. Spec: `docs/superpowers/specs/2026-05-10-flipper-remote-design.md`. Uses a forked Serial profile (Momentum FW source in `flipper_app/libs/serial_profile.{c,h}`) with custom `mac_xor` to bypass the firmware's BtSrv RPC handler — without that, button TX is silently dropped. Pairs with the bridge in `lodge-tools/services/crt-flipper-bridge/`.
+- Don't add `sources=` to a Flipper `application.fam` if you have subdirs: ufbt auto-discovery is recursive, and explicit globs (`["*.c", "libs/*.c"]`) cause duplicate-definition link errors.
 
 ## Language
 
