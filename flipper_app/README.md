@@ -22,11 +22,16 @@ ufbt cli log      # leggi i log seriali del Flipper
    iniziale del device — cerca la **substring `CRTRem`** per essere robusto.
 3. Sull'homeserver: il `crt-flipper-bridge` (vedi repo `lodge-tools`) si
    connette al MAC della FAP. Questo MAC **non** è quello del menu Bluetooth
-   del Flipper — è derivato (`base ^ mac_xor`, byte 2 incrementato; default
-   `mac_xor = 0x0042`). Scoprilo via `bluetoothctl scan on` cercando un
-   device il cui nome contiene `CRTRem`. Vedi
-   `services/crt-flipper-bridge/CLAUDE.md` nel repo lodge-tools per il
-   pairing iniziale (Numeric Comparison).
+   del Flipper — è derivato dal MAC BLE base così (vedi `libs/serial_profile.c`):
+   - byte 2 incrementato di 1
+   - byte 0 XOR `(mac_xor & 0xFF)` (default `mac_xor = 0x0042` → byte 0 ^= `0x42`)
+   - byte 1 XOR `((mac_xor >> 8) & 0xFF)` (default → byte 1 ^= `0x00`, no-op)
+   - byte 3/4/5 invariati
+
+   In pratica, col default `mac_xor` cambia solo byte 0 (^0x42) e byte 2 (+1).
+   Scopri il MAC effettivo via `bluetoothctl scan on` cercando un device il cui
+   nome contiene `CRTRem`. Vedi `services/crt-flipper-bridge/CLAUDE.md` nel repo
+   lodge-tools per il pairing iniziale (Numeric Comparison).
 4. Pulsanti: Up=next, Down=prev, OK=play/pause, Back-long=stop, Right=loop,
    Left=sync, OK-long=calibrate.
 5. La riga di stato sul Flipper mostra solo lo stato BLE

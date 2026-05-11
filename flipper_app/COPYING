@@ -17,8 +17,9 @@ variant was sourced through:
 This file therefore inherits GPL-3.0.
 
 As a result, **the entire `flipper_app/` directory is distributed under
-GPL-3.0-or-later**, regardless of any other license that may apply to the rest
-of the `crt-player` repository.
+GPL-3.0** (matching the upstream Flipper firmware terms and the per-file
+headers in `libs/serial_profile.{c,h}`), regardless of any other license that
+may apply to the rest of the `crt-player` repository.
 
 Full text of the GNU General Public License v3.0 is vendored alongside this
 file in `flipper_app/LICENSE`. Upstream copy: https://www.gnu.org/licenses/gpl-3.0.txt

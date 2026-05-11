@@ -251,17 +251,21 @@ Non si testa BLE end-to-end automaticamente — richiede hardware fisico.
 
 ### Struttura file
 
+Layout effettivo (v1 minimal, attuale):
+
 ```
 flipper_app/
-├── application.fam            # manifest Flipper, dichiara nome/icona/categoria
-├── crt_remote_app.c           # entry point, GUI + view dispatcher
-├── ble_serial.c               # wrapper su BleProfileSerial (start, send, RX callback)
-├── ble_serial.h
+├── application.fam            # manifest Flipper (nome, categoria, requires=[bt, gui])
+├── crt_remote_app.c           # entry point: ViewPort, input handler, attivazione profilo, TX
+├── libs/
+│   ├── serial_profile.c       # fork del Flipper Serial profile (Momentum-derived, custom MAC)
+│   └── serial_profile.h
 ├── icons/                     # PNG/icone per la UI Flipper
+├── COPYING / LICENSE          # GPL-3.0 attribution per il fork del profilo
 └── README.md                  # build/flash con ufbt, troubleshooting
 ```
 
-Niente GATT server custom: il file `ble_serial.c` chiama `furi_hal_bt_start_app(ble_profile_serial, ...)` per attivare il profilo Serial built-in, registra una callback per RX e usa `ble_profile_serial_tx()` per inviare 1 byte per pulsante.
+Niente GATT server custom: `crt_remote_app.c` apre il record `RECORD_BT`, salva il profilo corrente, e chiama `bt_profile_start(bt, ble_profile_serial, &params)` con `BleProfileSerialParams { device_name_prefix, mac_xor }` per attivare il profilo Serial forkato (MAC custom, vedi `libs/serial_profile.c`). In teardown ripristina il profilo default con `bt_profile_restore_default(bt)`. La FAP non registra callback RX in questa versione (RX dal bridge → Flipper è in spec ma non implementato — il bridge fa no-op).
 
 ### UI sul Flipper (v1)
 
@@ -335,12 +339,14 @@ Sotto il tetto di "tradeoff coerenti col F1 trust-the-LAN": niente PIN BLE, nien
 - Aggiornare test.
 - Re-deploy su Lodge.
 
-**Plan B — `flipper_app` FAP** (crt-player repo). ⏳ Da costruire.
-- App C con `ufbt` toolchain.
-- Attivazione `ble_profile_serial`, callbacks RX, button → TX.
-- v1 minimal prima (solo command TX, no UI di stato).
-- v1.0 finale con UI stato + feedback last_result.
-- Smoke test on-device col bridge reale su Lodge.
+**Plan B — `flipper_app` FAP** (crt-player repo). ✅ v1 minimal completato 2026-05-10/11.
+- App C con `ufbt` toolchain — buildata e flashata.
+- Attivazione `ble_profile_serial` (fork Momentum con MAC custom, `libs/serial_profile.{c,h}`).
+- Button → TX: 7 comandi mappati, smoke test col bridge reale su Lodge OK.
+- UI di stato BLE (starting/active/failed) presente sul display.
+- ⏳ Pending: callback RX (status updates / last_result feedback) — definito nel protocollo
+  e mantenuto nella spec ma **non implementato in questa versione** (bridge in no-op);
+  re-abilitabile quando serve, senza modifiche al contratto byte-level.
 
 Il protocollo (NUS + framing + tabella comandi) è il contratto tra Plan A.1 e Plan B.
 
