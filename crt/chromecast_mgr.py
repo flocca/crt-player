@@ -66,11 +66,9 @@ class ChromecastManager:
         self.device_name = self.cast.name
         self.connected = True
         self._connected_event.set()
-        host = getattr(self.cast, "host", "?")
-        port = getattr(self.cast, "port", "?")
         log.info(
-            "Connected to Chromecast '%s' at %s:%s (model=%s)",
-            self.device_name, host, port, self.cast.model_name,
+            "Connected to Chromecast '%s' at %s (model=%s)",
+            self.device_name, getattr(self.cast, "uri", "?"), self.cast.model_name,
         )
         listener = StatusListener(self._on_media_status)
         self.cast.media_controller.register_status_listener(listener)
