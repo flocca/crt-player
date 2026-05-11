@@ -82,7 +82,7 @@ Tests in `tests/test_integration.py` exercise the full stack with a real Chromec
 
 ## Debugging
 
-Logs write to `crt_cast.log` (overwritten each run). stderr is redirected there too.
+Logs write to **both** stdout (so `docker logs lodge-crt-player` / Beszel capture them in prod) and `crt_cast.log` (overwritten each run, for local `./run.sh` debug). Set up in [crt/daemon.py:21-30](crt/daemon.py#L21-L30) via dual `StreamHandler(sys.stdout)` + `FileHandler`. Container `HEALTHCHECK` in [docker/Dockerfile](docker/Dockerfile) hits `/status` every 30s — surfaces as `healthy`/`unhealthy` in `docker ps` and Beszel.
 Scan for Chromecasts: `python -c "import pychromecast, time; ccs, b = pychromecast.get_chromecasts(); time.sleep(10); b.stop_discovery(); [print(cc.name, cc.model_name) for cc in ccs]"`
 
 ## Testing

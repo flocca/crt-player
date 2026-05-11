@@ -21,4 +21,7 @@ ENV CRT_YT_TOKEN_FILE=/data/secrets/oauth_token.json
 
 EXPOSE 8765
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8765/status',timeout=5)" || exit 1
+
 ENTRYPOINT ["crt-daemon"]

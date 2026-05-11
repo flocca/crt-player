@@ -19,13 +19,14 @@ from crt.sync_engine import SyncEngine
 from crt.youtube_client import YouTubeAuthError, YouTubeClient
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "crt_cast.log")
-_log_fh = open(LOG_FILE, "w")
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(name)s %(levelname)s: %(message)s",
-    stream=_log_fh,
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, mode="w"),
+    ],
 )
-sys.stderr = _log_fh
 log = logging.getLogger(__name__)
 
 
