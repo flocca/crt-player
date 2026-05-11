@@ -66,17 +66,32 @@ class ChromecastManager:
         self.device_name = self.cast.name
         self.connected = True
         self._connected_event.set()
+        host = getattr(self.cast, "host", "?")
+        port = getattr(self.cast, "port", "?")
+        log.info(
+            "Connected to Chromecast '%s' at %s:%s (model=%s)",
+            self.device_name, host, port, self.cast.model_name,
+        )
         listener = StatusListener(self._on_media_status)
         self.cast.media_controller.register_status_listener(listener)
         self._notify_connection()
         return True
 
     async def discover_loop(self) -> None:
+        attempt = 1
         while not self.connected:
-            log.info("Searching for Chromecast '%s'...", config.CHROMECAST_NAME)
+            log.info(
+                "Searching for Chromecast '%s' (attempt %d)...",
+                config.CHROMECAST_NAME, attempt,
+            )
             found = await self.discover()
             if not found:
+                log.warning(
+                    "Chromecast '%s' not found; retrying in 10s",
+                    config.CHROMECAST_NAME,
+                )
                 await asyncio.sleep(10)
+                attempt += 1
 
     def _on_media_status(self, status) -> None:
         previous = self.player_state

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from typing import Callable
 
 import yt_dlp
@@ -343,6 +344,8 @@ class PipelineWorker:
                 item.status = "downloading"
                 item.progress = 0.0
                 self.notify()
+                log.info("Downloading: %s (%s)", item.title, item.url)
+                t0 = time.monotonic()
 
                 def dl_progress(pct: float) -> None:
                     item.progress = pct
@@ -359,10 +362,18 @@ class PipelineWorker:
                     self.notify()
                     return
 
+                size_mb = os.path.getsize(downloaded_path) / (1024 * 1024)
+                log.info(
+                    "Downloaded: %s in %.1fs (%.1f MB, video duration %.0fs)",
+                    item.title, time.monotonic() - t0, size_mb, duration,
+                )
+
             # Encode
             item.status = "encoding"
             item.progress = 0.0
             self.notify()
+            log.info("Encoding: %s (video duration %.0fs)", item.title, duration)
+            t0 = time.monotonic()
 
             base = os.path.splitext(os.path.basename(downloaded_path))[0]
             encoded_path = os.path.join(config.TEMP_DIR, config.cached_encoded_filename(base))
@@ -382,6 +393,7 @@ class PipelineWorker:
             item.filename = os.path.basename(encoded_path)
             item.status = "ready"
             self.notify()
+            log.info("Ready: %s (encoded in %.1fs)", item.title, time.monotonic() - t0)
 
         except Exception as e:
             log.exception("Pipeline prepare error for %s", item.url)
