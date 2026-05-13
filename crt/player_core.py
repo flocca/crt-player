@@ -11,9 +11,12 @@ import logging
 import os
 import socket
 
+from googleapiclient.errors import HttpError
+
 from crt import config
 from crt.chromecast_mgr import ChromecastManager
 from crt.library_store import LibraryStore, QueueItem
+from crt.youtube_client import YouTubeAuthError
 
 log = logging.getLogger(__name__)
 
@@ -192,12 +195,13 @@ class PlayerCore:
         if item is None:
             log.info("delete_current: no cursor item, skipping")
             return
-        await self.stop()
+        if self.state in ("playing", "casting", "paused"):
+            await self.stop()
         await asyncio.to_thread(self._delete_local, item)
         if item.playlist_item_id and self.youtube is not None:
             try:
                 await asyncio.to_thread(self.youtube.delete_playlist_item, item.playlist_item_id)
-            except Exception as e:
+            except (YouTubeAuthError, HttpError, OSError) as e:
                 log.error("YouTube remote delete failed for %s: %s", item.video_id, e)
         elif self.youtube is None:
             log.warning("delete_current: no youtube_client, remote delete skipped")

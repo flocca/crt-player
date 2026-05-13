@@ -573,6 +573,7 @@ async def test_delete_current_full_path(tmp_path, monkeypatch):
     cc = _make_chromecast()
     yt = MagicMock()
     pc = PlayerCore(library, cc, youtube_client=yt)
+    pc.state = "playing"  # prime state so the idle-guard allows stop()
 
     await pc.delete_current()
 
@@ -615,7 +616,7 @@ async def test_delete_current_youtube_failure_keeps_local_removal(tmp_path, monk
 
     cc = _make_chromecast()
     yt = MagicMock()
-    yt.delete_playlist_item.side_effect = RuntimeError("boom")
+    yt.delete_playlist_item.side_effect = OSError("network failure")
     pc = PlayerCore(library, cc, youtube_client=yt)
 
     # Should NOT raise
