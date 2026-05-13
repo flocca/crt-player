@@ -284,11 +284,14 @@ class ChromecastManager:
         self.current_time = position
 
     def seek_relative(self, delta_seconds: float) -> None:
+        if not self.cast:
+            return
         if self.current_time is None:
-            log.info("seek_relative: no current_time, skipping")
+            log.debug("seek_relative: no current_time, skipping")
             return
         new_pos = max(0.0, self.current_time + delta_seconds)
         self._safe_cmd(lambda: self.cast.media_controller.seek(new_pos))
+        self.current_time = new_pos
 
     def adjust_volume(self, delta: int) -> None:
         if not self.cast:

@@ -36,3 +36,19 @@ def test_seek_relative_with_none_current_time_is_noop():
     mgr = _make_manager(current_time=None)
     mgr.seek_relative(30)
     mgr.cast.media_controller.seek.assert_not_called()
+
+
+def test_seek_relative_updates_cached_current_time():
+    """Cache is updated optimistically so back-to-back seeks stack correctly."""
+    mgr = _make_manager(current_time=10.0)
+    mgr.seek_relative(30)
+    assert mgr.current_time == 40.0
+
+
+def test_seek_relative_with_no_cast_is_noop():
+    """When cast hasn't been discovered yet, seek_relative is a silent no-op."""
+    mgr = ChromecastManager.__new__(ChromecastManager)
+    mgr.cast = None
+    mgr.current_time = 10.0
+    mgr.seek_relative(30)  # should not raise
+    # nothing else to assert — we just verify no AttributeError on None.cast
