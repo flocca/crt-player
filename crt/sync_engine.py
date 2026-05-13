@@ -76,13 +76,15 @@ class SyncEngine:
         for video_id in removed_ids:
             self._remove_item(video_id)
 
-        # Add new items
-        existing_after_remove = {item.video_id for item in self.library.items}
+        # Add new items; update playlist_item_id on existing items
+        existing_after_remove = {item.video_id: item for item in self.library.items}
         added_any = False
         for entry in snapshot:
             if entry.video_id not in existing_after_remove:
                 self._add_item(entry)
                 added_any = True
+            else:
+                existing_after_remove[entry.video_id].playlist_item_id = entry.playlist_item_id
 
         # Reorder to match snapshot order
         items_by_id = {item.video_id: item for item in self.library.items}
@@ -96,7 +98,7 @@ class SyncEngine:
 
     def _add_item(self, entry: PlaylistEntry) -> None:
         url = f"https://www.youtube.com/watch?v={entry.video_id}"
-        item = QueueItem(url=url, video_id=entry.video_id, title=entry.title)
+        item = QueueItem(url=url, video_id=entry.video_id, title=entry.title, playlist_item_id=entry.playlist_item_id)
         self.library.items.append(item)
         log.info("Added: %s (%s)", entry.title, entry.video_id)
 

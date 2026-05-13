@@ -9,7 +9,7 @@ from crt.youtube_client import PlaylistEntry, YouTubeAuthError
 
 
 def _entry(video_id, title="T", position=0):
-    return PlaylistEntry(video_id=video_id, title=title, position=position)
+    return PlaylistEntry(video_id=video_id, title=title, position=position, playlist_item_id=f"plitem-{video_id}")
 
 
 def test_apply_diff_adds_new_items():
@@ -107,8 +107,8 @@ def test_remove_advances_cursor_to_successor():
     library.cursor_video_id = "B"
     yt_client = MagicMock()
     yt_client.list_playlist_items.return_value = [
-        PlaylistEntry(video_id="A", title="A", position=0),
-        PlaylistEntry(video_id="C", title="C", position=1),
+        PlaylistEntry(video_id="A", title="A", position=0, playlist_item_id="plitem-A"),
+        PlaylistEntry(video_id="C", title="C", position=1, playlist_item_id="plitem-C"),
     ]
     engine = SyncEngine(library, yt_client, playlist_id="PL")
 
@@ -125,7 +125,7 @@ def test_remove_last_item_with_cursor_falls_back_to_new_last():
     library.cursor_video_id = "B"
     yt_client = MagicMock()
     yt_client.list_playlist_items.return_value = [
-        PlaylistEntry(video_id="A", title="A", position=0),
+        PlaylistEntry(video_id="A", title="A", position=0, playlist_item_id="plitem-A"),
     ]
     engine = SyncEngine(library, yt_client, playlist_id="PL")
 
@@ -259,3 +259,31 @@ async def test_kick_forces_immediate_iteration():
         pass
 
     assert final_count > initial_count
+
+
+def test_sync_populates_playlist_item_id_on_new_items():
+    library = LibraryStore()
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [
+        PlaylistEntry(video_id="A", title="Alpha", position=0, playlist_item_id="PLITEM_A"),
+    ]
+    engine = SyncEngine(library, yt_client, playlist_id="PL_X")
+
+    engine.run_sync_once()
+
+    assert library.items[0].playlist_item_id == "PLITEM_A"
+
+
+def test_sync_updates_playlist_item_id_on_existing_items():
+    """Re-sync should update playlist_item_id on items already in the library."""
+    library = LibraryStore()
+    library.items.append(QueueItem(url="https://www.youtube.com/watch?v=A", video_id="A", title="Alpha"))
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [
+        PlaylistEntry(video_id="A", title="Alpha", position=0, playlist_item_id="PLITEM_A_NEW"),
+    ]
+    engine = SyncEngine(library, yt_client, playlist_id="PL_X")
+
+    engine.run_sync_once()
+
+    assert library.items[0].playlist_item_id == "PLITEM_A_NEW"
