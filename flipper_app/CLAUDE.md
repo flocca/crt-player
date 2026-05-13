@@ -35,11 +35,13 @@ The app is **TX-only in this version**. No RX callback is registered; the bridge
 
 ### Display rotation
 
-The FAP calls `view_port_set_orientation(view_port, ViewPortOrientationVertical)` once during init (after `view_port_alloc()`, before `gui_add_view_port()`), so all subsequent input + drawing operate in 64×128 logical coordinates from the user's POV with the Flipper held 90° CCW from default.
+The FAP calls `view_port_set_orientation(view_port, ViewPortOrientationVerticalFlip)` once during init (after `view_port_alloc()`, before `gui_add_view_port()`), so all subsequent input + drawing operate in 64×128 logical coordinates from the user's POV with the device rotated for landscape grip (original right edge of the Flipper becomes the user's top).
 
-**Important:** the Flipper SDK does NOT have a `canvas_set_orientation()` API. Earlier spec drafts referenced one; that was a mistake. The correct call is `view_port_set_orientation()` on the ViewPort, and it must happen at setup time (not per-frame in `draw_callback`) — otherwise the first paint uses the wrong orientation.
+**Two things the Flipper SDK does NOT make obvious:**
+1. There is no `canvas_set_orientation()` API. The correct call is `view_port_set_orientation()` on the **ViewPort** (not the canvas), at setup time — not per-frame in `draw_callback`.
+2. `view_port_set_orientation` rotates **both** the canvas pixels **and** the input event codes. So `InputKeyUp` arrives when the user presses what they perceive as up (after rotation); there's no need to remap physical-to-user in the input handler. Earlier drafts of this code assumed only the canvas rotated and added a reverse-remap — that produced double-rotated inputs (pressing user-Up gave you the byte for user-Down). The current code maps `InputKey*` directly to user POV.
 
-The `ViewPortOrientationVertical` enum (not `VerticalFlip`) corresponds to 90° counter-clockwise rotation. If on-device tests show the rotation runs the wrong way, swap to `ViewPortOrientationVerticalFlip` — Flipper SDK does not document which enum corresponds to which direction.
+If on-device tests show the rotation runs the wrong way (display upside-down) and/or inputs feel mirrored, swap the enum between `ViewPortOrientationVertical` and `ViewPortOrientationVerticalFlip` — Flipper SDK docs don't say which corresponds to 90° CW vs CCW.
 
 ## Forked Serial profile (`libs/serial_profile.{c,h}`)
 
@@ -67,26 +69,26 @@ The advertise name format is `<X>CRTRem <NAME>` where `<X>` is the first char of
 
 ## Button → command byte mapping
 
-The FAP runs in two scenes — `SceneHome` and `SceneExtraMenu` — selected by long-press OK on Home. Mapping below is from the user's POV with the Flipper rotated 90° counter-clockwise (original right edge becomes the user's top).
+The FAP runs in two scenes — `SceneHome` and `SceneExtraMenu` — selected by long-press OK on Home. Mapping below is from the user's POV with the Flipper held rotated for landscape grip (see "Display rotation"). The SDK remaps input events along with the canvas, so `InputKey*` in code = user POV (no physical-to-user mental translation needed).
 
 ### SceneHome
 
-| Physical key | User sees | Byte | Bridge endpoint |
-|---|---|---|---|
-| Up (short) | "Left" | `0x08` | `/control/seek/back/15` |
-| Down (short) | "Right" | `0x09` | `/control/seek/forward/30` |
-| Left (short) | "Down" | `0x01` | `/control/next` |
-| Right (short) | "Up" | `0x02` | `/control/prev` |
-| OK (short) | OK | `0x03` | `/control/toggle` |
-| OK (long) | OK held | — | enters `SceneExtraMenu` (in-FAP only) |
-| Back (short) | Back | — | exit app |
+| Key (user POV) | Byte | Bridge endpoint |
+|---|---|---|
+| Up (short) | `0x02` | `/control/prev` |
+| Down (short) | `0x01` | `/control/next` |
+| Left (short) | `0x08` | `/control/seek/back/15` |
+| Right (short) | `0x09` | `/control/seek/forward/30` |
+| OK (short) | `0x03` | `/control/toggle` |
+| OK (long) | — | enters `SceneExtraMenu` (in-FAP only) |
+| Back (short) | — | exit app |
 
 ### SceneExtraMenu
 
-| Physical key | Action |
+| Key (user POV) | Action |
 |---|---|
-| Right (short) — user "Up" | move cursor up |
-| Left (short) — user "Down" | move cursor down |
+| Up (short) | move cursor up |
+| Down (short) | move cursor down |
 | OK (short) | send selected byte, return to `SceneHome` |
 | Back (short) | return to `SceneHome` without sending |
 

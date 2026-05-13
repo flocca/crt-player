@@ -85,8 +85,8 @@ static void draw_home(Canvas* canvas, CrtRemoteApp* app) {
     canvas_draw_str(canvas, 4, 66, "^ prev");
     canvas_draw_str(canvas, 4, 78, "v next");
 
-    canvas_draw_str_aligned(canvas, 32, 100, AlignCenter, AlignTop, "OK = play/pause");
-    canvas_draw_str_aligned(canvas, 32, 115, AlignCenter, AlignTop, "hold OK: extras");
+    canvas_draw_str_aligned(canvas, 32, 100, AlignCenter, AlignTop, "OK = pausa");
+    canvas_draw_str_aligned(canvas, 32, 115, AlignCenter, AlignTop, "long: menu");
 }
 
 static void draw_extra_menu(Canvas* canvas, CrtRemoteApp* app) {
@@ -105,7 +105,7 @@ static void draw_extra_menu(Canvas* canvas, CrtRemoteApp* app) {
     }
 
     canvas_draw_str_aligned(canvas, 32, 110, AlignCenter, AlignTop, "OK conferma");
-    canvas_draw_str_aligned(canvas, 32, 120, AlignCenter, AlignTop, "Back annulla");
+    canvas_draw_str_aligned(canvas, 32, 120, AlignCenter, AlignTop, "Back esci");
 }
 
 static void draw_callback(Canvas* canvas, void* ctx) {
@@ -179,7 +179,7 @@ int32_t crt_remote_app(void* p) {
     app.input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
 
     app.view_port = view_port_alloc();
-    view_port_set_orientation(app.view_port, ViewPortOrientationVertical);
+    view_port_set_orientation(app.view_port, ViewPortOrientationVerticalFlip);
     view_port_draw_callback_set(app.view_port, draw_callback, &app);
     view_port_input_callback_set(app.view_port, input_callback, &app);
 
@@ -194,23 +194,27 @@ int32_t crt_remote_app(void* p) {
     while(running) {
         if(furi_message_queue_get(app.input_queue, &event, FuriWaitForever) == FuriStatusOk) {
             if(event.type == InputTypeShort) {
+                // The Flipper SDK rotates input events along with the canvas
+                // when view_port_set_orientation is set, so InputKey* values
+                // arrive in user POV (Up = what the user sees as up after the
+                // 90° rotation) — no physical-to-user remap needed in this code.
                 if(app.scene == SceneHome) {
                     switch(event.key) {
-                        case InputKeyUp:    ble_serial_send_byte(&app, CMD_SEEK_BACK_15);    break;
-                        case InputKeyDown:  ble_serial_send_byte(&app, CMD_SEEK_FORWARD_30); break;
-                        case InputKeyLeft:  ble_serial_send_byte(&app, CMD_NEXT);            break;
-                        case InputKeyRight: ble_serial_send_byte(&app, CMD_PREV);            break;
+                        case InputKeyUp:    ble_serial_send_byte(&app, CMD_PREV);            break;
+                        case InputKeyDown:  ble_serial_send_byte(&app, CMD_NEXT);            break;
+                        case InputKeyLeft:  ble_serial_send_byte(&app, CMD_SEEK_BACK_15);    break;
+                        case InputKeyRight: ble_serial_send_byte(&app, CMD_SEEK_FORWARD_30); break;
                         case InputKeyOk:    ble_serial_send_byte(&app, CMD_TOGGLE);          break;
                         case InputKeyBack:  running = false;                                 break;
                         default: break;
                     }
                 } else { // SceneExtraMenu
                     switch(event.key) {
-                        case InputKeyRight: // user "Up"
+                        case InputKeyUp:
                             if(app.menu_index > 0) app.menu_index--;
                             view_port_update(app.view_port);
                             break;
-                        case InputKeyLeft: // user "Down"
+                        case InputKeyDown:
                             if((size_t)(app.menu_index + 1) < MENU_ITEMS_COUNT) app.menu_index++;
                             view_port_update(app.view_port);
                             break;
