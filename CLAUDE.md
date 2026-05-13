@@ -6,11 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Run
-./run.sh                                          # starts the TUI app (sources .env automatically)
+./run.sh                                          # starts the daemon (sources .env automatically; runs `python -m crt.daemon`)
+crt-tui                                           # console script: Textual TUI client; talks HTTP to the daemon
+CRT_DAEMON_URL=http://lodge.<tailnet>.ts.net:8765 crt-tui   # target a remote daemon over Tailscale
 
 # Tests
 source .venv/bin/activate
-python -m pytest tests/ -v                        # full unit suite (50 tests)
+python -m pytest tests/ -v                        # full unit suite
 python -m pytest tests/test_library_store.py -v   # single file
 python -m pytest tests/test_pipeline.py::test_fetch_title -v  # single test
 
@@ -30,13 +32,13 @@ External dependency: `ffmpeg` must be installed (`brew install ffmpeg`).
 
 ## Architecture
 
-TUI app (Textual) that downloads YouTube videos, converts them to 4:3 PAL (768x576, 25fps), and casts to a Chromecast via pychromecast.
+Client/server. A headless **daemon** (`crt/daemon.py`, started by `./run.sh` or `crt-daemon`) does all the work — YouTube playlist sync, download, ffmpeg encoding to 4:3 PAL (768x576, 25fps), Chromecast casting. A **Textual TUI client** (`tui_client/`, run via `crt-tui`) is a thin HTTP consumer of the daemon's API (`crt/api.py`). The Flipper FAP + bridge are a parallel control surface — see [flipper_app/CLAUDE.md](flipper_app/CLAUDE.md).
 
-**Data flow:** User adds URL in TUI -> LibraryStore stores item -> PipelineWorker picks it up -> yt-dlp downloads -> ffmpeg encodes -> pychromecast casts -> MediaStatusListener detects playback end -> next item.
+**Data flow (in-daemon):** `SyncEngine` (`crt/sync_engine.py`) pulls the YouTube playlist into `LibraryStore` -> `PipelineWorker` (`crt/pipeline.py`) picks queued items -> yt-dlp downloads -> ffmpeg encodes -> `ChromecastManager.cast_url` (`crt/chromecast_mgr.py`) casts -> `MediaStatusListener` detects playback end -> `advance_cursor` finds the next item.
 
-**Threading model:** Textual runs the asyncio event loop. The pipeline worker runs as an asyncio task in that loop. Blocking operations (yt-dlp download, pychromecast calls) use `asyncio.to_thread()`. A minimal FastAPI/uvicorn server runs in a separate daemon thread solely to serve MP4 files to the Chromecast.
+**Daemon threading model:** single asyncio event loop in `crt/daemon.py` hosts `PipelineWorker` + `PlayerCore` (`crt/player_core.py`) + FastAPI app (via uvicorn). Blocking work (yt-dlp, ffmpeg, every pychromecast call) goes through `asyncio.to_thread()`. The same uvicorn instance also serves encoded MP4 files to the Chromecast on `:8765`.
 
-**Key integration point:** Pipeline callbacks can fire from both the main asyncio thread and worker threads. The TUI's `_safe_call` method handles this by trying `call_from_thread` first and falling back to a direct call.
+**Client/daemon contract:** TUI client (`tui_client/ui.py`) calls the daemon via `DaemonClient` (`tui_client/data_provider.py`, httpx). All `action_*` handlers wrap the blocking httpx call in `asyncio.to_thread` so Textual's loop stays responsive. The HTTP surface (`GET /status`, `GET /library/items`, `POST /control/{next,prev,toggle,stop,loop/toggle,sync,calibrate}`) is shared with the Flipper bridge — see "Production deployment".
 
 **Configuration:** Environment variables loaded from `.env` via `run.sh`. Config constants in `config.py`. Key env vars:
 - `CRT_SCALE_MODE` (`crop`|`pad`, default `crop`) — crop fills the frame by cutting edges, pad adds letterbox bars.
@@ -87,9 +89,9 @@ Scan for Chromecasts: `python -c "import pychromecast, time; ccs, b = pychromeca
 
 ## Testing
 
-TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Shared fixtures in `tests/conftest.py`.
-- `LibraryStore` is used as-is (pure data). `PipelineWorker` and `ChromecastManager` are `MagicMock` with `AsyncMock` for async methods — this neutralizes `on_mount`'s infinite-loop tasks.
-- `on_mount` calls `_refresh_all` when `queue.items` is non-empty and focuses the queue list; otherwise focuses the URL input. `wake()` only fires if `next_pending()` exists. To test UI state for "playing"/"ready" items without pre-populating the queue, call `app._refresh_all()` manually after mount.
+TUI client tests (`tests/test_ui.py`) use Textual's `app.run_test()` / Pilot API against `tui_client.ui.CRTCastApp` with a `MagicMock` `DaemonClient` (`mock_daemon_client` fixture in that file). The daemon is never started; the client only sees fixture return values for `fetch_library` / `fetch_status` / control calls.
+- Daemon-side modules have their own test files: `test_library_store.py`, `test_pipeline.py`, `test_player_core.py`, `test_sync_engine.py`, `test_state_persistence.py`, `test_state_v2_migration.py`, `test_api.py`, `test_youtube_client.py`, `test_bootstrap.py`, `test_calibration.py`, `test_config.py`. `LibraryStore` is used as-is; `PipelineWorker` / `ChromecastManager` are mocked where needed.
+- `test_tui_client_data_provider.py` covers the `DaemonClient` HTTP surface separately from the UI.
 - Always `await pilot.pause()` after interactions (`press`, `click`, value changes) — handlers run asynchronously.
 - Textual `ListView` is falsy when empty. Don't `assert widget` — use `query_one()` (raises `NoMatches` if absent).
 - Config state (`MARGIN_*`, `SCALE_MODE`, `AUTO_CROP`) is mutated directly on the `config` module in tests. Each test file that does this MUST define an `autouse` `_restore_config` fixture that captures+restores these values around every test, otherwise state leaks across tests in the same pytest session (cross-file contamination). See `tests/test_pipeline.py` and `tests/test_calibration.py` for the pattern.
@@ -100,10 +102,9 @@ TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Share
 - `action_calibrate` does not pause the `PipelineWorker` cast loop. If a prepared `ready` item exists and `_cast_enabled` is True, `run_cast()` can cast it right after the calibration pattern, overriding what's on screen. The double `_playing()` check catches items already in `casting`/`playing` but not items still `ready`. Known limitation; mitigation would be to temporarily toggle `pipeline._cast_enabled` around the calibration action.
 
 - Calibration pattern in `calibration.py` uses only `drawbox`/`drawgrid`, no `drawtext` — the Homebrew ffmpeg build here lacks libfreetype. Numeric margin values are surfaced to the user via a TUI toast in `action_calibrate` rather than overlaid on-screen.
-- `call_from_thread` crashes if called from the main Textual thread. Always use `_safe_call` wrapper in `ui.py`.
-- Textual `Binding` with letter keys (`s`, `p`, `q`) won't show in Footer and conflict with Input widget text entry. Use `ctrl+` combos with `priority=True` for global bindings.
+- Textual `Binding` with letter keys (`s`, `p`, `q`) won't show in Footer and conflict with Input widget text entry. Use `ctrl+` combos with `priority=True` for global bindings — see `tui_client/ui.py` `BINDINGS` list.
 - All pychromecast commands (stop, pause, play, volume) can raise `RequestTimeout`/`RequestFailed`. Wrap in `_safe_cmd` in `chromecast_mgr.py`.
-- pychromecast commands (pause, seek, stop) block for up to 10s on timeout. Always call them via `asyncio.to_thread()` from async action handlers. Textual supports `async def action_*()` natively.
+- pychromecast commands (pause, seek, stop) block for up to 10s on timeout. The daemon always calls them via `asyncio.to_thread()` from async handlers (`crt/player_core.py`, `crt/pipeline.py`). The TUI client never calls pychromecast — it goes through `/control/*` HTTP.
 - `pause_or_resume()` uses cached `self.player_state` — don't re-call `poll_status()` before issuing a command, it adds a redundant blocking round-trip.
 - pychromecast status callbacks fire from a background thread — state can change between checks. Use `asyncio.Event` not polling for playback end detection.
 - pychromecast `MediaStatusListener` only fires on state changes, not position updates. Use `set_interval` + `poll_status()` for playback progress.
@@ -111,15 +112,15 @@ TUI tests use Textual's `app.run_test()` / Pilot API (`tests/test_ui.py`). Share
 - On app exit, use `cast.quit_app()` not `media_controller.stop()` — otherwise the TV keeps showing the Chromecast backdrop.
 - On shutdown, detach chromecast callbacks (`set_status_callback(None)`) before calling `quit_app()` — pychromecast fires status updates that hit dead Textual widgets.
 - Pipeline must `await chromecast.wait_for_connection()` before casting. Restored `"ready"` items start processing before discovery completes.
-- Textual `Static.render()` text is not clickable. Any interactive element (button) must be a real `Button` widget inside `compose()`. Events bubble up to the `App` via `on_button_pressed`.
+- Textual `Static.render()` text is not clickable (applies to `tui_client/ui.py`). Any interactive element must be a real `Button` widget inside `compose()`; events bubble up via `on_button_pressed`.
 - Chromecast always outputs a 16:9 signal. Sending a 4:3 file results in pillarboxing. Encode to 16:9 (1024x576) with stretched 4:3 content so the user's HW squeeze restores correct proportions. This is handled by `_build_video_filter()`.
 - YouTube videos often have black bars baked into the pixel data (pillarbox/letterbox). `_detect_crop()` handles this automatically. Without it, crop/scale operates on the bars as if they were content.
 - `active_item()` returns the first item matching `ACTIVE_STATUSES` (which includes "ready"). To find the playing item specifically, use `next((i for i in queue.items if i.status == "playing"), None)` — avoids picking a "ready" item that sits earlier in the queue.
 - `cast_url` / `block_until_active()` may return while the player is still in "LOADING" state. A subsequent `seek_to` call can be silently ignored. Pass `current_time=position` to `play_media` instead — starts at the right position from the initial load request.
 - pychromecast `MediaStatus.idle_reason` distinguishes natural end (`"FINISHED"`) from transition-IDLE (`"CANCELLED"`/`"INTERRUPTED"` fired when loading new media). Don't treat PLAYING→IDLE as playback end without checking the reason — a late IDLE from the previous item can arrive after `reset_playback_ended()` and falsely end the new item.
-- Textual `Static` with overridden `render()` doesn't update the widget's internal `_content` size cache. Use `watch_*` reactive methods that call `self.update(...)` instead — otherwise title changes may render from stale content and `height: auto` won't adapt.
+- Textual `Static` with overridden `render()` doesn't update the widget's internal `_content` size cache (applies to `tui_client/ui.py`). Use `watch_*` reactive methods that call `self.update(...)` instead — otherwise title changes may render from stale content and `height: auto` won't adapt.
 - Running scripts standalone (outside `./run.sh`) needs `set -a; source .env; set +a` before `python ...` — the `.env` file has no `export` prefix, so a plain `source` only sets shell-local vars and Python won't see them.
-- The `flipper_app/` Flipper FAP is its own subproject: `ufbt` SDK, no Python tests. Spec: `docs/superpowers/specs/2026-05-10-flipper-remote-design.md`. Uses a forked Serial profile (Momentum FW source in `flipper_app/libs/serial_profile.{c,h}`) with custom `mac_xor` to bypass the firmware's BtSrv RPC handler — without that, button TX is silently dropped. Pairs with the bridge in `lodge-tools/services/crt-flipper-bridge/`.
+- The `flipper_app/` Flipper FAP is its own subproject: `ufbt` SDK, no Python tests. Spec: `docs/superpowers/specs/2026-05-10-flipper-remote-design.md`. Uses a forked Serial profile (Momentum FW source in `flipper_app/libs/serial_profile.{c,h}`) with custom `mac_xor` to bypass the firmware's BtSrv RPC handler — without that, button TX is silently dropped. Pairs with the bridge in `lodge-tools/services/crt-flipper-bridge/`. Detailed subproject guidance: [flipper_app/CLAUDE.md](flipper_app/CLAUDE.md).
 - Don't add `sources=` to a Flipper `application.fam` if you have subdirs: ufbt auto-discovery is recursive, and explicit globs (`["*.c", "libs/*.c"]`) cause duplicate-definition link errors.
 
 ## Language
