@@ -100,12 +100,17 @@ The set of daemon endpoints lives in `../crt/api.py`. Adding a new control endpo
 
 ## On-screen UI
 
-Single ViewPort, no scenes / menus. `draw_callback` renders:
-- Header "CRT Remote" (FontPrimary).
-- One status line: `BLE: starting...` / `BLE: Serial active` / `BLE: init failed` — reflects `app->ble_state`. **This is BLE link state only, not player state** (player state RX is unimplemented).
-- Hint line: `Up/Dn/OK/L/R/Hold` + `Back to exit`.
+Two scenes (`SceneHome`, `SceneExtraMenu`) drawn by a scene-dispatching `draw_callback` that calls `draw_home` or `draw_extra_menu`. Logical canvas is 64×128 (rotated 90° CCW; see "Display rotation").
 
-Display is 128×64. No font with libfreetype-style metrics — keep strings short to avoid clipping. The view doesn't auto-refresh; if you mutate state outside the input loop you must call `view_port_update(app.view_port)`.
+**`SceneHome`** (default):
+- Header "CRT Remote" (FontPrimary, centered at y=10).
+- Status line: `BLE: starting` / `BLE: active` / `BLE: failed` — reflects `app->ble_state`. **BLE link state only, not player state** (player state RX is unimplemented).
+- Four left-aligned direction labels: `< -15s` (y=42), `> +30s` (y=54), `^ prev` (y=66), `v next` (y=78). ASCII glyphs (UTF-8 arrows may not render in the default Flipper font).
+- Footer: `OK = play/pause` and `hold OK: extras`.
+
+**`SceneExtraMenu`**: list of 5 hardcoded entries (`MENU_ITEMS`) with `> ` cursor on the selected row. Header `Comandi`, footer `OK conferma` / `Back annulla`. See "Button → command byte mapping".
+
+No font with libfreetype-style metrics — keep strings short to avoid clipping. The view doesn't auto-refresh; if you mutate state outside the input loop (e.g. on scene transition, menu navigation) you must call `view_port_update(app.view_port)`.
 
 ## Gotchas
 
