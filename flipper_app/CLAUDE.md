@@ -33,6 +33,14 @@ Lifecycle in `crt_remote_app(void* p)`:
 
 The app is **TX-only in this version**. No RX callback is registered; the bridge runs in no-op on the RX channel. The full bidirectional protocol (`0x01 last_result`, `0x02 status update`) is defined in the spec but not implemented here — re-enabling means calling `ble_profile_serial_set_event_callback` and dispatching on `data[0]`. The byte-level contract supports both versions without bridge changes.
 
+### Display rotation
+
+The FAP calls `view_port_set_orientation(view_port, ViewPortOrientationVertical)` once during init (after `view_port_alloc()`, before `gui_add_view_port()`), so all subsequent input + drawing operate in 64×128 logical coordinates from the user's POV with the Flipper held 90° CCW from default.
+
+**Important:** the Flipper SDK does NOT have a `canvas_set_orientation()` API. Earlier spec drafts referenced one; that was a mistake. The correct call is `view_port_set_orientation()` on the ViewPort, and it must happen at setup time (not per-frame in `draw_callback`) — otherwise the first paint uses the wrong orientation.
+
+The `ViewPortOrientationVertical` enum (not `VerticalFlip`) corresponds to 90° counter-clockwise rotation. If on-device tests show the rotation runs the wrong way, swap to `ViewPortOrientationVerticalFlip` — Flipper SDK does not document which enum corresponds to which direction.
+
 ## Forked Serial profile (`libs/serial_profile.{c,h}`)
 
 This is the **load-bearing piece** of this FAP and the reason it works at all on stock firmware. Origin: Flipper Zero firmware `targets/f7/ble_glue/profiles/serial_profile.c`, with the `BleProfileSerialParams { mac_xor, device_name_prefix }` extension popularized by Momentum FW, sourced via `EmmerichFrog/home_remote_public`. GPL-3.0 (see [COPYING](COPYING) / [LICENSE](LICENSE) — both apply).
@@ -59,16 +67,32 @@ The advertise name format is `<X>CRTRem <NAME>` where `<X>` is the first char of
 
 ## Button → command byte mapping
 
-| Press | Byte | Bridge endpoint |
-|---|---|---|
-| Up (short) | `0x01` | `/control/next` |
-| Down (short) | `0x02` | `/control/prev` |
-| OK (short) | `0x03` | `/control/toggle` |
-| Back (long) | `0x04` | `/control/stop` |
-| Right (short) | `0x05` | `/control/loop/toggle` |
-| Left (short) | `0x06` | `/control/sync` |
-| OK (long) | `0x07` | `/control/calibrate` |
-| Back (short) | — | exit app (no BLE TX) |
+The FAP runs in two scenes — `SceneHome` and `SceneExtraMenu` — selected by long-press OK on Home. Mapping below is from the user's POV with the Flipper rotated 90° counter-clockwise (original right edge becomes the user's top).
+
+### SceneHome
+
+| Physical key | User sees | Byte | Bridge endpoint |
+|---|---|---|---|
+| Up (short) | "Left" | `0x08` | `/control/seek/back/15` |
+| Down (short) | "Right" | `0x09` | `/control/seek/forward/30` |
+| Left (short) | "Down" | `0x01` | `/control/next` |
+| Right (short) | "Up" | `0x02` | `/control/prev` |
+| OK (short) | OK | `0x03` | `/control/toggle` |
+| OK (long) | OK held | — | enters `SceneExtraMenu` (in-FAP only) |
+| Back (short) | Back | — | exit app |
+
+### SceneExtraMenu
+
+| Physical key | Action |
+|---|---|
+| Right (short) — user "Up" | move cursor up |
+| Left (short) — user "Down" | move cursor down |
+| OK (short) | send selected byte, return to `SceneHome` |
+| Back (short) | return to `SceneHome` without sending |
+
+Menu entries (hardcoded order): `Stop` (0x04), `Elimina video` (0x0A), `Calibrate` (0x07), `Toggle loop` (0x05), `Sync now` (0x06).
+
+`Stop`/`Loop`/`Sync`/`Calibrate` no longer have dedicated keys — all four moved into the extras menu in v2.
 
 The byte values are duplicated as `CMD_*` `#define`s at the top of [crt_remote_app.c](crt_remote_app.c#L22-L28). The bridge's `COMMAND_TABLE` lives in `../../lodge-tools/services/crt-flipper-bridge/bridge.py`. **When you change/add a mapping here, mirror it in the bridge** — the spec ([../docs/superpowers/specs/2026-05-10-flipper-remote-design.md](../docs/superpowers/specs/2026-05-10-flipper-remote-design.md)) is the contract, but both ends are hand-maintained.
 
@@ -103,4 +127,4 @@ Display is 128×64. No font with libfreetype-style metrics — keep strings shor
 
 ## Language
 
-UI strings on the Flipper, code comments, and `FURI_LOG_*` messages are in **English** (Flipper is shared hardware, no Italian-only audience). The parent app's TUI is Italian; this subproject is not.
+**Code comments and `FURI_LOG_*` messages are in English.** UI strings on the Flipper display follow the **parent app's Italian convention** for user-facing labels (e.g., `"Comandi"`, `"Elimina video"`, `"OK conferma"`, `"Back annulla"`) — the Flipper is the user's personal hardware in this deployment, not a generic shared device, so Italian labels match the rest of the system surface (TUI, daemon logs surfaced in UI).

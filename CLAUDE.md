@@ -66,13 +66,13 @@ Daemon runs in Docker on a Raspberry Pi 5 ("Lodge") via the sibling `lodge-tools
 
 **Tailnet access from Mac:** `CRT_DAEMON_URL=http://lodge.<tailnet>.ts.net:8765 crt-tui`. Daemon listens on `0.0.0.0:8765` but has no UFW LAN rule since 2026-05-11 — external access only via Tailscale.
 
-**HTTP control surface** consumed by TUI + Flipper bridge: `GET /status`, `GET /library/items`, `POST /control/{next,prev,toggle,stop,loop/toggle,sync,calibrate}`.
+**HTTP control surface** consumed by TUI + Flipper bridge: `GET /status`, `GET /library/items`, `POST /control/{next,prev,toggle,stop,loop/toggle,sync,calibrate,seek/back/{n},seek/forward/{n},delete/current}`.
 
-**OAuth bootstrap** (one-time, manual on Mac): `python -m crt.bootstrap` opens browser → writes `~/.local/share/crt-player/{client_secrets,oauth_token}.json`. `lodge crt-player install` validates these exist on the Mac then `scp`s them to `/opt/lodge/crt-player/secrets/` with `chmod 600`.
+**OAuth bootstrap** (one-time, manual on Mac): `python -m crt.bootstrap` opens browser → writes `~/.local/share/crt-player/{client_secrets,oauth_token}.json`. `lodge crt-player install` validates these exist on the Mac then `scp`s them to `/opt/lodge/crt-player/secrets/` with `chmod 600`. As of v2 (2026-05-13) the OAuth scope is `youtube` (full read+write) instead of `youtube.readonly` — required so `/control/delete/current` can remove the item from the YouTube playlist. A scope-bumped re-bootstrap is required when upgrading from a v1 deployment: re-run `python -m crt.bootstrap` on the Mac, then `lodge crt-player install` (or `scp oauth_token.json` to `/opt/lodge/crt-player/secrets/`) and restart the container.
 
 **Backup boundary** (restic on Pi, daily 04:00): only `secrets/` + `.env` + `docker-compose.yml`. `cache/` (encoded MP4) and `state/` (library DB) are regenerable from the YouTube playlist.
 
-**Flipper command byte → HTTP endpoint** (in `../lodge-tools/services/crt-flipper-bridge/bridge.py` COMMAND_TABLE): `0x01`→next, `0x02`→prev, `0x03`→toggle, `0x04`→stop, `0x05`→loop/toggle, `0x06`→sync, `0x07`→calibrate. Bridge runs in Docker on the same Pi (host network + `/run/dbus` mount + `NET_ADMIN`). When you add/rename a `/control/*` endpoint in this repo, mirror the change in the bridge's COMMAND_TABLE. Bridge ops: [`../lodge-tools/services/crt-flipper-bridge/CLAUDE.md`](../lodge-tools/services/crt-flipper-bridge/CLAUDE.md).
+**Flipper command byte → HTTP endpoint** (in `../lodge-tools/services/crt-flipper-bridge/bridge.py` COMMAND_TABLE): `0x01`→next, `0x02`→prev, `0x03`→toggle, `0x04`→stop, `0x05`→loop/toggle, `0x06`→sync, `0x07`→calibrate, `0x08`→seek/back/15, `0x09`→seek/forward/30, `0x0A`→delete/current. Bridge runs in Docker on the same Pi (host network + `/run/dbus` mount + `NET_ADMIN`). When you add/rename a `/control/*` endpoint in this repo, mirror the change in the bridge's COMMAND_TABLE. Bridge ops: [`../lodge-tools/services/crt-flipper-bridge/CLAUDE.md`](../lodge-tools/services/crt-flipper-bridge/CLAUDE.md).
 
 ## Integration Tests
 
