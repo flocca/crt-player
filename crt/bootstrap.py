@@ -17,10 +17,10 @@ from urllib.parse import parse_qs, urlparse
 from google_auth_oauthlib.flow import Flow
 
 from crt import config
+from crt.youtube_client import SCOPES
 
 log = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
 REDIRECT_URI = "http://localhost/"
 
 
