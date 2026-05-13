@@ -123,6 +123,8 @@ No font with libfreetype-style metrics — keep strings short to avoid clipping.
 - **Don't try to register a GATT server from a FAP.** The Flipper public API only switches between pre-provisioned profiles (HID, Serial, BLE Beacon, …); there is no `register_service` for custom UUIDs. This is why the protocol is NUS-over-Serial-profile, not GATT custom. See spec "Pivot: niente GATT custom".
 - **The advert name's leading char comes from the Flipper's device name, not the FAP.** `furi_hal_version_get_ble_local_device_name_ptr()[0]` is prepended. A Flipper named "Dlignone" advertises `DCRTRem Dlignone`. For discovery scripts, match the substring `CRTRem`, not the prefix.
 - **`ufbt launch` requires the Flipper to be in qFlipper-detached state.** If qFlipper is running it grabs the USB CLI and the launch hangs. Quit qFlipper first.
+- **`ufbt launch` fails with "Application has to be closed manually" when the FAP is currently running on the Flipper.** Press Back on the Flipper to exit the running instance, then re-run `ufbt launch`. The new `.fap` file IS already on flash after the first attempt — you can also launch it manually from the Flipper menu (Apps → Tools → CRT Remote).
+- **Footer hint widths.** On the rotated 64-pixel-wide canvas, `FontSecondary` at `AlignCenter` clips beyond ~10 characters. Strings like `"OK = play/pause"` (15 chars) get truncated on both sides. Keep `canvas_draw_str_aligned(..., AlignCenter, ...)` payloads ≤10 chars, or switch to `AlignLeft` with explicit `x`.
 
 ## References
 

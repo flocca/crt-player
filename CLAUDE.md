@@ -72,6 +72,10 @@ Daemon runs in Docker on a Raspberry Pi 5 ("Lodge") via the sibling `lodge-tools
 
 **Backup boundary** (restic on Pi, daily 04:00): only `secrets/` + `.env` + `docker-compose.yml`. `cache/` (encoded MP4) and `state/` (library DB) are regenerable from the YouTube playlist.
 
+**Deploy mechanics:** `lodge crt-player update` does `git reset --hard origin/main` on the Pi → push local main before deploy. `lodge crt-flipper-bridge` has no `update` subcommand; `install` is idempotent (re-SCPs sources, rebuilds). `lodge ssh` is interactive-only (opens a TTY); for one-shot remote commands use direct `ssh flocca@lodge.tailc1c72f.ts.net "<cmd>"`.
+
+**Re-OAuth shortcut:** scope-only re-deploy after re-running `crt-bootstrap` on Mac doesn't need full `lodge crt-player install`: `scp ~/.local/share/crt-player/oauth_token.json flocca@lodge.tailc1c72f.ts.net:/opt/lodge/crt-player/secrets/ && ssh flocca@lodge.tailc1c72f.ts.net "chmod 600 /opt/lodge/crt-player/secrets/oauth_token.json && docker restart lodge-crt-player"`.
+
 **Flipper command byte → HTTP endpoint** (in `../lodge-tools/services/crt-flipper-bridge/bridge.py` COMMAND_TABLE): `0x01`→next, `0x02`→prev, `0x03`→toggle, `0x04`→stop, `0x05`→loop/toggle, `0x06`→sync, `0x07`→calibrate, `0x08`→seek/back/15, `0x09`→seek/forward/30, `0x0A`→delete/current. Bridge runs in Docker on the same Pi (host network + `/run/dbus` mount + `NET_ADMIN`). When you add/rename a `/control/*` endpoint in this repo, mirror the change in the bridge's COMMAND_TABLE. Bridge ops: [`../lodge-tools/services/crt-flipper-bridge/CLAUDE.md`](../lodge-tools/services/crt-flipper-bridge/CLAUDE.md).
 
 ## Integration Tests
@@ -85,6 +89,9 @@ Tests in `tests/test_integration.py` exercise the full stack with a real Chromec
 ## Debugging
 
 Logs write to **both** stdout (so `docker logs lodge-crt-player` / Beszel capture them in prod) and `crt_cast.log` (overwritten each run, for local `./run.sh` debug). Set up in [crt/daemon.py:21-30](crt/daemon.py#L21-L30) via dual `StreamHandler(sys.stdout)` + `FileHandler`. Container `HEALTHCHECK` in [docker/Dockerfile](docker/Dockerfile) hits `/status` every 30s — surfaces as `healthy`/`unhealthy` in `docker ps` and Beszel.
+
+Daemon uvicorn runs at `log_level="warning"` (see [crt/daemon.py](crt/daemon.py)), so `POST /control/*` calls are NOT in daemon logs. For byte→endpoint tracing use bridge logs: `ssh flocca@lodge.tailc1c72f.ts.net "docker logs --tail 30 lodge-crt-flipper-bridge"` — bridge logs every Flipper press with command code + resulting HTTP status.
+
 Scan for Chromecasts: `python -c "import pychromecast, time; ccs, b = pychromecast.get_chromecasts(); time.sleep(10); b.stop_discovery(); [print(cc.name, cc.model_name) for cc in ccs]"`
 
 ## Testing
@@ -98,6 +105,7 @@ TUI client tests (`tests/test_ui.py`) use Textual's `app.run_test()` / Pilot API
 
 ## Gotchas
 
+- `crt.youtube_client.SCOPES` is the single source of truth for OAuth scope. `crt/bootstrap.py` and any future caller must `from crt.youtube_client import SCOPES`, NOT redefine locally. A stale duplicate in bootstrap.py caused a v2 re-OAuth to silently issue a readonly token (every `/control/delete/current` then 401'd and was swallowed by the player_core error handler — daemon stayed up, remote delete failed invisibly).
 - `_detect_crop()` can misidentify near-black scenes (dark opening titles, night shots) as letterbox and silently remove real pixels from the top/bottom of the source. Results in calibrated margins still appearing "too aggressive" on specific videos. Set `CRT_AUTO_CROP=0` to bypass.
 - `action_calibrate` does not pause the `PipelineWorker` cast loop. If a prepared `ready` item exists and `_cast_enabled` is True, `run_cast()` can cast it right after the calibration pattern, overriding what's on screen. The double `_playing()` check catches items already in `casting`/`playing` but not items still `ready`. Known limitation; mitigation would be to temporarily toggle `pipeline._cast_enabled` around the calibration action.
 
