@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -271,3 +271,78 @@ def test_get_media_rejects_path_traversal(tmp_path):
 
     resp = client.get("/media/..%2Fetc%2Fpasswd")
     assert resp.status_code == 404
+
+
+# ─── /control/seek/* ──────────────────────────────────────────────
+
+def test_seek_back_calls_player_with_negative_seconds():
+    library = LibraryStore()
+    player = MagicMock()
+    player.seek_relative = AsyncMock()
+    client = TestClient(_make_app(library, player=player))
+
+    resp = client.post("/control/seek/back/15")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    player.seek_relative.assert_awaited_once_with(-15)
+
+
+def test_seek_forward_calls_player_with_positive_seconds():
+    library = LibraryStore()
+    player = MagicMock()
+    player.seek_relative = AsyncMock()
+    client = TestClient(_make_app(library, player=player))
+
+    resp = client.post("/control/seek/forward/30")
+
+    assert resp.status_code == 200
+    player.seek_relative.assert_awaited_once_with(30)
+
+
+def test_seek_back_503_when_no_player():
+    library = LibraryStore()
+    client = TestClient(_make_app(library, player=None))
+
+    resp = client.post("/control/seek/back/15")
+
+    assert resp.status_code == 503
+
+
+# ─── /control/delete/current ──────────────────────────────────────
+
+def test_delete_current_success():
+    library = LibraryStore()
+    library.items.append(QueueItem(url="u/A", video_id="A", title="A"))
+    library.cursor_video_id = "A"
+    player = MagicMock()
+    player.delete_current = AsyncMock()
+    client = TestClient(_make_app(library, player=player))
+
+    resp = client.post("/control/delete/current")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "deleted_video_id": "A"}
+    player.delete_current.assert_awaited_once()
+
+
+def test_delete_current_404_when_no_cursor():
+    library = LibraryStore()  # cursor unset
+    player = MagicMock()
+    player.delete_current = AsyncMock()
+    client = TestClient(_make_app(library, player=player))
+
+    resp = client.post("/control/delete/current")
+
+    assert resp.status_code == 404
+    player.delete_current.assert_not_awaited()
+
+
+def test_delete_current_503_when_no_player():
+    library = LibraryStore()
+    library.cursor_video_id = "A"
+    client = TestClient(_make_app(library, player=None))
+
+    resp = client.post("/control/delete/current")
+
+    assert resp.status_code == 503

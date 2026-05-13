@@ -131,6 +131,30 @@ def create_app(
         await player.calibrate()
         return {"ok": True}
 
+    @app.post("/control/seek/back/{seconds}")
+    async def control_seek_back(seconds: int):
+        if player is None:
+            raise HTTPException(503, "player unavailable")
+        await player.seek_relative(-seconds)
+        return {"ok": True}
+
+    @app.post("/control/seek/forward/{seconds}")
+    async def control_seek_forward(seconds: int):
+        if player is None:
+            raise HTTPException(503, "player unavailable")
+        await player.seek_relative(seconds)
+        return {"ok": True}
+
+    @app.post("/control/delete/current")
+    async def control_delete_current():
+        if player is None:
+            raise HTTPException(503, "player unavailable")
+        video_id = library.cursor_video_id
+        if not video_id:
+            raise HTTPException(404, "no current video")
+        await player.delete_current()
+        return {"ok": True, "deleted_video_id": video_id}
+
     # ─── Media file serving ────────────────────────────────────────
 
     @app.get("/media/{filename}")
