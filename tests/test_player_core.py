@@ -362,3 +362,183 @@ async def test_watch_natural_end_advances_cursor_on_finished_event():
     assert library.items[0].status == "done"
     assert library.cursor_video_id == "B"
     cc.reset_playback_ended.assert_called()
+
+
+# ---------------------------------------------------------------------
+# Skip-non-playable navigation: next/prev/toggle/on_playback_finished
+# devono saltare gli item senza cache (filename=None) e atterrare solo
+# su roba castabile. Da remoto un toggle/next/prev su item ancora in
+# encoding/queued non deve essere un no-op silenzioso.
+# ---------------------------------------------------------------------
+
+
+def _make_mixed_library(specs):
+    """specs: list of (video_id, playable: bool)."""
+    ls = LibraryStore()
+    for vid, playable in specs:
+        if playable:
+            ls.items.append(QueueItem(
+                url=f"u/{vid}", video_id=vid, title=vid,
+                status="ready", filename=f"{vid}.mp4",
+            ))
+        else:
+            ls.items.append(QueueItem(
+                url=f"u/{vid}", video_id=vid, title=vid,
+                status="encoding", filename=None,
+            ))
+    return ls
+
+
+@pytest.mark.asyncio
+async def test_next_skips_items_without_filename(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    await pc.next()
+
+    assert library.cursor_video_id == "C"
+    cc.cast_url.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_prev_skips_items_without_filename(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
+    library.cursor_video_id = "C"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    await pc.prev()
+
+    assert library.cursor_video_id == "A"
+    cc.cast_url.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_next_no_playable_forward_is_noop():
+    library = _make_mixed_library([("A", True), ("B", False), ("C", False)])
+    library.cursor_video_id = "A"
+    library.loop_mode = False
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    await pc.next()
+
+    # Nessun item playable dopo A, no loop → cursore resta su A, nessun cast.
+    assert library.cursor_video_id == "A"
+    cc.cast_url.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_next_with_loop_wraps_skipping_unready(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_mixed_library([("A", True), ("B", False), ("C", False)])
+    library.cursor_video_id = "A"
+    library.loop_mode = True
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    await pc.next()
+
+    # B e C non castabili, loop attivo → wrap su A (l'unico playable).
+    assert library.cursor_video_id == "A"
+    cc.cast_url.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_on_playback_finished_skips_unready_items(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    await pc.on_playback_finished()
+
+    # Fine naturale di A → B in encoding viene skippato → atterra su C.
+    assert library.items[0].status == "done"
+    assert library.cursor_video_id == "C"
+    cc.cast_url.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_on_playback_finished_no_next_playable_goes_idle():
+    library = _make_mixed_library([("A", True), ("B", False), ("C", False)])
+    library.cursor_video_id = "A"
+    library.loop_mode = False
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+    pc.state = "playing"
+
+    await pc.on_playback_finished()
+
+    assert library.items[0].status == "done"
+    assert pc.state == "idle"
+    cc.cast_url.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_toggle_idle_with_cursor_on_unready_finds_playable_forward(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
+    library.cursor_video_id = "B"  # cursore su item non castabile
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+    pc.state = "idle"
+
+    await pc.toggle()
+
+    # Da idle con cursore su B (encoding), toggle deve scendere a C.
+    assert library.cursor_video_id == "C"
+    cc.cast_url.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_toggle_idle_nothing_playable_is_noop():
+    library = _make_mixed_library([("A", False), ("B", False)])
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+    pc.state = "idle"
+
+    await pc.toggle()
+
+    cc.cast_url.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_toggle_idle_with_cursor_on_ready_casts_cursor(monkeypatch):
+    """Cursor item è già playable: toggle lo casta direttamente, senza
+    scendere oltre."""
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_mixed_library([("A", True), ("B", True)])
+    library.cursor_video_id = "B"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+    pc.state = "idle"
+
+    await pc.toggle()
+
+    assert library.cursor_video_id == "B"
+    cc.cast_url.assert_called_once()

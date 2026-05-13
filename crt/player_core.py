@@ -48,34 +48,77 @@ class PlayerCore:
             return None
         return self._index_of(self.library.cursor_video_id)
 
+    def _find_playable_index(self, *, start_idx: int, direction: int, wrap: bool) -> int | None:
+        """Scan items starting at start_idx in `direction` (+1 forward, -1 backward),
+        returning the index of the first item with a non-empty filename (cache hit).
+
+        If `wrap` is True, continues from the opposite end after crossing the
+        boundary, stopping when it would revisit start_idx. Returns None if no
+        playable item exists in the scanned range.
+
+        Used by next/prev/toggle/on_playback_finished to skip items that are
+        still encoding or queued — the remote should land only on cast-ready items.
+        """
+        n = len(self.library.items)
+        if n == 0 or start_idx < 0 or start_idx >= n:
+            return None
+        idx = start_idx
+        for _ in range(n):
+            if self.library.items[idx].filename:
+                return idx
+            idx += direction
+            if idx < 0 or idx >= n:
+                if not wrap:
+                    return None
+                idx %= n
+        return None
+
     # ------------------------------------------------------------------
     # Transport commands
     # ------------------------------------------------------------------
 
     async def next(self) -> None:
-        """Advance cursor by one (with loop wrap if enabled) then cast."""
+        """Advance cursor to the next playable item (with loop wrap if enabled) then cast.
+
+        Skips items still encoding/queued — the remote should never land on
+        an item that can't be cast.
+        """
         if not self.library.items:
             return
+        n = len(self.library.items)
         idx = self._cursor_index()
         if idx is None:
-            new_idx = 0
-        elif idx + 1 < len(self.library.items):
-            new_idx = idx + 1
-        elif self.library.loop_mode:
-            new_idx = 0
+            start = 0
         else:
+            start = idx + 1
+            if start >= n:
+                if not self.library.loop_mode:
+                    return
+                start = 0
+        new_idx = self._find_playable_index(
+            start_idx=start, direction=1, wrap=self.library.loop_mode,
+        )
+        if new_idx is None:
             return
         self.library.cursor_video_id = self.library.items[new_idx].video_id
         await self._cast_current()
 
     async def prev(self) -> None:
-        """Move cursor back by one then cast."""
+        """Move cursor back to the previous playable item then cast.
+
+        Skips items still encoding/queued. No wrap (matches existing behavior).
+        """
         if not self.library.items:
             return
         idx = self._cursor_index()
         if idx is None or idx == 0:
             return
-        self.library.cursor_video_id = self.library.items[idx - 1].video_id
+        new_idx = self._find_playable_index(
+            start_idx=idx - 1, direction=-1, wrap=False,
+        )
+        if new_idx is None:
+            return
+        self.library.cursor_video_id = self.library.items[new_idx].video_id
         await self._cast_current()
 
     async def play(self, video_id: str) -> None:
@@ -90,7 +133,12 @@ class PlayerCore:
         await self._cast_current()
 
     async def toggle(self) -> None:
-        """play→pause, paused→resume, idle→start cursor item (or first item)."""
+        """play→pause, paused→resume, idle→start nearest playable item.
+
+        From idle, scans forward from the cursor (inclusive) for the first item
+        with a cache file and casts it. If the cursor lands on an unready item
+        (encoding/queued), the remote's toggle skips ahead instead of no-op.
+        """
         if self.state in ("playing", "casting"):
             await asyncio.to_thread(self.chromecast.pause_or_resume)
             self.state = "paused"
@@ -99,11 +147,16 @@ class PlayerCore:
             await asyncio.to_thread(self.chromecast.pause_or_resume)
             self.state = "playing"
             return
-        # idle → start cursor item (or first if no cursor)
-        if self.library.cursor_video_id is None:
-            if not self.library.items:
-                return
-            self.library.cursor_video_id = self.library.items[0].video_id
+        if not self.library.items:
+            return
+        idx = self._cursor_index()
+        start = 0 if idx is None else idx
+        new_idx = self._find_playable_index(
+            start_idx=start, direction=1, wrap=self.library.loop_mode,
+        )
+        if new_idx is None:
+            return
+        self.library.cursor_video_id = self.library.items[new_idx].video_id
         await self._cast_current()
 
     async def stop(self) -> None:
@@ -133,25 +186,31 @@ class PlayerCore:
     async def on_playback_finished(self) -> None:
         """Called when the Chromecast reports natural end of the current item.
 
-        Marks the current item as done, advances the cursor, and either casts
-        the next item or transitions to idle (respecting loop_mode).
+        Marks the current item as done, advances the cursor to the next
+        playable item (skipping encoding/queued items), and casts it.
+        Transitions to idle if no playable item is reachable.
         """
         idx = self._cursor_index()
-        if idx is not None:
-            self.library.items[idx].status = "done"
-            self.library.items[idx].playback_position = 0.0
-
         if idx is None:
             return
+        self.library.items[idx].status = "done"
+        self.library.items[idx].playback_position = 0.0
 
-        if idx + 1 < len(self.library.items):
-            self.library.cursor_video_id = self.library.items[idx + 1].video_id
-            await self._cast_current()
-        elif self.library.loop_mode:
-            self.library.cursor_video_id = self.library.items[0].video_id
-            await self._cast_current()
-        else:
+        n = len(self.library.items)
+        start = idx + 1
+        if start >= n:
+            if not self.library.loop_mode:
+                self.state = "idle"
+                return
+            start = 0
+        new_idx = self._find_playable_index(
+            start_idx=start, direction=1, wrap=self.library.loop_mode,
+        )
+        if new_idx is None:
             self.state = "idle"
+            return
+        self.library.cursor_video_id = self.library.items[new_idx].video_id
+        await self._cast_current()
 
     # ------------------------------------------------------------------
     # Cast helpers
