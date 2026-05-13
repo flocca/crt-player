@@ -188,6 +188,35 @@ def test_next_pending_returns_ready_items():
     assert qm.next_pending() is item
 
 
+def test_save_state_writes_version_3(tmp_path):
+    path = str(tmp_path / "state.json")
+    ls = LibraryStore()
+    ls.add("https://youtube.com/watch?v=1")
+    ls.save_state(path)
+
+    with open(path) as f:
+        data = json.load(f)
+    assert data["version"] == 3
+
+
+def test_queue_item_to_dict_includes_playlist_item_id():
+    item = QueueItem(url="u/A", video_id="A", playlist_item_id="PLITEM_42")
+    d = item.to_dict()
+    assert d["playlist_item_id"] == "PLITEM_42"
+
+
+def test_queue_item_from_dict_reads_playlist_item_id():
+    d = {"url": "u/A", "playlist_item_id": "PLITEM_42"}
+    item = QueueItem.from_dict(d)
+    assert item.playlist_item_id == "PLITEM_42"
+
+
+def test_queue_item_from_dict_missing_playlist_item_id_defaults_none():
+    d = {"url": "u/A"}
+    item = QueueItem.from_dict(d)
+    assert item.playlist_item_id is None
+
+
 def test_done_and_error_items_preserved(tmp_path):
     path = str(tmp_path / "state.json")
     data = {

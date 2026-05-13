@@ -26,6 +26,7 @@ class QueueItem:
     filename: str | None = None
     playback_position: float = 0.0
     downloaded_path: str | None = None
+    playlist_item_id: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -39,6 +40,7 @@ class QueueItem:
             "filename": self.filename,
             "playback_position": self.playback_position,
             "downloaded_path": self.downloaded_path,
+            "playlist_item_id": self.playlist_item_id,
         }
 
     @classmethod
@@ -54,6 +56,7 @@ class QueueItem:
             filename=d.get("filename"),
             playback_position=d.get("playback_position", 0.0),
             downloaded_path=d.get("downloaded_path"),
+            playlist_item_id=d.get("playlist_item_id"),
         )
 
 
@@ -226,6 +229,11 @@ class LibraryStore:
                 return item
         return None
 
+    def cursor_item(self) -> QueueItem | None:
+        if self.cursor_video_id is None:
+            return None
+        return next((i for i in self.items if i.video_id == self.cursor_video_id), None)
+
     def _after_active_index(self) -> int:
         for i, item in enumerate(self.items):
             if item.status in ACTIVE_STATUSES:
@@ -234,7 +242,7 @@ class LibraryStore:
 
     def save_state(self, path: str, playback_position: float = 0.0) -> None:
         data = {
-            "version": 2,
+            "version": 3,
             "cursor_video_id": self.cursor_video_id,
             "loop_mode": self.loop_mode,
             "items": [item.to_dict() for item in self.items],
@@ -265,10 +273,10 @@ class LibraryStore:
             return 0.0
 
         version = data.get("version", 1)
-        if version != 2:
+        if version not in (2, 3):
             backup = path + ".v1.bak"
             log.warning(
-                "Migrating state.json v%s → empty v2; old state saved to %s",
+                "Unknown state version v%s; backing up to %s and starting fresh",
                 version, backup,
             )
             os.replace(path, backup)
@@ -325,7 +333,7 @@ class LibraryStore:
             self.history.append(QueueItem.from_dict(raw))
 
         log.info(
-            "Loaded state v2: %d items, %d history, cursor=%s, loop=%s",
-            len(self.items), len(self.history), self.cursor_video_id, self.loop_mode,
+            "Loaded state v%s: %d items, %d history, cursor=%s, loop=%s",
+            version, len(self.items), len(self.history), self.cursor_video_id, self.loop_mode,
         )
         return 0.0

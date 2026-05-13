@@ -447,3 +447,36 @@ def test_library_store_set_cursor():
     ls = LibraryStore()
     ls.cursor_video_id = "abc"
     assert ls.cursor_video_id == "abc"
+
+
+def test_queue_item_default_playlist_item_id_is_none():
+    item = QueueItem(url="https://youtube.com/watch?v=abc")
+    assert item.playlist_item_id is None
+
+
+def test_queue_item_accepts_playlist_item_id():
+    item = QueueItem(url="https://youtube.com/watch?v=abc", playlist_item_id="PLITEM_42")
+    assert item.playlist_item_id == "PLITEM_42"
+
+
+def test_cursor_item_returns_item_matching_cursor_video_id():
+    ls = LibraryStore()
+    a = QueueItem(url="u/A", video_id="A", title="A")
+    b = QueueItem(url="u/B", video_id="B", title="B")
+    ls.items.extend([a, b])
+    ls.cursor_video_id = "B"
+
+    assert ls.cursor_item() is b
+
+
+def test_cursor_item_returns_none_when_cursor_unset():
+    ls = LibraryStore()
+    ls.items.append(QueueItem(url="u/A", video_id="A"))
+    assert ls.cursor_item() is None
+
+
+def test_cursor_item_returns_none_when_cursor_video_id_not_in_items():
+    ls = LibraryStore()
+    ls.items.append(QueueItem(url="u/A", video_id="A"))
+    ls.cursor_video_id = "ZZZ"
+    assert ls.cursor_item() is None
