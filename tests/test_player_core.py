@@ -542,3 +542,98 @@ async def test_toggle_idle_with_cursor_on_ready_casts_cursor(monkeypatch):
 
     assert library.cursor_video_id == "B"
     cc.cast_url.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_seek_relative_calls_chromecast_via_to_thread():
+    library = _make_library(["A"])
+    cc = _make_chromecast()
+    cc.seek_relative = MagicMock()
+    pc = PlayerCore(library, cc)
+
+    await pc.seek_relative(-15)
+
+    cc.seek_relative.assert_called_once_with(-15)
+
+
+@pytest.mark.asyncio
+async def test_delete_current_full_path(tmp_path, monkeypatch):
+    import crt.config as cfg
+    import os
+
+    monkeypatch.setattr(cfg, "TEMP_DIR", str(tmp_path))
+
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    library.items[0].playlist_item_id = "PLITEM_A"
+    library.items[0].filename = "A_pal_crop.mp4"  # matches cached_encoded_filename("A")
+    cache_file = tmp_path / "A_pal_crop.mp4"
+    cache_file.write_text("dummy")
+
+    cc = _make_chromecast()
+    yt = MagicMock()
+    pc = PlayerCore(library, cc, youtube_client=yt)
+
+    await pc.delete_current()
+
+    # local removal
+    assert all(i.video_id != "A" for i in library.items)
+    assert not cache_file.exists()
+    # remote removal
+    yt.delete_playlist_item.assert_called_once_with("PLITEM_A")
+    # stop was called
+    cc.stop.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_current_missing_playlist_item_id_skips_remote(tmp_path, monkeypatch):
+    import crt.config as cfg
+    monkeypatch.setattr(cfg, "TEMP_DIR", str(tmp_path))
+
+    library = _make_library(["A"])
+    library.cursor_video_id = "A"
+    library.items[0].playlist_item_id = None
+
+    cc = _make_chromecast()
+    yt = MagicMock()
+    pc = PlayerCore(library, cc, youtube_client=yt)
+
+    await pc.delete_current()
+
+    assert all(i.video_id != "A" for i in library.items)
+    yt.delete_playlist_item.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_delete_current_youtube_failure_keeps_local_removal(tmp_path, monkeypatch):
+    import crt.config as cfg
+    monkeypatch.setattr(cfg, "TEMP_DIR", str(tmp_path))
+
+    library = _make_library(["A"])
+    library.cursor_video_id = "A"
+    library.items[0].playlist_item_id = "PLITEM_A"
+
+    cc = _make_chromecast()
+    yt = MagicMock()
+    yt.delete_playlist_item.side_effect = RuntimeError("boom")
+    pc = PlayerCore(library, cc, youtube_client=yt)
+
+    # Should NOT raise
+    await pc.delete_current()
+
+    assert all(i.video_id != "A" for i in library.items)
+
+
+@pytest.mark.asyncio
+async def test_delete_current_with_no_cursor_is_noop():
+    library = _make_library(["A"])
+    library.cursor_video_id = None
+
+    cc = _make_chromecast()
+    yt = MagicMock()
+    pc = PlayerCore(library, cc, youtube_client=yt)
+
+    await pc.delete_current()  # should not raise
+
+    yt.delete_playlist_item.assert_not_called()
+    assert len(library.items) == 1

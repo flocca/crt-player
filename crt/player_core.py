@@ -28,9 +28,10 @@ def _get_local_ip() -> str:
 
 
 class PlayerCore:
-    def __init__(self, library: LibraryStore, chromecast: ChromecastManager) -> None:
+    def __init__(self, library: LibraryStore, chromecast: ChromecastManager, youtube_client=None) -> None:
         self.library = library
         self.chromecast = chromecast
+        self.youtube = youtube_client
         self.state: str = "idle"
 
     # ------------------------------------------------------------------
@@ -182,6 +183,38 @@ class PlayerCore:
         ):
             await asyncio.to_thread(self.chromecast.stop)
             self.state = "idle"
+
+    async def seek_relative(self, seconds: int) -> None:
+        await asyncio.to_thread(self.chromecast.seek_relative, seconds)
+
+    async def delete_current(self) -> None:
+        item = self.library.cursor_item()
+        if item is None:
+            log.info("delete_current: no cursor item, skipping")
+            return
+        await self.stop()
+        await asyncio.to_thread(self._delete_local, item)
+        if item.playlist_item_id and self.youtube is not None:
+            try:
+                await asyncio.to_thread(self.youtube.delete_playlist_item, item.playlist_item_id)
+            except Exception as e:
+                log.error("YouTube remote delete failed for %s: %s", item.video_id, e)
+        elif self.youtube is None:
+            log.warning("delete_current: no youtube_client, remote delete skipped")
+        else:
+            log.warning(
+                "delete_current: playlist_item_id missing for %s; remote delete skipped",
+                item.video_id,
+            )
+
+    def _delete_local(self, item) -> None:
+        self.library.remove(item.id)
+        cache_path = os.path.join(config.TEMP_DIR, config.cached_encoded_filename(item.video_id))
+        if os.path.isfile(cache_path):
+            try:
+                os.unlink(cache_path)
+            except OSError as e:
+                log.warning("Failed to unlink cache %s: %s", cache_path, e)
 
     async def on_playback_finished(self) -> None:
         """Called when the Chromecast reports natural end of the current item.

@@ -54,7 +54,15 @@ async def main_async() -> None:
     library.load_state(config.STATE_FILE)
     chromecast = ChromecastManager()
     pipeline = PipelineWorker(library, chromecast)
-    player = PlayerCore(library, chromecast)
+
+    yt_client = None
+    if config.YT_PLAYLIST_ID:
+        try:
+            yt_client = YouTubeClient.from_token_file(config.YT_TOKEN_FILE, config.YT_CLIENT_SECRETS)
+        except (YouTubeAuthError, FileNotFoundError) as e:
+            log.warning("YouTube client unavailable, remote delete + sync disabled: %s", e)
+
+    player = PlayerCore(library, chromecast, youtube_client=yt_client)
 
     # Capture the running loop here so callbacks invoked from worker threads
     # (e.g. SyncEngine.run_sync_once dispatched via asyncio.to_thread) can
@@ -63,24 +71,19 @@ async def main_async() -> None:
     main_loop = asyncio.get_running_loop()
 
     sync_engine = None
-    if config.YT_PLAYLIST_ID:
-        try:
-            yt_client = YouTubeClient.from_token_file(config.YT_TOKEN_FILE, config.YT_CLIENT_SECRETS)
+    if yt_client is not None:
+        def _on_yt_remove(video_id: str):
+            asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), main_loop)
 
-            def _on_yt_remove(video_id: str):
-                asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), main_loop)
+        def _on_yt_add():
+            pipeline.wake_prepare()
 
-            def _on_yt_add():
-                pipeline.wake_prepare()
-
-            sync_engine = SyncEngine(
-                library, yt_client, config.YT_PLAYLIST_ID,
-                on_remove=_on_yt_remove,
-                on_add=_on_yt_add,
-            )
-            log.info("SyncEngine ready (playlist=%s)", config.YT_PLAYLIST_ID)
-        except (YouTubeAuthError, FileNotFoundError) as e:
-            log.warning("SyncEngine disabled: %s", e)
+        sync_engine = SyncEngine(
+            library, yt_client, config.YT_PLAYLIST_ID,
+            on_remove=_on_yt_remove,
+            on_add=_on_yt_add,
+        )
+        log.info("SyncEngine ready (playlist=%s)", config.YT_PLAYLIST_ID)
 
     app = create_app(
         library=library,
