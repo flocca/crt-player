@@ -6,12 +6,15 @@ from googleapiclient.errors import HttpError
 from crt.youtube_client import PlaylistEntry, YouTubeAuthError, YouTubeClient
 
 
-def _build_item(video_id, title, position):
-    return {"snippet": {
-        "title": title,
-        "position": position,
-        "resourceId": {"videoId": video_id},
-    }}
+def _build_item(video_id, title, position, playlist_item_id=None):
+    return {
+        "id": playlist_item_id or f"plitem-{video_id}",
+        "snippet": {
+            "title": title,
+            "position": position,
+            "resourceId": {"videoId": video_id},
+        },
+    }
 
 
 def _mock_response(items, next_page_token=None):
@@ -29,8 +32,8 @@ def test_list_playlist_items_single_page():
     entries = client.list_playlist_items("PLxxx")
 
     assert entries == [
-        PlaylistEntry(video_id="vid1", title="Title 1", position=0),
-        PlaylistEntry(video_id="vid2", title="Title 2", position=1),
+        PlaylistEntry(video_id="vid1", title="Title 1", position=0, playlist_item_id="plitem-vid1"),
+        PlaylistEntry(video_id="vid2", title="Title 2", position=1, playlist_item_id="plitem-vid2"),
     ]
 
 
@@ -48,7 +51,9 @@ def test_list_playlist_items_paginates():
 
     assert len(entries) == 51
     assert entries[0].video_id == "vid0"
+    assert entries[0].playlist_item_id == "plitem-vid0"
     assert entries[50].video_id == "vid50"
+    assert entries[50].playlist_item_id == "plitem-vid50"
 
 
 def test_list_playlist_items_auth_error_raises_typed():
@@ -93,3 +98,72 @@ def test_list_playlist_items_500_propagates():
 def test_from_token_file_missing_raises():
     with pytest.raises(YouTubeAuthError):
         YouTubeClient.from_token_file("/nonexistent/path.json", "/nonexistent/secrets.json")
+
+
+def test_list_playlist_items_populates_playlist_item_id():
+    api_mock = MagicMock()
+    raw_item = {
+        "id": "PLITEM_ID_42",
+        "snippet": {
+            "title": "Title 1",
+            "position": 0,
+            "resourceId": {"videoId": "vid1"},
+        },
+    }
+    api_mock.playlistItems.return_value.list.return_value.execute.return_value = {"items": [raw_item]}
+
+    client = YouTubeClient(api_service=api_mock)
+    entries = client.list_playlist_items("PLxxx")
+
+    assert entries == [
+        PlaylistEntry(video_id="vid1", title="Title 1", position=0, playlist_item_id="PLITEM_ID_42"),
+    ]
+
+
+def test_delete_playlist_item_calls_api():
+    api_mock = MagicMock()
+    client = YouTubeClient(api_service=api_mock)
+
+    client.delete_playlist_item("PLITEM_42")
+
+    api_mock.playlistItems.return_value.delete.assert_called_once_with(id="PLITEM_42")
+    api_mock.playlistItems.return_value.delete.return_value.execute.assert_called_once()
+
+
+def test_delete_playlist_item_404_is_swallowed():
+    api_mock = MagicMock()
+    resp = MagicMock()
+    resp.status = 404
+    api_mock.playlistItems.return_value.delete.return_value.execute.side_effect = HttpError(
+        resp=resp, content=b"not found"
+    )
+    client = YouTubeClient(api_service=api_mock)
+
+    # Should not raise
+    client.delete_playlist_item("PLITEM_GONE")
+
+
+def test_delete_playlist_item_401_raises_auth_error():
+    api_mock = MagicMock()
+    resp = MagicMock()
+    resp.status = 401
+    api_mock.playlistItems.return_value.delete.return_value.execute.side_effect = HttpError(
+        resp=resp, content=b"unauthorized"
+    )
+    client = YouTubeClient(api_service=api_mock)
+
+    with pytest.raises(YouTubeAuthError):
+        client.delete_playlist_item("PLITEM_X")
+
+
+def test_delete_playlist_item_500_propagates():
+    api_mock = MagicMock()
+    resp = MagicMock()
+    resp.status = 500
+    api_mock.playlistItems.return_value.delete.return_value.execute.side_effect = HttpError(
+        resp=resp, content=b"server error"
+    )
+    client = YouTubeClient(api_service=api_mock)
+
+    with pytest.raises(HttpError):
+        client.delete_playlist_item("PLITEM_X")

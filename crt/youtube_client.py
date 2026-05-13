@@ -11,7 +11,7 @@ from google.oauth2.credentials import Credentials
 
 log = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/youtube"]
 
 
 class YouTubeAuthError(Exception):
@@ -23,6 +23,7 @@ class PlaylistEntry:
     video_id: str
     title: str
     position: int
+    playlist_item_id: str
 
 
 class YouTubeClient:
@@ -56,11 +57,24 @@ class YouTubeClient:
                     video_id=snippet["resourceId"]["videoId"],
                     title=snippet["title"],
                     position=snippet["position"],
+                    playlist_item_id=raw["id"],
                 ))
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
         return entries
+
+    def delete_playlist_item(self, playlist_item_id: str) -> None:
+        try:
+            self._api.playlistItems().delete(id=playlist_item_id).execute()
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            if status in (401, 403):
+                raise YouTubeAuthError(f"YouTube auth error ({status}): {e}") from e
+            if status == 404:
+                log.info("playlist item %s already gone (404)", playlist_item_id)
+                return
+            raise
 
     @classmethod
     def from_token_file(cls, token_file: str, client_secrets_file: str) -> "YouTubeClient":
