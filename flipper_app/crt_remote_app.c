@@ -25,13 +25,35 @@
 #define CMD_STOP       0x04
 #define CMD_LOOP       0x05
 #define CMD_SYNC       0x06
-#define CMD_CALIBRATE  0x07
+#define CMD_CALIBRATE        0x07
+#define CMD_SEEK_BACK_15     0x08
+#define CMD_SEEK_FORWARD_30  0x09
+#define CMD_DELETE           0x0A
 
 typedef enum {
     BleStateStarting = 0,
     BleStateActive,
     BleStateFailed,
 } BleState;
+
+typedef enum {
+    SceneHome = 0,
+    SceneExtraMenu,
+} Scene;
+
+typedef struct {
+    const char* label;
+    uint8_t cmd_byte;
+} MenuItem;
+
+static const MenuItem MENU_ITEMS[] = {
+    {"Stop",          CMD_STOP},
+    {"Elimina video", CMD_DELETE},
+    {"Calibrate",     CMD_CALIBRATE},
+    {"Toggle loop",   CMD_LOOP},
+    {"Sync now",      CMD_SYNC},
+};
+#define MENU_ITEMS_COUNT (sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]))
 
 typedef struct {
     FuriMessageQueue* input_queue;
@@ -40,24 +62,60 @@ typedef struct {
     Bt* bt;
     FuriHalBleProfileBase* profile;
     BleState ble_state;
+    Scene scene;
+    uint8_t menu_index;
 } CrtRemoteApp;
+
+static void draw_home(Canvas* canvas, CrtRemoteApp* app) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 32, 10, AlignCenter, AlignTop, "CRT Remote");
+
+    canvas_set_font(canvas, FontSecondary);
+    const char* state_line;
+    switch(app->ble_state) {
+        case BleStateActive:   state_line = "BLE: active";   break;
+        case BleStateFailed:   state_line = "BLE: failed";   break;
+        case BleStateStarting:
+        default:               state_line = "BLE: starting"; break;
+    }
+    canvas_draw_str_aligned(canvas, 32, 22, AlignCenter, AlignTop, state_line);
+
+    canvas_draw_str(canvas, 4, 42, "< -15s");
+    canvas_draw_str(canvas, 4, 54, "> +30s");
+    canvas_draw_str(canvas, 4, 66, "^ prev");
+    canvas_draw_str(canvas, 4, 78, "v next");
+
+    canvas_draw_str_aligned(canvas, 32, 100, AlignCenter, AlignTop, "OK = play/pause");
+    canvas_draw_str_aligned(canvas, 32, 115, AlignCenter, AlignTop, "hold OK: extras");
+}
+
+static void draw_extra_menu(Canvas* canvas, CrtRemoteApp* app) {
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 32, 10, AlignCenter, AlignTop, "Comandi");
+
+    canvas_set_font(canvas, FontSecondary);
+    const int y_base = 30;
+    const int y_step = 12;
+    for(size_t i = 0; i < MENU_ITEMS_COUNT; i++) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s %s",
+                 (i == app->menu_index) ? ">" : " ",
+                 MENU_ITEMS[i].label);
+        canvas_draw_str(canvas, 4, y_base + (int)i * y_step, buf);
+    }
+
+    canvas_draw_str_aligned(canvas, 32, 110, AlignCenter, AlignTop, "OK conferma");
+    canvas_draw_str_aligned(canvas, 32, 120, AlignCenter, AlignTop, "Back annulla");
+}
 
 static void draw_callback(Canvas* canvas, void* ctx) {
     CrtRemoteApp* app = ctx;
     canvas_clear(canvas);
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 12, "CRT Remote");
-    canvas_set_font(canvas, FontSecondary);
-    const char* state_line;
-    switch(app->ble_state) {
-        case BleStateActive:   state_line = "BLE: Serial active"; break;
-        case BleStateFailed:   state_line = "BLE: init failed";   break;
-        case BleStateStarting:
-        default:               state_line = "BLE: starting...";   break;
+    if(app->scene == SceneExtraMenu) {
+        draw_extra_menu(canvas, app);
+    } else {
+        draw_home(canvas, app);
     }
-    canvas_draw_str(canvas, 2, 28, state_line);
-    canvas_draw_str(canvas, 2, 44, "Up/Dn/OK/L/R/Hold");
-    canvas_draw_str(canvas, 2, 60, "Back to exit");
 }
 
 static void input_callback(InputEvent* event, void* ctx) {
@@ -121,6 +179,7 @@ int32_t crt_remote_app(void* p) {
     app.input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
 
     app.view_port = view_port_alloc();
+    view_port_set_orientation(app.view_port, ViewPortOrientationVertical);
     view_port_draw_callback_set(app.view_port, draw_callback, &app);
     view_port_input_callback_set(app.view_port, input_callback, &app);
 
@@ -135,21 +194,45 @@ int32_t crt_remote_app(void* p) {
     while(running) {
         if(furi_message_queue_get(app.input_queue, &event, FuriWaitForever) == FuriStatusOk) {
             if(event.type == InputTypeShort) {
-                switch(event.key) {
-                    case InputKeyUp:    ble_serial_send_byte(&app, CMD_NEXT);   break;
-                    case InputKeyDown:  ble_serial_send_byte(&app, CMD_PREV);   break;
-                    case InputKeyOk:    ble_serial_send_byte(&app, CMD_TOGGLE); break;
-                    case InputKeyRight: ble_serial_send_byte(&app, CMD_LOOP);   break;
-                    case InputKeyLeft:  ble_serial_send_byte(&app, CMD_SYNC);   break;
-                    case InputKeyBack:  running = false; break;
-                    default: break;
+                if(app.scene == SceneHome) {
+                    switch(event.key) {
+                        case InputKeyUp:    ble_serial_send_byte(&app, CMD_SEEK_BACK_15);    break;
+                        case InputKeyDown:  ble_serial_send_byte(&app, CMD_SEEK_FORWARD_30); break;
+                        case InputKeyLeft:  ble_serial_send_byte(&app, CMD_NEXT);            break;
+                        case InputKeyRight: ble_serial_send_byte(&app, CMD_PREV);            break;
+                        case InputKeyOk:    ble_serial_send_byte(&app, CMD_TOGGLE);          break;
+                        case InputKeyBack:  running = false;                                 break;
+                        default: break;
+                    }
+                } else { // SceneExtraMenu
+                    switch(event.key) {
+                        case InputKeyRight: // user "Up"
+                            if(app.menu_index > 0) app.menu_index--;
+                            view_port_update(app.view_port);
+                            break;
+                        case InputKeyLeft: // user "Down"
+                            if((size_t)(app.menu_index + 1) < MENU_ITEMS_COUNT) app.menu_index++;
+                            view_port_update(app.view_port);
+                            break;
+                        case InputKeyOk:
+                            ble_serial_send_byte(&app, MENU_ITEMS[app.menu_index].cmd_byte);
+                            app.scene = SceneHome;
+                            view_port_update(app.view_port);
+                            break;
+                        case InputKeyBack:
+                            app.scene = SceneHome;
+                            view_port_update(app.view_port);
+                            break;
+                        default: break;
+                    }
                 }
             } else if(event.type == InputTypeLong) {
-                switch(event.key) {
-                    case InputKeyBack: ble_serial_send_byte(&app, CMD_STOP);      break;
-                    case InputKeyOk:   ble_serial_send_byte(&app, CMD_CALIBRATE); break;
-                    default: break;
+                if(app.scene == SceneHome && event.key == InputKeyOk) {
+                    app.scene = SceneExtraMenu;
+                    app.menu_index = 0;
+                    view_port_update(app.view_port);
                 }
+                // Long-press Back in either scene is intentionally unbound (was STOP in v1).
             }
         }
     }
