@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from crt.api import create_app
 from crt.library_store import LibraryStore, QueueItem
+from crt.player_core import ActionResult
 
 
 def _make_app(library, player=None, sync_engine=None, pipeline=None):
@@ -90,14 +91,18 @@ def test_post_control_next_calls_player():
     player = MagicMock()
     async def _next():
         library.cursor_video_id = "A"
+        return ActionResult(True)
     player.next = _next
 
     client = TestClient(_make_app(library, player=player))
     resp = client.post("/control/next")
 
     assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert resp.json()["cursor_video_id"] == "A"
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["cursor_video_id"] == "A"
+    assert body["did_action"] is True
+    assert body["reason"] is None
 
 
 def test_post_control_prev_calls_player():
@@ -109,6 +114,7 @@ def test_post_control_prev_calls_player():
     player = MagicMock()
     async def _prev():
         library.cursor_video_id = "A"
+        return ActionResult(True)
     player.prev = _prev
 
     client = TestClient(_make_app(library, player=player))
@@ -118,12 +124,62 @@ def test_post_control_prev_calls_player():
     assert resp.json()["cursor_video_id"] == "A"
 
 
+def test_post_control_next_reports_no_op():
+    """Issue #6: a no-op (nothing playable) must be distinguishable on the wire."""
+    library = LibraryStore()
+    player = MagicMock()
+    async def _next():
+        return ActionResult(False, "no_playable_item")
+    player.next = _next
+
+    client = TestClient(_make_app(library, player=player))
+    resp = client.post("/control/next")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True  # request succeeded
+    assert body["did_action"] is False
+    assert body["reason"] == "no_playable_item"
+
+
+def test_post_control_toggle_reports_no_op():
+    library = LibraryStore()
+    player = MagicMock()
+    player.state = "idle"
+    async def _toggle():
+        return ActionResult(False, "no_playable_item")
+    player.toggle = _toggle
+
+    client = TestClient(_make_app(library, player=player))
+    resp = client.post("/control/toggle")
+
+    body = resp.json()
+    assert body["did_action"] is False
+    assert body["reason"] == "no_playable_item"
+
+
+def test_post_control_seek_reports_no_session():
+    library = LibraryStore()
+    player = MagicMock()
+    async def _seek(n):
+        return ActionResult(False, "no_chromecast_session")
+    player.seek_relative = _seek
+
+    client = TestClient(_make_app(library, player=player))
+    resp = client.post("/control/seek/forward/30")
+
+    body = resp.json()
+    assert body["did_action"] is False
+    assert body["reason"] == "no_chromecast_session"
+
+
 def test_post_control_stop_calls_player():
     library = LibraryStore()
     player = MagicMock()
     called = []
     async def _stop():
         called.append(1)
+        return ActionResult(True)
     player.stop = _stop
 
     client = TestClient(_make_app(library, player=player))
@@ -139,6 +195,7 @@ def test_post_control_toggle_returns_state():
     player.state = "playing"
     async def _toggle():
         player.state = "paused"
+        return ActionResult(True)
     player.toggle = _toggle
 
     client = TestClient(_make_app(library, player=player))
@@ -156,6 +213,7 @@ def test_post_control_play_video_id():
     player = MagicMock()
     async def _play(vid):
         library.cursor_video_id = vid
+        return ActionResult(True)
     player.play = _play
 
     client = TestClient(_make_app(library, player=player))
@@ -278,20 +336,22 @@ def test_get_media_rejects_path_traversal(tmp_path):
 def test_seek_back_calls_player_with_negative_seconds():
     library = LibraryStore()
     player = MagicMock()
-    player.seek_relative = AsyncMock()
+    player.seek_relative = AsyncMock(return_value=ActionResult(True))
     client = TestClient(_make_app(library, player=player))
 
     resp = client.post("/control/seek/back/15")
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["did_action"] is True
     player.seek_relative.assert_awaited_once_with(-15)
 
 
 def test_seek_forward_calls_player_with_positive_seconds():
     library = LibraryStore()
     player = MagicMock()
-    player.seek_relative = AsyncMock()
+    player.seek_relative = AsyncMock(return_value=ActionResult(True))
     client = TestClient(_make_app(library, player=player))
 
     resp = client.post("/control/seek/forward/30")

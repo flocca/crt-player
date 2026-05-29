@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import socket
+from dataclasses import dataclass
 
 from googleapiclient.errors import HttpError
 
@@ -19,6 +20,27 @@ from crt.library_store import LibraryStore, QueueItem
 from crt.youtube_client import YouTubeAuthError
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class ActionResult:
+    """Outcome of a transport command, so callers (api.py → bridge / TUI) can
+    distinguish "action performed" from "silent no-op" (issue #6).
+
+    reason is one of: None (action performed), "no_items", "no_playable_item",
+    "cursor_unchanged", "no_chromecast_session".
+    """
+
+    did_action: bool
+    reason: str | None = None
+
+
+# Convenience singletons for the common no-op outcomes.
+_NO_ITEMS = ActionResult(False, "no_items")
+_NO_PLAYABLE = ActionResult(False, "no_playable_item")
+_CURSOR_UNCHANGED = ActionResult(False, "cursor_unchanged")
+_NO_CC_SESSION = ActionResult(False, "no_chromecast_session")
+_DID_ACTION = ActionResult(True)
 
 
 def _get_local_ip() -> str:
@@ -81,14 +103,15 @@ class PlayerCore:
     # Transport commands
     # ------------------------------------------------------------------
 
-    async def next(self) -> None:
+    async def next(self) -> ActionResult:
         """Advance cursor to the next playable item (with loop wrap if enabled) then cast.
 
         Skips items still encoding/queued — the remote should never land on
-        an item that can't be cast.
+        an item that can't be cast. Returns an ActionResult describing the
+        outcome (issue #6).
         """
         if not self.library.items:
-            return
+            return _NO_ITEMS
         n = len(self.library.items)
         idx = self._cursor_index()
         if idx is None:
@@ -97,35 +120,44 @@ class PlayerCore:
             start = idx + 1
             if start >= n:
                 if not self.library.loop_mode:
-                    return
+                    return _NO_PLAYABLE
                 start = 0
         new_idx = self._find_playable_index(
             start_idx=start, direction=1, wrap=self.library.loop_mode,
         )
         if new_idx is None:
-            return
+            return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
         await self._cast_current()
+        return _DID_ACTION
 
-    async def prev(self) -> None:
+    async def prev(self) -> ActionResult:
         """Move cursor back to the previous playable item then cast.
 
-        Skips items still encoding/queued. No wrap (matches existing behavior).
+        Skips items still encoding/queued. No wrap. Recovers from a stale /
+        phantom cursor (a video_id no longer in the library) by scanning
+        backward from the last item — symmetric to next()/toggle() (issue #5).
         """
         if not self.library.items:
-            return
+            return _NO_ITEMS
         idx = self._cursor_index()
-        if idx is None or idx == 0:
-            return
+        if idx is None:
+            # Phantom cursor — jump to the last item and scan backward.
+            start = len(self.library.items) - 1
+        elif idx == 0:
+            return _CURSOR_UNCHANGED
+        else:
+            start = idx - 1
         new_idx = self._find_playable_index(
-            start_idx=idx - 1, direction=-1, wrap=False,
+            start_idx=start, direction=-1, wrap=False,
         )
         if new_idx is None:
-            return
+            return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
         await self._cast_current()
+        return _DID_ACTION
 
-    async def play(self, video_id: str) -> None:
+    async def play(self, video_id: str) -> ActionResult:
         """Jump cursor to a specific video_id and cast.
 
         Raises KeyError if video_id is not in the library.
@@ -135,35 +167,57 @@ class PlayerCore:
             raise KeyError(f"video_id not in library: {video_id}")
         self.library.cursor_video_id = video_id
         await self._cast_current()
+        return _DID_ACTION
 
-    async def toggle(self) -> None:
+    async def toggle(self) -> ActionResult:
         """play→pause, paused→resume, idle→start nearest playable item.
 
         From idle, scans forward from the cursor (inclusive) for the first item
         with a cache file and casts it. If the cursor lands on an unready item
         (encoding/queued), the remote's toggle skips ahead instead of no-op.
+
+        When we believe we are active (playing/casting/paused) but the
+        Chromecast media session has been reclaimed during a long pause, a
+        plain pause/resume is a silent no-op (issue #7). Detect that and
+        recast the cursor item from the last known position instead.
         """
-        if self.state in ("playing", "casting"):
+        if self.state in ("playing", "casting", "paused"):
+            if self.chromecast.is_session_lost():
+                return await self._recast_after_session_loss()
             await asyncio.to_thread(self.chromecast.pause_or_resume)
-            self.state = "paused"
-            return
-        if self.state == "paused":
-            await asyncio.to_thread(self.chromecast.pause_or_resume)
-            self.state = "playing"
-            return
+            self.state = "paused" if self.state in ("playing", "casting") else "playing"
+            return _DID_ACTION
         if not self.library.items:
-            return
+            return _NO_ITEMS
         idx = self._cursor_index()
         start = 0 if idx is None else idx
         new_idx = self._find_playable_index(
             start_idx=start, direction=1, wrap=self.library.loop_mode,
         )
         if new_idx is None:
-            return
+            return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
         await self._cast_current()
+        return _DID_ACTION
 
-    async def stop(self) -> None:
+    async def _recast_after_session_loss(self) -> ActionResult:
+        """Recast the cursor item from its last known position after the media
+        session was reclaimed by the TV (issue #7)."""
+        idx = self._cursor_index()
+        if idx is None or not self.library.items[idx].filename:
+            log.info("toggle: session lost but cursor item not playable")
+            return _NO_PLAYABLE
+        item = self.library.items[idx]
+        resume_pos = self.chromecast.current_time or item.playback_position or 0.0
+        item.playback_position = resume_pos
+        log.info(
+            "toggle: media session lost — recasting %s from %.1fs",
+            item.video_id, resume_pos,
+        )
+        await self._cast_current()
+        return _DID_ACTION
+
+    async def stop(self) -> ActionResult:
         """Stop playback and set state to idle. Cursor stays on the current item;
         its status reverts to 'ready' so a subsequent toggle/play can re-cast it."""
         await asyncio.to_thread(self.chromecast.stop)
@@ -173,6 +227,7 @@ class PlayerCore:
             item = self.library.items[idx]
             if item.status in ("playing", "casting", "paused"):
                 item.status = "ready"
+        return _DID_ACTION
 
     async def stop_and_remove(self, video_id: str) -> None:
         """If video_id is the currently playing/casting/paused item, stop it.
@@ -187,8 +242,11 @@ class PlayerCore:
             await asyncio.to_thread(self.chromecast.stop)
             self.state = "idle"
 
-    async def seek_relative(self, seconds: int) -> None:
-        await asyncio.to_thread(self.chromecast.seek_relative, seconds)
+    async def seek_relative(self, seconds: int) -> ActionResult:
+        issued = await asyncio.to_thread(self.chromecast.seek_relative, seconds)
+        if issued:
+            return _DID_ACTION
+        return _NO_CC_SESSION
 
     async def delete_current(self) -> None:
         item = self.library.cursor_item()

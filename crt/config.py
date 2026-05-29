@@ -27,6 +27,9 @@ YT_TOKEN_FILE = os.environ.get(
     os.path.join(os.path.expanduser("~"), ".local", "share", "crt-player", "oauth_token.json"),
 )
 SYNC_INTERVAL_S = int(os.environ.get("CRT_SYNC_INTERVAL_S", "300"))
+# How often the daemon persists state to disk so a crash/OOM/reboot loses at
+# most one interval of cursor/loop/position changes (issue #4).
+SAVE_INTERVAL_S = int(os.environ.get("CRT_SAVE_INTERVAL_S", "30"))
 LOG_LEVEL = os.environ.get("CRT_LOG_LEVEL", "INFO")
 DAEMON_URL = os.environ.get("CRT_DAEMON_URL", "http://localhost:8765")
 

@@ -46,6 +46,27 @@ def cleanup_temp_files() -> None:
                 pass
 
 
+async def periodic_save_loop(
+    library, chromecast, state_file: str, interval_s: float
+) -> None:
+    """Persist state to disk every interval_s seconds (issue #4).
+
+    The original code only saved on a graceful SIGTERM shutdown, so a hard
+    kill / OOM / host reboot lost cursor, loop_mode and playback position.
+    This loop bounds that loss to one interval. The shutdown path keeps its
+    own final flush. A failing save is logged and retried on the next tick —
+    it must never kill the loop.
+    """
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            pos = getattr(chromecast, "current_time", 0.0) or 0.0
+            library.save_state(state_file, playback_position=pos)
+            log.debug("periodic save_state -> %s (pos=%.1f)", state_file, pos)
+        except Exception:
+            log.exception("periodic save_state failed")
+
+
 async def main_async() -> None:
     os.makedirs(config.TEMP_DIR, exist_ok=True)
     cleanup_temp_files()
@@ -104,6 +125,12 @@ async def main_async() -> None:
         asyncio.create_task(chromecast.discover_loop(), name="cc_discovery"),
         asyncio.create_task(pipeline.run_prepare(), name="pipeline_prepare"),
         asyncio.create_task(player.watch_natural_end(), name="player_natural_end"),
+        asyncio.create_task(
+            periodic_save_loop(
+                library, chromecast, config.STATE_FILE, config.SAVE_INTERVAL_S
+            ),
+            name="periodic_save",
+        ),
     ]
     if sync_engine is not None:
         tasks.append(asyncio.create_task(

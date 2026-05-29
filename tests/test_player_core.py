@@ -21,6 +21,9 @@ def _make_chromecast():
     cc.pause_or_resume = MagicMock()
     cc.player_state = "IDLE"
     cc.wait_for_connection = AsyncMock()
+    # Default: a live media session exists, so toggle takes the normal
+    # pause/resume path rather than the session-loss recast path (issue #7).
+    cc.is_session_lost = MagicMock(return_value=False)
     return cc
 
 
@@ -638,3 +641,244 @@ async def test_delete_current_with_no_cursor_is_noop():
 
     yt.delete_playlist_item.assert_not_called()
     assert len(library.items) == 1
+
+
+# ---------------------------------------------------------------------
+# Issue #5: prev() recovers from a stale/phantom cursor
+# (cursor_video_id points at a video no longer in the library).
+# NEXT/TOGGLE already recover; PREV must behave symmetrically.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prev_with_phantom_cursor_recovers_to_last_playable(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_library(["A", "B", "C"])
+    library.cursor_video_id = "GHOST"  # not in library
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    await pc.prev()
+
+    # Symmetric to next/toggle: jump to the last playable item and cast it.
+    assert library.cursor_video_id == "C"
+    cc.cast_url.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_prev_with_phantom_cursor_skips_unready(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_mixed_library([("A", True), ("B", True), ("C", False)])
+    library.cursor_video_id = "GHOST"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    await pc.prev()
+
+    # Last item C is still encoding → scan backward lands on B.
+    assert library.cursor_video_id == "B"
+    cc.cast_url.assert_called_once()
+
+
+# ---------------------------------------------------------------------
+# Issue #6: structured ActionResult ack — did_action / reason.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_next_returns_did_action_true_on_cast(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    result = await pc.next()
+
+    assert result.did_action is True
+    assert result.reason is None
+
+
+@pytest.mark.asyncio
+async def test_next_returns_did_action_false_when_no_playable():
+    library = _make_mixed_library([("A", True), ("B", False)])
+    library.cursor_video_id = "A"
+    library.loop_mode = False
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    result = await pc.next()
+
+    assert result.did_action is False
+    assert result.reason == "no_playable_item"
+
+
+@pytest.mark.asyncio
+async def test_next_returns_no_items_on_empty_library():
+    library = LibraryStore()
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    result = await pc.next()
+
+    assert result.did_action is False
+    assert result.reason == "no_items"
+
+
+@pytest.mark.asyncio
+async def test_prev_at_first_returns_cursor_unchanged():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    result = await pc.prev()
+
+    assert result.did_action is False
+    assert result.reason == "cursor_unchanged"
+
+
+@pytest.mark.asyncio
+async def test_prev_phantom_cursor_returns_did_action_true(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "GHOST"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+
+    result = await pc.prev()
+
+    assert result.did_action is True
+
+
+@pytest.mark.asyncio
+async def test_toggle_pause_returns_did_action_true():
+    library = _make_library(["A"])
+    cc = _make_chromecast()
+    cc.player_state = "PLAYING"
+    pc = PlayerCore(library, cc)
+    pc.state = "playing"
+
+    result = await pc.toggle()
+
+    assert result.did_action is True
+
+
+@pytest.mark.asyncio
+async def test_toggle_idle_nothing_playable_returns_reason():
+    library = _make_mixed_library([("A", False)])
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc)
+    pc.state = "idle"
+
+    result = await pc.toggle()
+
+    assert result.did_action is False
+    assert result.reason == "no_playable_item"
+
+
+# ---------------------------------------------------------------------
+# Issue #7a: toggle after a long pause detects the lost media session
+# and recasts the cursor item from its saved position, instead of a
+# silent no-op that lies about being "playing".
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_toggle_with_lost_session_recasts_from_position(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_library(["A"])
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    cc.is_session_lost = MagicMock(return_value=True)
+    cc.current_time = 1232.5  # real pause position preserved across the loss
+    pc = PlayerCore(library, cc)
+    pc.state = "paused"  # we believe we are paused
+
+    result = await pc.toggle()
+
+    # Must recast (a plain pause/resume would be a silent no-op) from the
+    # preserved pause position.
+    cc.cast_url.assert_called_once()
+    _, kwargs = cc.cast_url.call_args
+    assert kwargs.get("start_position") == 1232.5
+    assert result.did_action is True
+    assert pc.state == "casting"
+
+
+@pytest.mark.asyncio
+async def test_toggle_lost_session_no_playable_cursor_is_reported(monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+
+    library = _make_mixed_library([("A", False)])  # cursor item not ready
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    cc.is_session_lost = MagicMock(return_value=True)
+    pc = PlayerCore(library, cc)
+    pc.state = "paused"
+
+    result = await pc.toggle()
+
+    cc.cast_url.assert_not_called()
+    assert result.did_action is False
+    assert result.reason == "no_playable_item"
+
+
+@pytest.mark.asyncio
+async def test_toggle_with_live_session_does_not_recast():
+    """When the session is alive, toggle must pause/resume, never recast."""
+    library = _make_library(["A"])
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    cc.is_session_lost = MagicMock(return_value=False)
+    cc.player_state = "PLAYING"
+    pc = PlayerCore(library, cc)
+    pc.state = "playing"
+
+    await pc.toggle()
+
+    cc.pause_or_resume.assert_called_once()
+    cc.cast_url.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_seek_relative_reports_no_session_when_chromecast_noop():
+    library = _make_library(["A"])
+    cc = _make_chromecast()
+    cc.seek_relative = MagicMock(return_value=False)  # no active session
+    pc = PlayerCore(library, cc)
+
+    result = await pc.seek_relative(-15)
+
+    assert result.did_action is False
+    assert result.reason == "no_chromecast_session"
+
+
+@pytest.mark.asyncio
+async def test_seek_relative_reports_did_action_when_seek_issued():
+    library = _make_library(["A"])
+    cc = _make_chromecast()
+    cc.seek_relative = MagicMock(return_value=True)
+    pc = PlayerCore(library, cc)
+
+    result = await pc.seek_relative(30)
+
+    assert result.did_action is True
