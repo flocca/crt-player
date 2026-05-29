@@ -217,6 +217,70 @@ def test_queue_item_from_dict_missing_playlist_item_id_defaults_none():
     assert item.playlist_item_id is None
 
 
+def test_save_state_applies_playback_position_to_cursor_item(tmp_path):
+    """Issue #7b: the live playback position passed by the daemon must be
+    written onto the cursor item before serializing, so a restart resumes from
+    the pause point instead of 0."""
+    path = str(tmp_path / "state.json")
+    ls = LibraryStore()
+    a = ls.add("u/A")
+    a.video_id = "A"
+    b = ls.add("u/B")
+    b.video_id = "B"
+    ls.cursor_video_id = "B"
+
+    ls.save_state(path, playback_position=1232.5)
+
+    with open(path) as f:
+        data = json.load(f)
+    items = {i["video_id"]: i for i in data["items"]}
+    assert items["B"]["playback_position"] == 1232.5
+    assert items["A"]["playback_position"] == 0.0
+
+
+def test_save_state_ignores_zero_playback_position(tmp_path):
+    """A zero/negative position must not clobber an item's stored position."""
+    path = str(tmp_path / "state.json")
+    ls = LibraryStore()
+    a = ls.add("u/A")
+    a.video_id = "A"
+    a.playback_position = 99.0
+    ls.cursor_video_id = "A"
+
+    ls.save_state(path, playback_position=0.0)
+
+    with open(path) as f:
+        data = json.load(f)
+    assert data["items"][0]["playback_position"] == 99.0
+
+
+def test_save_state_no_cursor_does_not_raise(tmp_path):
+    path = str(tmp_path / "state.json")
+    ls = LibraryStore()
+    ls.add("u/A")
+    ls.cursor_video_id = None
+
+    ls.save_state(path, playback_position=50.0)  # must not raise
+
+    with open(path) as f:
+        data = json.load(f)
+    assert data["items"][0]["playback_position"] == 0.0
+
+
+def test_playback_position_survives_save_load_roundtrip(tmp_path):
+    path = str(tmp_path / "state.json")
+    ls = LibraryStore()
+    a = ls.add("u/A")
+    a.video_id = "A"
+    a.status = "done"  # so load keeps it as-is rather than resetting
+    ls.cursor_video_id = "A"
+    ls.save_state(path, playback_position=420.0)
+
+    ls2 = LibraryStore()
+    ls2.load_state(path)
+    assert ls2.items[0].playback_position == 420.0
+
+
 def test_done_and_error_items_preserved(tmp_path):
     path = str(tmp_path / "state.json")
     data = {

@@ -22,6 +22,16 @@ def create_app(
         media_dir = config.TEMP_DIR
     app = FastAPI(title="crt-player daemon")
 
+    def _ack(result, **extra) -> dict:
+        """Translate a PlayerCore ActionResult into a structured response so a
+        caller (BLE bridge / TUI) can tell "action performed" from "no-op"
+        (issue #6). Backwards-compatible: adds fields, never removes them."""
+        did_action = getattr(result, "did_action", True)
+        reason = getattr(result, "reason", None)
+        body = {"ok": True, "did_action": did_action, "reason": reason}
+        body.update(extra)
+        return body
+
     # ─── Read endpoints ─────────────────────────────────────────────
 
     @app.get("/library/items")
@@ -78,39 +88,55 @@ def create_app(
     async def control_next():
         if player is None:
             raise HTTPException(503, "player unavailable")
-        await player.next()
-        return {"ok": True, "cursor_video_id": library.cursor_video_id}
+        result = await player.next()
+        return _ack(
+            result,
+            cursor_video_id=library.cursor_video_id,
+            state=player.state,
+        )
 
     @app.post("/control/prev")
     async def control_prev():
         if player is None:
             raise HTTPException(503, "player unavailable")
-        await player.prev()
-        return {"ok": True, "cursor_video_id": library.cursor_video_id}
+        result = await player.prev()
+        return _ack(
+            result,
+            cursor_video_id=library.cursor_video_id,
+            state=player.state,
+        )
 
     @app.post("/control/toggle")
     async def control_toggle():
         if player is None:
             raise HTTPException(503, "player unavailable")
-        await player.toggle()
-        return {"ok": True, "state": player.state}
+        result = await player.toggle()
+        return _ack(
+            result,
+            state=player.state,
+            cursor_video_id=library.cursor_video_id,
+        )
 
     @app.post("/control/stop")
     async def control_stop():
         if player is None:
             raise HTTPException(503, "player unavailable")
-        await player.stop()
-        return {"ok": True}
+        result = await player.stop()
+        return _ack(result, state=player.state)
 
     @app.post("/control/play/{video_id}")
     async def control_play(video_id: str):
         if player is None:
             raise HTTPException(503, "player unavailable")
         try:
-            await player.play(video_id)
+            result = await player.play(video_id)
         except KeyError:
             raise HTTPException(404, f"video_id {video_id} not in library")
-        return {"ok": True, "cursor_video_id": library.cursor_video_id}
+        return _ack(
+            result,
+            cursor_video_id=library.cursor_video_id,
+            state=player.state,
+        )
 
     @app.post("/control/loop/toggle")
     def control_loop_toggle():
@@ -135,15 +161,15 @@ def create_app(
     async def control_seek_back(seconds: int):
         if player is None:
             raise HTTPException(503, "player unavailable")
-        await player.seek_relative(-seconds)
-        return {"ok": True}
+        result = await player.seek_relative(-seconds)
+        return _ack(result)
 
     @app.post("/control/seek/forward/{seconds}")
     async def control_seek_forward(seconds: int):
         if player is None:
             raise HTTPException(503, "player unavailable")
-        await player.seek_relative(seconds)
-        return {"ok": True}
+        result = await player.seek_relative(seconds)
+        return _ack(result)
 
     @app.post("/control/delete/current")
     async def control_delete_current():

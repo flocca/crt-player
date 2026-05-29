@@ -241,6 +241,15 @@ class LibraryStore:
         return 0
 
     def save_state(self, path: str, playback_position: float = 0.0) -> None:
+        # Apply the live playback position (passed by the daemon from
+        # chromecast.current_time) onto the cursor item so a restart resumes
+        # from the pause point rather than 0 (issue #7b). A zero/negative
+        # value is ignored so it never clobbers a stored position.
+        if playback_position > 0 and self.cursor_video_id is not None:
+            for item in self.items:
+                if item.video_id == self.cursor_video_id:
+                    item.playback_position = playback_position
+                    break
         data = {
             "version": 3,
             "cursor_video_id": self.cursor_video_id,

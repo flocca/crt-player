@@ -283,15 +283,41 @@ class ChromecastManager:
         self._safe_cmd(lambda: self.cast.media_controller.seek(position))
         self.current_time = position
 
-    def seek_relative(self, delta_seconds: float) -> None:
+    def seek_relative(self, delta_seconds: float) -> bool:
+        """Seek by delta_seconds relative to the current position.
+
+        Returns True if a seek was issued, False if there is no active session
+        to seek within (no cast / no known position) — issue #6 needs this so
+        the API can report a no-op.
+
+        Before computing the target, refresh from a live status read: after a
+        fresh play_media (e.g. session-loss recovery) the cached current_time
+        may still be stale from the previous, torn-down session, which would
+        make the seek land at stale_pos+delta instead of real_pos+delta
+        (issue #7 seek drift). Only trust the live read in real playback
+        states, mirroring _on_media_status / poll_status.
+        """
         if not self.cast:
-            return
+            return False
+        try:
+            mc = self.cast.media_controller
+            mc.update_status()
+            st = mc.status
+            if (
+                st is not None
+                and st.player_state in ("PLAYING", "PAUSED", "BUFFERING")
+                and st.current_time is not None
+            ):
+                self.current_time = st.current_time
+        except Exception as e:
+            log.debug("seek_relative: status refresh failed: %s", e)
         if self.current_time is None:
             log.debug("seek_relative: no current_time, skipping")
-            return
+            return False
         new_pos = max(0.0, self.current_time + delta_seconds)
         self._safe_cmd(lambda: self.cast.media_controller.seek(new_pos))
         self.current_time = new_pos
+        return True
 
     def adjust_volume(self, delta: int) -> None:
         if not self.cast:
