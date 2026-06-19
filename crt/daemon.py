@@ -83,7 +83,10 @@ async def main_async() -> None:
         except (YouTubeAuthError, FileNotFoundError) as e:
             log.warning("YouTube client unavailable, remote delete + sync disabled: %s", e)
 
-    player = PlayerCore(library, chromecast, youtube_client=yt_client)
+    player = PlayerCore(
+        library, chromecast, youtube_client=yt_client,
+        on_cache_miss=pipeline.wake_prepare,
+    )
 
     # Capture the running loop here so callbacks invoked from worker threads
     # (e.g. SyncEngine.run_sync_once dispatched via asyncio.to_thread) can
@@ -97,7 +100,11 @@ async def main_async() -> None:
             asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), main_loop)
 
         def _on_yt_add():
-            pipeline.wake_prepare()
+            # run_sync_once runs in a worker thread (asyncio.to_thread), so
+            # wake_prepare() -> asyncio.Event.set() must be marshalled onto the
+            # event loop or the awaiting prepare loop is not reliably woken
+            # (symmetric to _on_yt_remove's run_coroutine_threadsafe).
+            main_loop.call_soon_threadsafe(pipeline.wake_prepare)
 
         sync_engine = SyncEngine(
             library, yt_client, config.YT_PLAYLIST_ID,

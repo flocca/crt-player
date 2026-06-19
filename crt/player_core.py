@@ -11,6 +11,7 @@ import logging
 import os
 import socket
 from dataclasses import dataclass
+from typing import Callable
 
 from googleapiclient.errors import HttpError
 
@@ -53,15 +54,40 @@ def _get_local_ip() -> str:
 
 
 class PlayerCore:
-    def __init__(self, library: LibraryStore, chromecast: ChromecastManager, youtube_client=None) -> None:
+    def __init__(
+        self,
+        library: LibraryStore,
+        chromecast: ChromecastManager,
+        youtube_client=None,
+        on_cache_miss: Callable[[], None] | None = None,
+    ) -> None:
         self.library = library
         self.chromecast = chromecast
         self.youtube = youtube_client
+        # Invoked when an item's encoded file is found missing on disk and the
+        # item is re-queued (issue #10). Wired to pipeline.wake_prepare so the
+        # prepare loop re-downloads/re-encodes it immediately.
+        self._on_cache_miss = on_cache_miss
         self.state: str = "idle"
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _requeue_missing_cache(self, item: QueueItem) -> None:
+        """Demote an item whose encoded file vanished from disk so the prepare
+        loop re-downloads/re-encodes it, then wake the pipeline (issue #10).
+
+        Casting a stale filename 404s and leaves the Chromecast IDLE forever;
+        re-queueing is the only way out.
+        """
+        log.warning(
+            "Cache file for %s missing on disk (status=%s) — re-queueing for encode",
+            item.video_id, item.status,
+        )
+        item.requeue()
+        if self._on_cache_miss is not None:
+            self._on_cache_miss()
 
     def _index_of(self, video_id: str) -> int | None:
         for i, item in enumerate(self.library.items):
@@ -76,11 +102,15 @@ class PlayerCore:
 
     def _find_playable_index(self, *, start_idx: int, direction: int, wrap: bool) -> int | None:
         """Scan items starting at start_idx in `direction` (+1 forward, -1 backward),
-        returning the index of the first item with a non-empty filename (cache hit).
+        returning the index of the first item whose encoded file exists on disk.
 
         If `wrap` is True, continues from the opposite end after crossing the
         boundary, stopping when it would revisit start_idx. Returns None if no
         playable item exists in the scanned range.
+
+        A stale filename (set on the item but the MP4 is gone from disk) is NOT
+        a cache hit (issue #10) — such an item is demoted to queued so the
+        prepare loop re-encodes it, and the scan continues past it.
 
         Used by next/prev/toggle/on_playback_finished to skip items that are
         still encoding or queued — the remote should land only on cast-ready items.
@@ -90,8 +120,11 @@ class PlayerCore:
             return None
         idx = start_idx
         for _ in range(n):
-            if self.library.items[idx].filename:
+            item = self.library.items[idx]
+            if item.cache_file_present():
                 return idx
+            if item.filename:
+                self._requeue_missing_cache(item)
             idx += direction
             if idx < 0 or idx >= n:
                 if not wrap:
@@ -128,8 +161,9 @@ class PlayerCore:
         if new_idx is None:
             return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def prev(self) -> ActionResult:
         """Move cursor back to the previous playable item then cast.
@@ -154,8 +188,9 @@ class PlayerCore:
         if new_idx is None:
             return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def play(self, video_id: str) -> ActionResult:
         """Jump cursor to a specific video_id and cast.
@@ -166,8 +201,9 @@ class PlayerCore:
         if idx is None:
             raise KeyError(f"video_id not in library: {video_id}")
         self.library.cursor_video_id = video_id
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def toggle(self) -> ActionResult:
         """play→pause, paused→resume, idle→start nearest playable item.
@@ -197,25 +233,34 @@ class PlayerCore:
         if new_idx is None:
             return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def _recast_after_session_loss(self) -> ActionResult:
         """Recast the cursor item from its last known position after the media
         session was reclaimed by the TV (issue #7)."""
         idx = self._cursor_index()
-        if idx is None or not self.library.items[idx].filename:
-            log.info("toggle: session lost but cursor item not playable")
+        if idx is None:
+            log.info("toggle: session lost but no cursor item")
             return _NO_PLAYABLE
         item = self.library.items[idx]
+        if not item.cache_file_present():
+            # File vanished while the session was lost — recast is impossible.
+            # Re-queue so the pipeline rebuilds it (issue #10).
+            if item.filename:
+                self._requeue_missing_cache(item)
+            log.info("toggle: session lost but cursor item not playable")
+            return _NO_PLAYABLE
         resume_pos = self.chromecast.current_time or item.playback_position or 0.0
         item.playback_position = resume_pos
         log.info(
             "toggle: media session lost — recasting %s from %.1fs",
             item.video_id, resume_pos,
         )
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def stop(self) -> ActionResult:
         """Stop playback and set state to idle. Cursor stays on the current item;
@@ -305,28 +350,40 @@ class PlayerCore:
             self.state = "idle"
             return
         self.library.cursor_video_id = self.library.items[new_idx].video_id
-        await self._cast_current()
+        # The found item validated as cache-present, but if its file vanished in
+        # the find→cast window (TOCTOU) _cast_current re-queues and casts nothing
+        # — go idle rather than leave a phantom "casting" state.
+        if not await self._cast_current():
+            self.state = "idle"
 
     # ------------------------------------------------------------------
     # Cast helpers
     # ------------------------------------------------------------------
 
-    async def _cast_current(self) -> None:
+    async def _cast_current(self) -> bool:
         """Cast the item at the current cursor position.
 
-        No-op if the item is not in status='ready' or has no filename.
+        Returns True if the item was cast, False if nothing was cast (no cursor,
+        or the encoded file is missing). Callers translate False into an honest
+        ActionResult (issue #6) instead of reporting a phantom success.
         """
         idx = self._cursor_index()
         if idx is None:
-            return
+            return False
         item = self.library.items[idx]
-        if not item.filename:
-            log.info(
-                "Cursor item %s has no cache file (status=%s); waiting",
-                item.video_id,
-                item.status,
-            )
-            return
+        if not item.cache_file_present():
+            if item.filename:
+                # Stale filename — encoded file gone from disk (issue #10).
+                # Re-queue so the pipeline rebuilds it instead of casting a
+                # dead URL that 404s and leaves the Chromecast IDLE.
+                self._requeue_missing_cache(item)
+            else:
+                log.info(
+                    "Cursor item %s has no cache file (status=%s); waiting",
+                    item.video_id,
+                    item.status,
+                )
+            return False
 
         # Any item currently labelled playing/casting/paused but that's no longer
         # the cursor is stale — revert to "ready" so a future cursor move back
@@ -350,6 +407,7 @@ class PlayerCore:
         self.state = "casting"
         item.status = "playing"
         log.info("Casting %s (resume from %.1fs)", item.video_id, item.playback_position)
+        return True
 
     async def watch_natural_end(self) -> None:
         """Background loop: when the Chromecast reports natural end of the

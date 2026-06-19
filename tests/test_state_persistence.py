@@ -150,6 +150,63 @@ def test_load_fixup_playing_without_file(tmp_path, monkeypatch):
     assert qm.items[0].filename is None
 
 
+def test_load_fixup_ready_without_file(tmp_path, monkeypatch):
+    """Issue #10: a restored 'ready' item whose encoded file is gone must be
+    re-queued, not trusted — otherwise the cast path 404s forever after restart."""
+    temp_dir = str(tmp_path / "media")
+    os.makedirs(temp_dir)
+    monkeypatch.setattr("crt.config.TEMP_DIR", temp_dir)
+
+    path = str(tmp_path / "state.json")
+    data = {
+        "version": 3,
+        "cursor_video_id": None,
+        "loop_mode": False,
+        "items": [
+            {"url": "http://v", "id": "1", "title": "Vid",
+             "status": "ready", "progress": 0.0, "filename": "vid_pal.mp4"},
+        ],
+        "history": [],
+    }
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+    qm = LibraryStore()
+    qm.load_state(path)
+
+    assert qm.items[0].status == "queued"
+    assert qm.items[0].filename is None
+
+
+def test_load_fixup_ready_with_file(tmp_path, monkeypatch):
+    """A restored 'ready' item whose encoded file still exists stays ready."""
+    temp_dir = str(tmp_path / "media")
+    os.makedirs(temp_dir)
+    monkeypatch.setattr("crt.config.TEMP_DIR", temp_dir)
+    with open(os.path.join(temp_dir, "vid_pal.mp4"), "w") as f:
+        f.write("x")
+
+    path = str(tmp_path / "state.json")
+    data = {
+        "version": 3,
+        "cursor_video_id": None,
+        "loop_mode": False,
+        "items": [
+            {"url": "http://v", "id": "1", "title": "Vid",
+             "status": "ready", "progress": 0.0, "filename": "vid_pal.mp4"},
+        ],
+        "history": [],
+    }
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+    qm = LibraryStore()
+    qm.load_state(path)
+
+    assert qm.items[0].status == "ready"
+    assert qm.items[0].filename == "vid_pal.mp4"
+
+
 def test_load_missing_file():
     qm = LibraryStore()
     pos = qm.load_state("/nonexistent/path/state.json")

@@ -43,6 +43,31 @@ class QueueItem:
             "playlist_item_id": self.playlist_item_id,
         }
 
+    def cache_file_present(self) -> bool:
+        """True if this item has an encoded filename that still exists on disk.
+
+        The single source of truth for "is this item actually castable" — a
+        filename set on the item is NOT enough, the backing MP4 in TEMP_DIR can
+        be deleted out from under us (TTL cleanup, neighbor delete, crash). See
+        issue #10: casting a stale filename 404s and the Chromecast stays IDLE.
+        """
+        return bool(self.filename) and os.path.isfile(
+            os.path.join(config.TEMP_DIR, self.filename)
+        )
+
+    def requeue(self) -> None:
+        """Reset this item to a fresh 'queued' state so the pipeline rebuilds it.
+
+        The single re-queue contract used by every self-heal path (issue #10):
+        prepare_for_play, load_state, PlayerCore, and SyncEngine. Keeps
+        downloaded_path (so the encoder can reuse a complete raw download) and
+        playback_position (resume point survives a re-encode).
+        """
+        self.status = "queued"
+        self.filename = None
+        self.progress = 0.0
+        self.error = None
+
     @classmethod
     def from_dict(cls, d: dict) -> QueueItem:
         return cls(
@@ -151,22 +176,25 @@ class LibraryStore:
     def prepare_for_play(self, item: QueueItem) -> None:
         """Transition item to the correct pre-play state based on cache.
 
+        any status + filename set but file gone → queued (self-heal, issue #10)
         done/error + cached MP4 → ready (instant replay)
         done/error + no cache  → queued (pipeline will re-download)
-        ready / queued / downloading / encoding → unchanged
+        ready / queued / downloading / encoding (with file) → unchanged
         """
+        # A stale filename whose encoded file no longer exists on disk must be
+        # re-queued regardless of status (issue #10). A ready/playing item with
+        # a deleted cache file would otherwise be cast as a dead URL forever —
+        # the cast 404s, the Chromecast stays IDLE, and play() silently no-ops.
+        if item.filename and not item.cache_file_present():
+            item.requeue()
+            return
         if item.status not in ("done", "error"):
             return
-        if item.filename and os.path.isfile(
-            os.path.join(config.TEMP_DIR, item.filename)
-        ):
+        if item.cache_file_present():
             item.status = "ready"
             item.error = None
         else:
-            item.status = "queued"
-            item.filename = None
-            item.progress = 0.0
-            item.error = None
+            item.requeue()
 
     def move_to_front(self, item_id: str) -> bool:
         for i, item in enumerate(self.items):
@@ -322,18 +350,19 @@ class LibraryStore:
                 item.progress = 0.0
                 item.filename = None
             elif item.status == "playing":
-                if item.filename and os.path.isfile(
-                    os.path.join(config.TEMP_DIR, item.filename)
-                ):
+                if item.cache_file_present():
                     item.status = "ready"
+                    item.progress = 0.0
                 else:
-                    item.status = "queued"
-                    item.filename = None
-                item.progress = 0.0
+                    item.requeue()
+            elif item.status == "ready":
+                # A restored 'ready' item whose encoded file is gone must be
+                # re-queued, not trusted (issue #10) — otherwise the cast path
+                # would 404 forever after a restart.
+                if not item.cache_file_present():
+                    item.requeue()
             elif item.status == "done":
-                if item.filename and os.path.isfile(
-                    os.path.join(config.TEMP_DIR, item.filename)
-                ):
+                if item.cache_file_present():
                     item.status = "ready"
                 item.progress = 0.0
             self.items.append(item)

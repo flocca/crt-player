@@ -321,14 +321,41 @@ def test_prepare_for_play_error_without_cache_becomes_queued():
     assert item.error is None
 
 
-def test_prepare_for_play_ready_is_unchanged():
+def test_prepare_for_play_ready_is_unchanged(tmp_path):
     qm = LibraryStore()
     item = qm.add("https://youtube.com/watch?v=1")
     item.status = "ready"
     item.filename = "cached.mp4"
-    qm.prepare_for_play(item)
+    (tmp_path / "cached.mp4").write_text("x")
+    with patch.object(config_module, "TEMP_DIR", str(tmp_path)):
+        qm.prepare_for_play(item)
     assert item.status == "ready"
     assert item.filename == "cached.mp4"
+
+
+def test_prepare_for_play_ready_with_missing_file_requeues(tmp_path):
+    """Issue #10: a ready item whose encoded file vanished must be re-queued,
+    not left castable-but-dead."""
+    qm = LibraryStore()
+    item = qm.add("https://youtube.com/watch?v=1")
+    item.status = "ready"
+    item.filename = "gone.mp4"  # no such file on disk
+    with patch.object(config_module, "TEMP_DIR", str(tmp_path)):
+        qm.prepare_for_play(item)
+    assert item.status == "queued"
+    assert item.filename is None
+
+
+def test_prepare_for_play_playing_with_missing_file_requeues(tmp_path):
+    """Issue #10: same self-heal for an item still labelled 'playing'."""
+    qm = LibraryStore()
+    item = qm.add("https://youtube.com/watch?v=1")
+    item.status = "playing"
+    item.filename = "gone.mp4"
+    with patch.object(config_module, "TEMP_DIR", str(tmp_path)):
+        qm.prepare_for_play(item)
+    assert item.status == "queued"
+    assert item.filename is None
 
 
 def test_prepare_for_play_queued_is_unchanged():
