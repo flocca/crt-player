@@ -90,7 +90,24 @@ class SyncEngine:
         items_by_id = {item.video_id: item for item in self.library.items}
         self.library.items = [items_by_id[vid] for vid in snapshot_ids if vid in items_by_id]
 
-        if added_any and self._on_add is not None:
+        # Reconcile against on-disk cache: an item still in the playlist whose
+        # encoded file vanished (TTL cleanup, neighbor delete, crash, disk
+        # hiccup) is re-queued so the pipeline rebuilds it (issue #10).
+        # Without this an item with a deleted cache file stays stuck — casts
+        # 404 forever and nothing re-encodes it.
+        requeued_any = False
+        for item in self.library.items:
+            if item.filename and not item.cache_file_present():
+                log.warning(
+                    "Reconcile: cache file for %s (%s) gone from disk — re-queueing",
+                    item.title, item.video_id,
+                )
+                item.status = "queued"
+                item.filename = None
+                item.progress = 0.0
+                requeued_any = True
+
+        if (added_any or requeued_any) and self._on_add is not None:
             try:
                 self._on_add()
             except Exception:

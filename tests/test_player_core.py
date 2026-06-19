@@ -1,15 +1,35 @@
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from crt import config
 from crt.library_store import LibraryStore, QueueItem
 from crt.player_core import PlayerCore
+
+
+@pytest.fixture(autouse=True)
+def _cache_dir(tmp_path, monkeypatch):
+    """Point TEMP_DIR at an isolated dir so the encoded cache files the helpers
+    create (and that cache_file_present() checks — issue #10) live somewhere
+    real and per-test. SERVER_PORT is fixed for deterministic media URLs."""
+    monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "SERVER_PORT", 8765)
+    return tmp_path
+
+
+def _write_cache_file(filename):
+    os.makedirs(config.TEMP_DIR, exist_ok=True)
+    with open(os.path.join(config.TEMP_DIR, filename), "w") as f:
+        f.write("dummy")
 
 
 def _make_library(video_ids):
     ls = LibraryStore()
     for vid in video_ids:
-        ls.items.append(QueueItem(url=f"u/{vid}", video_id=vid, title=vid, status="ready", filename=f"{vid}.mp4"))
+        fname = f"{vid}.mp4"
+        _write_cache_file(fname)
+        ls.items.append(QueueItem(url=f"u/{vid}", video_id=vid, title=vid, status="ready", filename=fname))
     return ls
 
 
@@ -203,10 +223,6 @@ async def test_stop_and_remove_no_op_if_video_id_is_not_current():
 
 @pytest.mark.asyncio
 async def test_cast_current_calls_chromecast_cast_url(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_library(["A"])
     library.cursor_video_id = "A"
     library.items[0].status = "ready"
@@ -268,10 +284,6 @@ async def test_on_playback_finished_at_end_with_loop_wraps():
 async def test_prev_recasts_item_previously_playing(monkeypatch):
     """Regression: prev su item che era stato in 'playing' deve ri-castare,
     non bloccare con 'cursor not ready'. Il file è ancora in cache."""
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_library(["A", "B"])
     library.items[0].status = "playing"  # A era playing prima del next
     library.items[1].status = "playing"  # B sta playing ora
@@ -309,10 +321,6 @@ async def test_stop_resets_current_item_to_ready():
 @pytest.mark.asyncio
 async def test_toggle_after_stop_recasts_cursor_item(monkeypatch):
     """Regression: toggle dopo stop deve ricastare l'item corrente."""
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_library(["A", "B"])
     library.cursor_video_id = "A"
     library.items[0].status = "ready"  # post-stop
@@ -380,9 +388,11 @@ def _make_mixed_library(specs):
     ls = LibraryStore()
     for vid, playable in specs:
         if playable:
+            fname = f"{vid}.mp4"
+            _write_cache_file(fname)
             ls.items.append(QueueItem(
                 url=f"u/{vid}", video_id=vid, title=vid,
-                status="ready", filename=f"{vid}.mp4",
+                status="ready", filename=fname,
             ))
         else:
             ls.items.append(QueueItem(
@@ -394,10 +404,6 @@ def _make_mixed_library(specs):
 
 @pytest.mark.asyncio
 async def test_next_skips_items_without_filename(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
     library.cursor_video_id = "A"
     cc = _make_chromecast()
@@ -411,10 +417,6 @@ async def test_next_skips_items_without_filename(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prev_skips_items_without_filename(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
     library.cursor_video_id = "C"
     cc = _make_chromecast()
@@ -443,10 +445,6 @@ async def test_next_no_playable_forward_is_noop():
 
 @pytest.mark.asyncio
 async def test_next_with_loop_wraps_skipping_unready(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_mixed_library([("A", True), ("B", False), ("C", False)])
     library.cursor_video_id = "A"
     library.loop_mode = True
@@ -462,10 +460,6 @@ async def test_next_with_loop_wraps_skipping_unready(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_playback_finished_skips_unready_items(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
     library.cursor_video_id = "A"
     cc = _make_chromecast()
@@ -497,10 +491,6 @@ async def test_on_playback_finished_no_next_playable_goes_idle():
 
 @pytest.mark.asyncio
 async def test_toggle_idle_with_cursor_on_unready_finds_playable_forward(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
     library.cursor_video_id = "B"  # cursore su item non castabile
     cc = _make_chromecast()
@@ -531,10 +521,6 @@ async def test_toggle_idle_nothing_playable_is_noop():
 async def test_toggle_idle_with_cursor_on_ready_casts_cursor(monkeypatch):
     """Cursor item è già playable: toggle lo casta direttamente, senza
     scendere oltre."""
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_mixed_library([("A", True), ("B", True)])
     library.cursor_video_id = "B"
     cc = _make_chromecast()
@@ -652,10 +638,6 @@ async def test_delete_current_with_no_cursor_is_noop():
 
 @pytest.mark.asyncio
 async def test_prev_with_phantom_cursor_recovers_to_last_playable(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_library(["A", "B", "C"])
     library.cursor_video_id = "GHOST"  # not in library
     cc = _make_chromecast()
@@ -670,10 +652,6 @@ async def test_prev_with_phantom_cursor_recovers_to_last_playable(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prev_with_phantom_cursor_skips_unready(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_mixed_library([("A", True), ("B", True), ("C", False)])
     library.cursor_video_id = "GHOST"
     cc = _make_chromecast()
@@ -693,10 +671,6 @@ async def test_prev_with_phantom_cursor_skips_unready(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_next_returns_did_action_true_on_cast(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_library(["A", "B"])
     library.cursor_video_id = "A"
     cc = _make_chromecast()
@@ -749,10 +723,6 @@ async def test_prev_at_first_returns_cursor_unchanged():
 
 @pytest.mark.asyncio
 async def test_prev_phantom_cursor_returns_did_action_true(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_library(["A", "B"])
     library.cursor_video_id = "GHOST"
     cc = _make_chromecast()
@@ -799,10 +769,6 @@ async def test_toggle_idle_nothing_playable_returns_reason():
 
 @pytest.mark.asyncio
 async def test_toggle_with_lost_session_recasts_from_position(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_library(["A"])
     library.cursor_video_id = "A"
     cc = _make_chromecast()
@@ -824,10 +790,6 @@ async def test_toggle_with_lost_session_recasts_from_position(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_toggle_lost_session_no_playable_cursor_is_reported(monkeypatch):
-    from crt import config
-    monkeypatch.setattr(config, "TEMP_DIR", "/tmp")
-    monkeypatch.setattr(config, "SERVER_PORT", 8765)
-
     library = _make_mixed_library([("A", False)])  # cursor item not ready
     library.cursor_video_id = "A"
     cc = _make_chromecast()
@@ -882,3 +844,65 @@ async def test_seek_relative_reports_did_action_when_seek_issued():
     result = await pc.seek_relative(30)
 
     assert result.did_action is True
+
+
+# ---------------------------------------------------------------------
+# Issue #10: a missing encoded file (filename set, MP4 gone from disk) must
+# not be cast as a dead URL. The cast/find paths re-queue it and wake the
+# pipeline via the on_cache_miss callback instead of silently no-oping.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cast_current_requeues_when_cache_file_missing():
+    library = _make_library(["A"])
+    library.cursor_video_id = "A"
+    os.unlink(os.path.join(config.TEMP_DIR, "A.mp4"))  # file vanishes
+    cc = _make_chromecast()
+    woke = MagicMock()
+    pc = PlayerCore(library, cc, on_cache_miss=woke)
+
+    await pc._cast_current()
+
+    cc.cast_url.assert_not_called()
+    assert library.items[0].status == "queued"
+    assert library.items[0].filename is None
+    woke.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_next_skips_and_requeues_stale_cache_item():
+    library = _make_library(["A", "B", "C"])
+    library.cursor_video_id = "A"
+    os.unlink(os.path.join(config.TEMP_DIR, "B.mp4"))  # B's file gone
+    cc = _make_chromecast()
+    woke = MagicMock()
+    pc = PlayerCore(library, cc, on_cache_miss=woke)
+
+    await pc.next()
+
+    # B is skipped (stale cache) and re-queued; cursor lands on C.
+    assert library.cursor_video_id == "C"
+    assert library.items[1].status == "queued"
+    assert library.items[1].filename is None
+    woke.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_toggle_lost_session_missing_file_requeues():
+    library = _make_library(["A"])
+    library.cursor_video_id = "A"
+    os.unlink(os.path.join(config.TEMP_DIR, "A.mp4"))
+    cc = _make_chromecast()
+    cc.is_session_lost = MagicMock(return_value=True)
+    woke = MagicMock()
+    pc = PlayerCore(library, cc, on_cache_miss=woke)
+    pc.state = "paused"
+
+    result = await pc.toggle()
+
+    cc.cast_url.assert_not_called()
+    assert result.did_action is False
+    assert result.reason == "no_playable_item"
+    assert library.items[0].status == "queued"
+    woke.assert_called_once()

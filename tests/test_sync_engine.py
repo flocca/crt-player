@@ -41,6 +41,49 @@ def test_apply_diff_removes_items_not_in_playlist():
     assert [i.video_id for i in library.items] == ["vid1"]
 
 
+def test_apply_diff_requeues_item_with_missing_cache_file(monkeypatch, tmp_path):
+    """Issue #10: an item still in the playlist whose encoded file vanished is
+    re-queued during sync so the pipeline rebuilds it, and on_add fires to wake
+    the prepare loop."""
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
+
+    library = LibraryStore()
+    library.items.append(
+        QueueItem(url="u", video_id="A", title="A", status="ready", filename="A.mp4")
+    )  # filename set, but no file on disk
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    woke = MagicMock()
+    engine = SyncEngine(library, yt_client, playlist_id="PLxxx", on_add=woke)
+
+    engine.run_sync_once()
+
+    assert library.items[0].status == "queued"
+    assert library.items[0].filename is None
+    woke.assert_called_once()
+
+
+def test_apply_diff_keeps_item_with_present_cache_file(monkeypatch, tmp_path):
+    """The reconcile must not disturb an item whose encoded file still exists."""
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
+    (tmp_path / "A.mp4").write_text("x")
+
+    library = LibraryStore()
+    library.items.append(
+        QueueItem(url="u", video_id="A", title="A", status="ready", filename="A.mp4")
+    )
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    engine = SyncEngine(library, yt_client, playlist_id="PLxxx")
+
+    engine.run_sync_once()
+
+    assert library.items[0].status == "ready"
+    assert library.items[0].filename == "A.mp4"
+
+
 def test_apply_diff_reorders_existing_items_to_match_playlist():
     library = LibraryStore()
     library.items.append(QueueItem(url="u", video_id="A", title="A"))
