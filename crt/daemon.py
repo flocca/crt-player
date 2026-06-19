@@ -100,7 +100,11 @@ async def main_async() -> None:
             asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), main_loop)
 
         def _on_yt_add():
-            pipeline.wake_prepare()
+            # run_sync_once runs in a worker thread (asyncio.to_thread), so
+            # wake_prepare() -> asyncio.Event.set() must be marshalled onto the
+            # event loop or the awaiting prepare loop is not reliably woken
+            # (symmetric to _on_yt_remove's run_coroutine_threadsafe).
+            main_loop.call_soon_threadsafe(pipeline.wake_prepare)
 
         sync_engine = SyncEngine(
             library, yt_client, config.YT_PLAYLIST_ID,

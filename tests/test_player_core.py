@@ -889,6 +889,25 @@ async def test_next_skips_and_requeues_stale_cache_item():
 
 
 @pytest.mark.asyncio
+async def test_play_missing_file_returns_no_playable():
+    """Issue #1 from review: play() must not report did_action=true when the
+    cache file is gone and nothing is cast."""
+    library = _make_library(["A"])
+    os.unlink(os.path.join(config.TEMP_DIR, "A.mp4"))
+    cc = _make_chromecast()
+    woke = MagicMock()
+    pc = PlayerCore(library, cc, on_cache_miss=woke)
+
+    result = await pc.play("A")
+
+    cc.cast_url.assert_not_called()
+    assert result.did_action is False
+    assert result.reason == "no_playable_item"
+    assert library.items[0].status == "queued"
+    woke.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_toggle_lost_session_missing_file_requeues():
     library = _make_library(["A"])
     library.cursor_video_id = "A"

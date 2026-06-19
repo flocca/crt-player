@@ -97,14 +97,18 @@ class SyncEngine:
         # 404 forever and nothing re-encodes it.
         requeued_any = False
         for item in self.library.items:
+            # Never disturb the item that's actively on screen: a background
+            # sync must not flip the live (playing/casting/paused) item to
+            # 'queued' just because a stale isfile() check raced a mid-playback
+            # delete. Those paths self-heal at play time via PlayerCore instead.
+            if item.status in ("playing", "casting", "paused"):
+                continue
             if item.filename and not item.cache_file_present():
                 log.warning(
                     "Reconcile: cache file for %s (%s) gone from disk — re-queueing",
                     item.title, item.video_id,
                 )
-                item.status = "queued"
-                item.filename = None
-                item.progress = 0.0
+                item.requeue()
                 requeued_any = True
 
         if (added_any or requeued_any) and self._on_add is not None:

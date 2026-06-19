@@ -84,6 +84,26 @@ def test_apply_diff_keeps_item_with_present_cache_file(monkeypatch, tmp_path):
     assert library.items[0].filename == "A.mp4"
 
 
+def test_apply_diff_does_not_requeue_currently_playing_item(monkeypatch, tmp_path):
+    """Issue #2 from review: a background sync must not demote the live
+    (playing/casting/paused) item even if its cache file appears missing."""
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
+
+    library = LibraryStore()
+    library.items.append(
+        QueueItem(url="u", video_id="A", title="A", status="playing", filename="A.mp4")
+    )  # filename set, file not on disk, but item is live
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    engine = SyncEngine(library, yt_client, playlist_id="PLxxx")
+
+    engine.run_sync_once()
+
+    assert library.items[0].status == "playing"
+    assert library.items[0].filename == "A.mp4"
+
+
 def test_apply_diff_reorders_existing_items_to_match_playlist():
     library = LibraryStore()
     library.items.append(QueueItem(url="u", video_id="A", title="A"))

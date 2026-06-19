@@ -85,9 +85,7 @@ class PlayerCore:
             "Cache file for %s missing on disk (status=%s) — re-queueing for encode",
             item.video_id, item.status,
         )
-        item.status = "queued"
-        item.filename = None
-        item.progress = 0.0
+        item.requeue()
         if self._on_cache_miss is not None:
             self._on_cache_miss()
 
@@ -163,8 +161,9 @@ class PlayerCore:
         if new_idx is None:
             return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def prev(self) -> ActionResult:
         """Move cursor back to the previous playable item then cast.
@@ -189,8 +188,9 @@ class PlayerCore:
         if new_idx is None:
             return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def play(self, video_id: str) -> ActionResult:
         """Jump cursor to a specific video_id and cast.
@@ -201,8 +201,9 @@ class PlayerCore:
         if idx is None:
             raise KeyError(f"video_id not in library: {video_id}")
         self.library.cursor_video_id = video_id
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def toggle(self) -> ActionResult:
         """play→pause, paused→resume, idle→start nearest playable item.
@@ -232,8 +233,9 @@ class PlayerCore:
         if new_idx is None:
             return _NO_PLAYABLE
         self.library.cursor_video_id = self.library.items[new_idx].video_id
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def _recast_after_session_loss(self) -> ActionResult:
         """Recast the cursor item from its last known position after the media
@@ -256,8 +258,9 @@ class PlayerCore:
             "toggle: media session lost — recasting %s from %.1fs",
             item.video_id, resume_pos,
         )
-        await self._cast_current()
-        return _DID_ACTION
+        if await self._cast_current():
+            return _DID_ACTION
+        return _NO_PLAYABLE
 
     async def stop(self) -> ActionResult:
         """Stop playback and set state to idle. Cursor stays on the current item;
@@ -347,20 +350,26 @@ class PlayerCore:
             self.state = "idle"
             return
         self.library.cursor_video_id = self.library.items[new_idx].video_id
-        await self._cast_current()
+        # The found item validated as cache-present, but if its file vanished in
+        # the find→cast window (TOCTOU) _cast_current re-queues and casts nothing
+        # — go idle rather than leave a phantom "casting" state.
+        if not await self._cast_current():
+            self.state = "idle"
 
     # ------------------------------------------------------------------
     # Cast helpers
     # ------------------------------------------------------------------
 
-    async def _cast_current(self) -> None:
+    async def _cast_current(self) -> bool:
         """Cast the item at the current cursor position.
 
-        No-op if the item is not in status='ready' or has no filename.
+        Returns True if the item was cast, False if nothing was cast (no cursor,
+        or the encoded file is missing). Callers translate False into an honest
+        ActionResult (issue #6) instead of reporting a phantom success.
         """
         idx = self._cursor_index()
         if idx is None:
-            return
+            return False
         item = self.library.items[idx]
         if not item.cache_file_present():
             if item.filename:
@@ -374,7 +383,7 @@ class PlayerCore:
                     item.video_id,
                     item.status,
                 )
-            return
+            return False
 
         # Any item currently labelled playing/casting/paused but that's no longer
         # the cursor is stale — revert to "ready" so a future cursor move back
@@ -398,6 +407,7 @@ class PlayerCore:
         self.state = "casting"
         item.status = "playing"
         log.info("Casting %s (resume from %.1fs)", item.video_id, item.playback_position)
+        return True
 
     async def watch_natural_end(self) -> None:
         """Background loop: when the Chromecast reports natural end of the

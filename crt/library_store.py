@@ -55,6 +55,19 @@ class QueueItem:
             os.path.join(config.TEMP_DIR, self.filename)
         )
 
+    def requeue(self) -> None:
+        """Reset this item to a fresh 'queued' state so the pipeline rebuilds it.
+
+        The single re-queue contract used by every self-heal path (issue #10):
+        prepare_for_play, load_state, PlayerCore, and SyncEngine. Keeps
+        downloaded_path (so the encoder can reuse a complete raw download) and
+        playback_position (resume point survives a re-encode).
+        """
+        self.status = "queued"
+        self.filename = None
+        self.progress = 0.0
+        self.error = None
+
     @classmethod
     def from_dict(cls, d: dict) -> QueueItem:
         return cls(
@@ -173,10 +186,7 @@ class LibraryStore:
         # a deleted cache file would otherwise be cast as a dead URL forever —
         # the cast 404s, the Chromecast stays IDLE, and play() silently no-ops.
         if item.filename and not item.cache_file_present():
-            item.status = "queued"
-            item.filename = None
-            item.progress = 0.0
-            item.error = None
+            item.requeue()
             return
         if item.status not in ("done", "error"):
             return
@@ -184,10 +194,7 @@ class LibraryStore:
             item.status = "ready"
             item.error = None
         else:
-            item.status = "queued"
-            item.filename = None
-            item.progress = 0.0
-            item.error = None
+            item.requeue()
 
     def move_to_front(self, item_id: str) -> bool:
         for i, item in enumerate(self.items):
@@ -343,22 +350,17 @@ class LibraryStore:
                 item.progress = 0.0
                 item.filename = None
             elif item.status == "playing":
-                if item.filename and os.path.isfile(
-                    os.path.join(config.TEMP_DIR, item.filename)
-                ):
+                if item.cache_file_present():
                     item.status = "ready"
+                    item.progress = 0.0
                 else:
-                    item.status = "queued"
-                    item.filename = None
-                item.progress = 0.0
+                    item.requeue()
             elif item.status == "ready":
                 # A restored 'ready' item whose encoded file is gone must be
                 # re-queued, not trusted (issue #10) — otherwise the cast path
                 # would 404 forever after a restart.
                 if not item.cache_file_present():
-                    item.status = "queued"
-                    item.filename = None
-                    item.progress = 0.0
+                    item.requeue()
             elif item.status == "done":
                 if item.cache_file_present():
                     item.status = "ready"
