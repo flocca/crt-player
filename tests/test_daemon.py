@@ -12,7 +12,7 @@ async def test_periodic_save_loop_saves_repeatedly(tmp_path):
     shutdown, so a crash/OOM/reboot loses at most one interval of changes."""
     library = MagicMock()
     chromecast = MagicMock()
-    chromecast.current_time = 12.0
+    chromecast.live_current_time = 12.0
     state_file = str(tmp_path / "state.json")
 
     task = asyncio.create_task(
@@ -35,7 +35,7 @@ async def test_periodic_save_loop_survives_save_error(tmp_path):
     library = MagicMock()
     library.save_state.side_effect = OSError("disk full")
     chromecast = MagicMock()
-    chromecast.current_time = 0.0
+    chromecast.live_current_time = 0.0
     state_file = str(tmp_path / "state.json")
 
     task = asyncio.create_task(
@@ -56,7 +56,7 @@ async def test_periodic_save_loop_handles_none_current_time(tmp_path):
     """current_time may be None before the first media-status event."""
     library = MagicMock()
     chromecast = MagicMock()
-    chromecast.current_time = None
+    chromecast.live_current_time = None
     state_file = str(tmp_path / "state.json")
 
     task = asyncio.create_task(

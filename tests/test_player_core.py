@@ -40,6 +40,7 @@ def _make_chromecast():
     cc.stop = MagicMock()
     cc.pause_or_resume = MagicMock()
     cc.player_state = "IDLE"
+    cc.live_current_time = 0.0
     cc.wait_for_connection = AsyncMock()
     # Default: a live media session exists, so toggle takes the normal
     # pause/resume path rather than the session-loss recast path (issue #7).
@@ -316,6 +317,65 @@ async def test_stop_resets_current_item_to_ready():
 
     assert pc.state == "idle"
     assert library.items[0].status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_stop_saves_live_position_for_resume():
+    """Regression (issue #13): stop must snapshot the live position onto the
+    cursor item so a later toggle/play resumes near where playback left off,
+    instead of relying solely on the 30s periodic save (which can be
+    arbitrarily stale, or never have ticked at all for a short session)."""
+    library = _make_library(["A"])
+    library.items[0].status = "playing"
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    cc.live_current_time = 245.0
+    pc = PlayerCore(library, cc)
+    pc.state = "playing"
+
+    await pc.stop()
+
+    assert library.items[0].playback_position == 245.0
+
+
+@pytest.mark.asyncio
+async def test_stop_captures_position_before_issuing_chromecast_stop():
+    """The live position must be read BEFORE chromecast.stop() tears down the
+    media session — reading it after risks an already-reset/stale value."""
+    library = _make_library(["A"])
+    library.items[0].status = "playing"
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    cc.live_current_time = 245.0
+
+    def _reset_on_stop():
+        cc.live_current_time = 0.0
+
+    cc.stop = MagicMock(side_effect=_reset_on_stop)
+    pc = PlayerCore(library, cc)
+    pc.state = "playing"
+
+    await pc.stop()
+
+    assert library.items[0].playback_position == 245.0
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_touch_position_when_not_playing():
+    """A stop issued while the cursor item is already idle/ready must not
+    clobber a previously saved resume position with a bogus live read."""
+    library = _make_library(["A"])
+    library.items[0].status = "ready"
+    library.items[0].playback_position = 88.0
+    library.cursor_video_id = "A"
+    cc = _make_chromecast()
+    cc.live_current_time = 3.0
+    pc = PlayerCore(library, cc)
+    pc.state = "idle"
+
+    await pc.stop()
+
+    assert library.items[0].playback_position == 88.0
 
 
 @pytest.mark.asyncio

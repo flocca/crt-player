@@ -264,14 +264,24 @@ class PlayerCore:
 
     async def stop(self) -> ActionResult:
         """Stop playback and set state to idle. Cursor stays on the current item;
-        its status reverts to 'ready' so a subsequent toggle/play can re-cast it."""
+        its status reverts to 'ready' so a subsequent toggle/play re-casts it
+        from where it left off.
+
+        The live position is snapshotted BEFORE issuing the stop command
+        (issue #13): chromecast.stop() tears down the media session, after
+        which the cached position may already reflect the post-teardown
+        state. Without this, resume relied solely on the 30s periodic save,
+        which can be stale by up to a full interval — or, for a session
+        stopped within the first 30s, never have saved at all — landing the
+        next play back near the beginning instead of where playback left off.
+        """
+        idx = self._cursor_index()
+        item = self.library.items[idx] if idx is not None else None
+        if item is not None and item.status in ("playing", "casting", "paused"):
+            item.playback_position = self.chromecast.live_current_time or item.playback_position or 0.0
+            item.status = "ready"
         await asyncio.to_thread(self.chromecast.stop)
         self.state = "idle"
-        idx = self._cursor_index()
-        if idx is not None:
-            item = self.library.items[idx]
-            if item.status in ("playing", "casting", "paused"):
-                item.status = "ready"
         return _DID_ACTION
 
     async def stop_and_remove(self, video_id: str) -> None:

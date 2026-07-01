@@ -68,6 +68,41 @@ def _make_manager_with_status(cached_time, status):
     return mgr
 
 
+# ─── live_current_time property (issue #12/#13) ───
+
+
+def test_live_current_time_uses_adjusted_time_when_playing():
+    status = MagicMock()
+    status.player_state = "PLAYING"
+    status.adjusted_current_time = 180.0
+    mgr = _make_manager_with_status(cached_time=5.0, status=status)
+
+    assert mgr.live_current_time == 180.0
+
+
+def test_live_current_time_falls_back_to_cached_when_no_live_status():
+    mgr = _make_manager_with_status(cached_time=42.0, status=None)
+
+    assert mgr.live_current_time == 42.0
+
+
+def test_live_current_time_falls_back_to_cached_in_non_playback_state():
+    status = MagicMock()
+    status.player_state = "UNKNOWN"
+    status.adjusted_current_time = 0.0
+    mgr = _make_manager_with_status(cached_time=60.0, status=status)
+
+    assert mgr.live_current_time == 60.0
+
+
+def test_live_current_time_falls_back_to_cached_with_no_cast():
+    mgr = ChromecastManager.__new__(ChromecastManager)
+    mgr.cast = None
+    mgr.current_time = 12.0
+
+    assert mgr.live_current_time == 12.0
+
+
 def test_seek_relative_returns_true_when_seek_issued():
     mgr = _make_manager(current_time=10.0)
     assert mgr.seek_relative(30) is True

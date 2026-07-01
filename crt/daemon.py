@@ -60,7 +60,10 @@ async def periodic_save_loop(
     while True:
         await asyncio.sleep(interval_s)
         try:
-            pos = getattr(chromecast, "current_time", 0.0) or 0.0
+            # live_current_time (not the current_time snapshot) so a tick
+            # landing between two status pushes during a long steady PLAYING
+            # stretch still saves close to the real position (issue #12/#13).
+            pos = getattr(chromecast, "live_current_time", 0.0) or 0.0
             library.save_state(state_file, playback_position=pos)
             log.debug("periodic save_state -> %s (pos=%.1f)", state_file, pos)
         except Exception:
@@ -166,7 +169,7 @@ async def main_async() -> None:
             t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    library.save_state(config.STATE_FILE, playback_position=chromecast.current_time)
+    library.save_state(config.STATE_FILE, playback_position=chromecast.live_current_time)
     chromecast.set_status_callback(None)
     chromecast.set_connection_callback(None)
     pipeline.cancel_current()

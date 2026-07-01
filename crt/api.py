@@ -76,7 +76,7 @@ def create_app(
             "player": {
                 "state": getattr(pc, "state", "idle") if pc else "idle",
                 "current_video_id": library.cursor_video_id,
-                "current_time_s": getattr(cc, "current_time", None) if cc else None,
+                "current_time_s": getattr(cc, "live_current_time", None) if cc else None,
                 "duration_s": getattr(cc, "duration", None) if cc else None,
                 "chromecast": "connected" if (cc and getattr(cc, "connected", False)) else "disconnected",
             },

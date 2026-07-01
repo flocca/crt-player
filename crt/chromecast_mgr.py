@@ -289,33 +289,40 @@ class ChromecastManager:
         self._safe_cmd(lambda: self.cast.media_controller.seek(position))
         self.current_time = position
 
+    @property
+    def live_current_time(self) -> float | None:
+        """Best-effort live playback position, computed fresh on every read.
+
+        Prefers `adjusted_current_time` off the already-cached live status
+        over the `self.current_time` snapshot: the receiver doesn't push a
+        status message every second, so during a long steady PLAYING
+        stretch the snapshot can be stale by minutes (issue #12/#13 —
+        seek-forward landing behind the real position, and resume-from-stop
+        restarting near the beginning). `adjusted_current_time` needs no
+        round trip: pychromecast extrapolates it locally from elapsed
+        wall-clock time since the last received push. Only trust it in real
+        playback states, mirroring _on_media_status / poll_status — falls
+        back to the cached snapshot otherwise (e.g. no cast yet, or session
+        torn down).
+        """
+        if self.cast is not None:
+            status = self.cast.media_controller.status
+            if status is not None and status.player_state in ("PLAYING", "PAUSED", "BUFFERING"):
+                adjusted = status.adjusted_current_time
+                if adjusted is not None:
+                    return adjusted
+        return self.current_time
+
     def seek_relative(self, delta_seconds: float) -> bool:
         """Seek by delta_seconds relative to the current live position.
 
         Returns True if a seek was issued, False if there is no active session
         to seek within (no cast / no known position) — issue #6 needs this so
         the API can report a no-op.
-
-        Reads `adjusted_current_time` off the already-cached live status
-        instead of the cached `self.current_time` snapshot: the receiver
-        doesn't push a status message every second, so during a long steady
-        PLAYING stretch the snapshot can be stale by minutes, landing the
-        seek well behind the real position (issue #12 seek drift — a
-        follow-up on #7, which only refreshed on session-loss recovery via a
-        fire-and-forget `update_status()` that raced the read and rarely won).
-        `adjusted_current_time` needs no round trip: pychromecast extrapolates
-        it locally from elapsed wall-clock time since the last received push.
-        Only trust it in real playback states, mirroring _on_media_status /
-        poll_status.
         """
         if not self.cast:
             return False
-        live_time = self.current_time
-        status = self.cast.media_controller.status
-        if status is not None and status.player_state in ("PLAYING", "PAUSED", "BUFFERING"):
-            adjusted = status.adjusted_current_time
-            if adjusted is not None:
-                live_time = adjusted
+        live_time = self.live_current_time
         if live_time is None:
             log.debug("seek_relative: no current_time, skipping")
             return False
