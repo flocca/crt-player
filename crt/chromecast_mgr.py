@@ -99,8 +99,13 @@ class ChromecastManager:
         # session is torn down (e.g. after a long pause), pychromecast reports
         # current_time=0 together with player_state=UNKNOWN/IDLE — clobbering
         # the real pause position we need for recast resume.
+        # Use adjusted_current_time (extrapolated from elapsed wall-clock
+        # time since the last push), not the raw per-message current_time:
+        # the receiver doesn't push a status message every second, so during
+        # a long steady PLAYING stretch the raw value can be stale by
+        # minutes (issue #12 seek drift).
         if self.player_state in ("PLAYING", "PAUSED", "BUFFERING"):
-            self.current_time = status.current_time or 0.0
+            self.current_time = status.adjusted_current_time or 0.0
             self.duration = status.duration or 0.0
         if status.volume_level is not None:
             self.volume = status.volume_level
@@ -157,9 +162,10 @@ class ChromecastManager:
             self.player_state = status.player_state or "UNKNOWN"
             # Same rationale as _on_media_status: keep the last known good
             # current_time when the session is torn down so recast can resume
-            # from the actual pause position.
+            # from the actual pause position, and prefer adjusted_current_time
+            # over the raw snapshot (issue #12 seek drift).
             if self.player_state in ("PLAYING", "PAUSED", "BUFFERING"):
-                self.current_time = status.current_time or 0.0
+                self.current_time = status.adjusted_current_time or 0.0
                 self.duration = status.duration or 0.0
             if status.volume_level is not None:
                 self.volume = status.volume_level
@@ -284,37 +290,36 @@ class ChromecastManager:
         self.current_time = position
 
     def seek_relative(self, delta_seconds: float) -> bool:
-        """Seek by delta_seconds relative to the current position.
+        """Seek by delta_seconds relative to the current live position.
 
         Returns True if a seek was issued, False if there is no active session
         to seek within (no cast / no known position) — issue #6 needs this so
         the API can report a no-op.
 
-        Before computing the target, refresh from a live status read: after a
-        fresh play_media (e.g. session-loss recovery) the cached current_time
-        may still be stale from the previous, torn-down session, which would
-        make the seek land at stale_pos+delta instead of real_pos+delta
-        (issue #7 seek drift). Only trust the live read in real playback
-        states, mirroring _on_media_status / poll_status.
+        Reads `adjusted_current_time` off the already-cached live status
+        instead of the cached `self.current_time` snapshot: the receiver
+        doesn't push a status message every second, so during a long steady
+        PLAYING stretch the snapshot can be stale by minutes, landing the
+        seek well behind the real position (issue #12 seek drift — a
+        follow-up on #7, which only refreshed on session-loss recovery via a
+        fire-and-forget `update_status()` that raced the read and rarely won).
+        `adjusted_current_time` needs no round trip: pychromecast extrapolates
+        it locally from elapsed wall-clock time since the last received push.
+        Only trust it in real playback states, mirroring _on_media_status /
+        poll_status.
         """
         if not self.cast:
             return False
-        try:
-            mc = self.cast.media_controller
-            mc.update_status()
-            st = mc.status
-            if (
-                st is not None
-                and st.player_state in ("PLAYING", "PAUSED", "BUFFERING")
-                and st.current_time is not None
-            ):
-                self.current_time = st.current_time
-        except Exception as e:
-            log.debug("seek_relative: status refresh failed: %s", e)
-        if self.current_time is None:
+        live_time = self.current_time
+        status = self.cast.media_controller.status
+        if status is not None and status.player_state in ("PLAYING", "PAUSED", "BUFFERING"):
+            adjusted = status.adjusted_current_time
+            if adjusted is not None:
+                live_time = adjusted
+        if live_time is None:
             log.debug("seek_relative: no current_time, skipping")
             return False
-        new_pos = max(0.0, self.current_time + delta_seconds)
+        new_pos = max(0.0, live_time + delta_seconds)
         self._safe_cmd(lambda: self.cast.media_controller.seek(new_pos))
         self.current_time = new_pos
         return True
