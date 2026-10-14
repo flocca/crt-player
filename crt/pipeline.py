@@ -226,6 +226,7 @@ class PipelineWorker:
         self._prepare_wake = asyncio.Event()
         self._cast_wake = asyncio.Event()
         self._current_proc: asyncio.subprocess.Process | None = None
+        self._preparing: QueueItem | None = None  # item inside _prepare_one
         self._on_update: Callable | None = None
         self.resume_position: float = 0.0
         self._cast_enabled: bool = False  # True once user explicitly starts playback
@@ -243,6 +244,17 @@ class PipelineWorker:
         self._prepare_cancel.set()
         if self._current_proc and self._current_proc.returncode is None:
             self._current_proc.terminate()
+
+    def cancel_prepare_for(self, video_id: str) -> None:
+        """Cancel the preparation in progress if it is for video_id.
+
+        Called when a video leaves the library (issue #17): otherwise the
+        worker keeps the removed item and ffmpeg runs to the end, holding up
+        the queue for a video nobody can play any more.
+        """
+        if self._preparing is not None and self._preparing.video_id == video_id:
+            log.info("Cancelling preparation of %s: removed from the library", video_id)
+            self.cancel_prepare()
 
     def cancel_cast(self) -> None:
         self._cast_cancel.set()
@@ -319,6 +331,7 @@ class PipelineWorker:
             await self._cast_and_wait(item)
 
     async def _prepare_one(self, item: QueueItem) -> None:
+        self._preparing = item
         try:
             item.title, video_id = await fetch_title(item.url)
             if video_id:
@@ -385,6 +398,12 @@ class PipelineWorker:
             await encode_video(downloaded_path, encoded_path, duration, enc_progress, worker=self)
 
             if self._prepare_cancel.is_set():
+                # A terminated ffmpeg leaves a truncated file under the canonical
+                # name, which the cache check above would take as ready (issue #17).
+                try:
+                    os.unlink(encoded_path)
+                except OSError:
+                    pass
                 item.status = "queued"
                 item.progress = 0.0
                 self.notify()
@@ -400,6 +419,8 @@ class PipelineWorker:
             item.status = "error"
             item.error = str(e)
             self.notify()
+        finally:
+            self._preparing = None
 
     async def _cast_and_wait(self, item: QueueItem) -> None:
         item.status = "casting"

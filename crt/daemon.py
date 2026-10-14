@@ -119,6 +119,8 @@ async def main_async() -> None:
     if yt_client is not None:
         def _on_yt_remove(video_id: str):
             asyncio.run_coroutine_threadsafe(player.stop_and_remove(video_id), main_loop)
+            # Stop a download/encode of the removed video too (issue #17).
+            main_loop.call_soon_threadsafe(pipeline.cancel_prepare_for, video_id)
 
         def _on_yt_add():
             # run_sync_once runs in a worker thread (asyncio.to_thread), so

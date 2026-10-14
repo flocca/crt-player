@@ -237,3 +237,80 @@ def test_pipeline_worker_loop_mode_reads_from_config(monkeypatch):
     from unittest.mock import MagicMock
     worker = PipelineWorker(MagicMock(), MagicMock())
     assert worker.loop_mode is True
+
+
+def _worker_with_slow_encode(monkeypatch, tmp_path, video_id="A"):
+    """A PipelineWorker whose encode runs until terminated, like a long ffmpeg."""
+    from crt import pipeline as pl
+    from crt.library_store import LibraryStore
+    monkeypatch.setattr(config_module, "TEMP_DIR", str(tmp_path))
+    item = QueueItem(url=f"https://www.youtube.com/watch?v={video_id}", video_id=video_id)
+    library = LibraryStore()
+    library.items.append(item)
+    worker = pl.PipelineWorker(library, MagicMock())
+    encoding = asyncio.Event()
+
+    async def fake_title(url):
+        return video_id, video_id
+
+    async def fake_download(url, temp_dir, on_progress):
+        path = os.path.join(temp_dir, f"{video_id}.mp4")
+        with open(path, "w") as f:
+            f.write("source")
+        return path, 10.0
+
+    async def fake_encode(input_path, output_path, duration, on_progress, worker=None):
+        with open(output_path, "w") as f:
+            f.write("partial")
+        proc = await asyncio.create_subprocess_exec("sleep", "30")
+        worker._current_proc = proc
+        encoding.set()
+        await proc.wait()
+        worker._current_proc = None
+        return output_path
+
+    monkeypatch.setattr(pl, "fetch_title", fake_title)
+    monkeypatch.setattr(pl, "download_video", fake_download)
+    monkeypatch.setattr(pl, "encode_video", fake_encode)
+    return worker, item, encoding
+
+
+@pytest.mark.asyncio
+async def test_cancel_prepare_for_stops_the_encode_of_that_video(monkeypatch, tmp_path):
+    """Issue #17: a video removed from the playlist while encoding kept ffmpeg
+    busy to the end, holding up the whole queue."""
+    worker, item, encoding = _worker_with_slow_encode(monkeypatch, tmp_path)
+    task = asyncio.create_task(worker._prepare_one(item))
+    await asyncio.wait_for(encoding.wait(), 2)
+
+    worker.cancel_prepare_for("A")
+
+    await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
+async def test_cancel_prepare_for_leaves_other_videos_alone(monkeypatch, tmp_path):
+    worker, item, encoding = _worker_with_slow_encode(monkeypatch, tmp_path)
+    task = asyncio.create_task(worker._prepare_one(item))
+    await asyncio.wait_for(encoding.wait(), 2)
+
+    worker.cancel_prepare_for("B")
+    await asyncio.sleep(0.2)
+
+    assert not task.done()
+    worker.cancel_prepare()
+    await asyncio.wait_for(task, 2)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_encode_leaves_no_partial_file(monkeypatch, tmp_path):
+    """Issue #17: a truncated encoded file left behind would be taken as ready
+    ("Using cached encoded file") if the video came back into the queue."""
+    worker, item, encoding = _worker_with_slow_encode(monkeypatch, tmp_path)
+    task = asyncio.create_task(worker._prepare_one(item))
+    await asyncio.wait_for(encoding.wait(), 2)
+
+    worker.cancel_prepare()
+    await asyncio.wait_for(task, 2)
+
+    assert not (tmp_path / cached_encoded_filename("A")).exists()
