@@ -104,6 +104,129 @@ def test_apply_diff_does_not_requeue_currently_playing_item(monkeypatch, tmp_pat
     assert library.items[0].filename == "A.mp4"
 
 
+def _failed_download(video_id="A"):
+    # A failed download never produces a file: filename stays None.
+    return QueueItem(
+        url="u", video_id=video_id, title=video_id,
+        status="error", error="HTTP Error 403: Forbidden",
+    )
+
+
+def _fake_clock(start=1000.0):
+    now = [start]
+    return now, (lambda: now[0])
+
+
+def test_apply_diff_requeues_failed_download():
+    """Issue #14: a failed download leaves filename=None, so the missing-cache
+    reconcile never saw it and the item stayed in 'error' forever. The sync
+    re-queues it and wakes the pipeline."""
+    library = LibraryStore()
+    library.items.append(_failed_download())
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    woke = MagicMock()
+    engine = SyncEngine(library, yt_client, playlist_id="PLxxx", on_add=woke)
+
+    engine.run_sync_once()
+
+    assert library.items[0].status == "queued"
+    assert library.items[0].error is None
+    woke.assert_called_once()
+
+
+def test_apply_diff_backs_off_between_retries_of_a_failing_download():
+    """A video that keeps failing (removed from YouTube, long outage) is not
+    retried at every sync: the wait doubles after each failed retry."""
+    now, clock = _fake_clock()
+    library = LibraryStore()
+    library.items.append(_failed_download())
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    engine = SyncEngine(library, yt_client, playlist_id="PLxxx", clock=clock)
+    base = SyncEngine.RETRY_BACKOFF_BASE_S
+    item = library.items[0]
+
+    engine.run_sync_once()  # first retry: right away
+    assert item.status == "queued"
+
+    item.status = "error"  # the retry failed too
+    engine.run_sync_once()
+    assert item.status == "error"
+
+    now[0] += base
+    engine.run_sync_once()  # second retry after base
+    assert item.status == "queued"
+
+    item.status = "error"
+    now[0] += base
+    engine.run_sync_once()  # third retry needs 2 * base
+    assert item.status == "error"
+
+    now[0] += base
+    engine.run_sync_once()
+    assert item.status == "queued"
+
+
+def test_apply_diff_caps_retry_backoff():
+    now, clock = _fake_clock()
+    library = LibraryStore()
+    library.items.append(_failed_download())
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    engine = SyncEngine(library, yt_client, playlist_id="PLxxx", clock=clock)
+    item = library.items[0]
+
+    for _ in range(20):
+        now[0] += SyncEngine.RETRY_BACKOFF_MAX_S
+        engine.run_sync_once()
+        assert item.status == "queued"
+        item.status = "error"
+
+
+def test_apply_diff_resets_retry_backoff_after_a_successful_download(monkeypatch, tmp_path):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
+    now, clock = _fake_clock()
+    library = LibraryStore()
+    library.items.append(_failed_download())
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    engine = SyncEngine(library, yt_client, playlist_id="PLxxx", clock=clock)
+    item = library.items[0]
+
+    engine.run_sync_once()  # retry succeeds
+    (tmp_path / "A.mp4").write_text("x")
+    item.status, item.filename = "ready", "A.mp4"
+    engine.run_sync_once()
+
+    item.status, item.filename = "error", None  # a later, unrelated failure
+    engine.run_sync_once()
+
+    assert item.status == "queued"
+
+
+def test_apply_diff_forgets_retry_backoff_of_a_video_removed_from_playlist():
+    """Removing a video and adding it back gives it a fresh start."""
+    now, clock = _fake_clock()
+    library = LibraryStore()
+    library.items.append(_failed_download())
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    engine = SyncEngine(library, yt_client, playlist_id="PLxxx", clock=clock)
+
+    engine.run_sync_once()  # first retry spent
+    yt_client.list_playlist_items.return_value = []
+    engine.run_sync_once()  # removed
+    yt_client.list_playlist_items.return_value = [_entry("A", "A", 0)]
+    engine.run_sync_once()  # added back, fresh item
+    library.items[0].status = "error"  # and its download fails
+
+    engine.run_sync_once()
+
+    assert library.items[0].status == "queued"
+
+
 def test_apply_diff_reorders_existing_items_to_match_playlist():
     library = LibraryStore()
     library.items.append(QueueItem(url="u", video_id="A", title="A"))

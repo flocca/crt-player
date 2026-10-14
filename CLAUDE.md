@@ -53,6 +53,8 @@ Client/server. A headless **daemon** (`crt/daemon.py`, started by `./run.sh` or 
 
 **Playlist model:** `done` is informational only — not a terminal state. The cast loop uses `advance_cursor()` on `LibraryStore` to find the next item by queue position, looping back if `loop_mode=True`. `prepare_for_play()` transitions `done`/`error` items to `ready` (cache hit) or `queued` (cache miss) before casting.
 
+**Failed downloads are retried by the sync (issue #14):** an `error` item never has a `filename`, so the missing-cache reconcile can't see it. `SyncEngine._apply_diff` re-queues it at the next sync, then waits 10 min, 20, 40… up to 6 h between retries (`RETRY_BACKOFF_BASE_S`/`RETRY_BACKOFF_MAX_S`). The backoff lives in memory: a daemon restart retries every `error` item at the first sync, and removing a video from the playlist forgets its count.
+
 **Encoding pipeline:** `_detect_crop()` runs a cropdetect pre-pass (120 frames) to remove baked-in black bars from the source. `_build_video_filter()` then applies scale+crop or scale+pad based on `CRT_SCALE_MODE`, and stretches the result to 16:9 (1024x576) so the Chromecast doesn't add pillarboxing — the user's HW squeezes 16:9→4:3 restoring correct proportions.
 
 **Encoding cache:** Cached files are named `{video_id}_pal_{scale_mode}.mp4` in TEMP_DIR (back-compat shape; when any `CRT_MARGIN_*` is non-zero the name gains a `_m{top}-{bottom}-{left}-{right}` suffix). Changing `CRT_SCALE_MODE` or any margin triggers re-encode. The filename helper lives in `crt/config.py` as `cached_encoded_filename()` so `crt/pipeline.py` and `crt/library_store.py` agree. Files live for `FILE_TTL_HOURS` (default 24h). `fetch_title()` returns `(title, video_id)`.

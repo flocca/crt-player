@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from crt import config
@@ -19,8 +20,12 @@ class SyncEngine:
     - new YT items → added to library as `queued`
     - YT removals → removed from library, cache files deleted
     - YT order changes → library reordered to match
+    - failed downloads → retried at later syncs, with a doubling wait (issue #14)
     - never writes back to YT
     """
+
+    RETRY_BACKOFF_BASE_S = 600
+    RETRY_BACKOFF_MAX_S = 6 * 3600
 
     def __init__(
         self,
@@ -29,6 +34,7 @@ class SyncEngine:
         playlist_id: str,
         on_remove=None,
         on_add=None,
+        clock=time.monotonic,
     ):
         """on_remove: callback(video_id) invoked BEFORE an item is removed.
         Lets PlayerCore stop playback if the removed item is currently playing.
@@ -41,6 +47,11 @@ class SyncEngine:
         self.playlist_id = playlist_id
         self._on_remove = on_remove
         self._on_add = on_add
+        self._clock = clock
+        # video_id -> (retries spent, clock time before which no new retry).
+        # In memory on purpose: a daemon restart (the usual way a fix to the
+        # cause gets deployed) retries every failed download right away.
+        self._retry_backoff: dict[str, tuple[int, float]] = {}
         self.last_sync_at: str | None = None
         self.last_error: str | None = None
         self.state: str = "ok"
@@ -97,6 +108,9 @@ class SyncEngine:
         # 404 forever and nothing re-encodes it.
         requeued_any = False
         for item in self.library.items:
+            if item.cache_file_present():
+                # Built at last: forget its failed attempts.
+                self._retry_backoff.pop(item.video_id, None)
             # Never disturb the item that's actively on screen: a background
             # sync must not flip the live (playing/casting/paused) item to
             # 'queued' just because a stale isfile() check raced a mid-playback
@@ -107,6 +121,23 @@ class SyncEngine:
                 log.warning(
                     "Reconcile: cache file for %s (%s) gone from disk — re-queueing",
                     item.title, item.video_id,
+                )
+                item.requeue()
+                requeued_any = True
+            elif item.status == "error":
+                # A failed download never produces a file, so the branch above
+                # can't see it and nothing else retries it (issue #14). The wait
+                # doubles after each retry: a video that keeps failing (gone
+                # from YouTube) costs one attempt every few hours, not one per sync.
+                retries, not_before = self._retry_backoff.get(item.video_id, (0, 0.0))
+                now = self._clock()
+                if now < not_before:
+                    continue
+                wait = min(self.RETRY_BACKOFF_BASE_S * 2 ** retries, self.RETRY_BACKOFF_MAX_S)
+                self._retry_backoff[item.video_id] = (retries + 1, now + wait)
+                log.warning(
+                    "Reconcile: %s (%s) failed (%s) — retry %d, next one not before %.0f min",
+                    item.title, item.video_id, item.error, retries + 1, wait / 60,
                 )
                 item.requeue()
                 requeued_any = True
@@ -139,6 +170,7 @@ class SyncEngine:
                 log.exception("on_remove callback failed for %s", video_id)
 
         self._delete_cache_files(item)
+        self._retry_backoff.pop(video_id, None)
 
         cursor_was_here = self.library.cursor_video_id == video_id
         self.library.items.pop(idx)
