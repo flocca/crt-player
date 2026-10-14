@@ -30,13 +30,30 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def cleanup_temp_files() -> None:
+def cleanup_temp_files(library: LibraryStore) -> None:
+    """Remove cache files older than FILE_TTL_HOURS that no library item uses.
+
+    Files of videos still in the library are kept however old they are
+    (issue #16): deleting them made every restart re-download and re-encode
+    the whole playlist. A video leaving the playlist has its files deleted by
+    the sync; this TTL only catches the orphans that slipped through.
+    """
     if config.FILE_TTL_HOURS <= 0:
         return
     if not os.path.isdir(config.TEMP_DIR):
         return
+    in_use: set[str] = set()
+    for item in library.items:
+        if item.filename:
+            in_use.add(item.filename)
+        if item.video_id:
+            in_use.add(config.cached_encoded_filename(item.video_id))
+        if item.downloaded_path:
+            in_use.add(os.path.basename(item.downloaded_path))
     cutoff = time.time() - config.FILE_TTL_HOURS * 3600
     for fname in os.listdir(config.TEMP_DIR):
+        if fname in in_use:
+            continue
         fpath = os.path.join(config.TEMP_DIR, fname)
         if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
             log.info("Removing old temp file: %s", fname)
@@ -72,10 +89,11 @@ async def periodic_save_loop(
 
 async def main_async() -> None:
     os.makedirs(config.TEMP_DIR, exist_ok=True)
-    cleanup_temp_files()
 
     library = LibraryStore()
     library.load_state(config.STATE_FILE)
+    # After load_state: the TTL must know which files the library still uses.
+    cleanup_temp_files(library)
     chromecast = ChromecastManager()
     pipeline = PipelineWorker(library, chromecast)
 
