@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Run
 ./run.sh                                          # starts the daemon (sources .env automatically; runs `python -m crt.daemon`)
 crt-tui                                           # console script: Textual TUI client; talks HTTP to the daemon
-CRT_DAEMON_URL=http://lodge.<tailnet>.ts.net:8765 crt-tui   # target a remote daemon over Tailscale
+CRT_DAEMON_URL=http://chet.<tailnet>.ts.net:8765 crt-tui    # target the production daemon over Tailscale
 
 # Tests
 source .venv/bin/activate
@@ -61,27 +61,25 @@ Client/server. A headless **daemon** (`crt/daemon.py`, started by `./run.sh` or 
 
 **Queue helpers:** `advance_cursor(loop)` returns the next item by position after the current cursor (playing or last done). `prepare_for_play(item)` transitions done/error to ready/queued based on cache. `can_move(item_id, direction)` returns bool for UI disabled state. `first_queued_after_cursor()` is used by the prefetch loop to skip items before the cursor.
 
-## Production deployment (Lodge)
+## Production deployment (Chet + Lodge)
 
-Daemon runs in Docker on a Raspberry Pi 5 ("Lodge") via the sibling `lodge-tools` repo at `services/crt-player/`. Ops/gotchas detail: [`../lodge-tools/services/crt-player/CLAUDE.md`](../lodge-tools/services/crt-player/CLAUDE.md). Integration spec: `../lodge-tools/docs/superpowers/specs/2026-05-11-crt-services-integration-design.md`.
+Split-host since 2026-05-22: the daemon runs in Docker (`lodge-crt-player`) on **Chet** (Linux Mint); the Flipper bridge (`lodge-crt-flipper-bridge`) stays on **Lodge** (Raspberry Pi 5, whose BT adapter sees the FAP) and POSTs to the daemon over the tailnet. Both are deployed from the sibling `homelab` repo, the source of truth for ops: [`../homelab/services/crt-player/CLAUDE.md`](../homelab/services/crt-player/CLAUDE.md) (config, backup, ops gotchas) and [`../homelab/services/crt-flipper-bridge/CLAUDE.md`](../homelab/services/crt-flipper-bridge/CLAUDE.md). Integration spec: `../homelab/docs/superpowers/specs/2026-05-11-crt-services-integration-design.md`.
 
-**Container layout:** `network_mode: host` (mDNS Chromecast discovery + direct MP4 stream require multicast/no-NAT), `cpus: 2.0` + `cpu_shares: 256` (deprioritized vs OpenClaw/HA/Matrix — ffmpeg ~2x slower but system stays responsive). Bind mounts: `/opt/lodge/crt-player/{cache,state,secrets}` → `/data/{cache,state,secrets}`. **`secrets` mount is `:ro`** — token refresh is in-memory only (verified 2026-05-11; if upstream changes write path, symptom is 401s + "Read-only file system" in logs).
+**Container layout:** `network_mode: host` (mDNS Chromecast discovery + direct MP4 stream require multicast/no-NAT), `cpus: 2.0` + `cpu_shares: 256` (ffmpeg deprioritized vs the host's other services). Bind mounts: `/opt/lodge/crt-player/{cache,state,secrets}` → `/data/{cache,state,secrets}`. **`secrets` mount is `:ro`** — token refresh is in-memory only (verified 2026-05-11; if upstream changes write path, symptom is 401s + "Read-only file system" in logs).
 
-**Baked container env** (set in `docker/Dockerfile`, do NOT set in `.env`): `CRT_TEMP_DIR=/data/cache`, `CRT_STATE_FILE=/data/state/library.json`, `CRT_YT_CLIENT_SECRETS=/data/secrets/client_secrets.json`, `CRT_YT_TOKEN_FILE=/data/secrets/oauth_token.json`.
+**Baked container env:** `CRT_TEMP_DIR`, `CRT_STATE_FILE`, `CRT_YT_CLIENT_SECRETS`, `CRT_YT_TOKEN_FILE` are set in `docker/Dockerfile` (paths under `/data/`); keep them out of `.env`.
 
-**Tailnet access from Mac:** `CRT_DAEMON_URL=http://chet.<tailnet>.ts.net:8765 crt-tui`. Daemon listens on `0.0.0.0:8765` but has no UFW LAN rule since 2026-05-11 — external access only via Tailscale.
+**Network:** the daemon listens on `0.0.0.0:8765`. The Chromecast fetches `/media/...` from Chet's LAN IP (chosen by `_get_local_ip()`); the Mac reaches it over the tailnet with `CRT_DAEMON_URL=http://chet.<tailnet>.ts.net:8765 crt-tui`. UFW is inactive on Chet: the Fritz!Box NAT is the only barrier to the internet.
 
 **HTTP control surface** consumed by TUI + Flipper bridge: `GET /status`, `GET /library/items`, `POST /control/{next,prev,toggle,stop,loop/toggle,sync,calibrate,seek/back/{n},seek/forward/{n},delete/current}`.
 
 **OAuth bootstrap** (one-time, manual on Mac): `python -m crt.bootstrap` opens browser → writes `~/.local/share/crt-player/{client_secrets,oauth_token}.json`. `lodge crt-player install` validates these exist on the Mac then `scp`s them to `/opt/lodge/crt-player/secrets/` with `chmod 600`. As of v2 (2026-05-13) the OAuth scope is `youtube` (full read+write) instead of `youtube.readonly` — required so `/control/delete/current` can remove the item from the YouTube playlist. A scope-bumped re-bootstrap is required when upgrading from a v1 deployment: re-run `python -m crt.bootstrap` on the Mac, then `lodge crt-player install` (or `scp oauth_token.json` to `/opt/lodge/crt-player/secrets/`) and restart the container. **GCP consent screen must be in "Production" publishing status** (APIs & Services → OAuth consent screen → Publish) — "Testing"-mode apps with sensitive scopes (`auth/youtube`) get their refresh tokens revoked by Google after exactly 7 days, silently killing playlist sync. One-time config change; no code change needed.
 
-**Backup boundary** (restic on Pi, daily 04:00): only `secrets/` + `.env` + `docker-compose.yml`. `cache/` (encoded MP4) and `state/` (library DB) are regenerable from the YouTube playlist.
+**Deploy mechanics:** `lodge crt-player update` does `git reset --hard origin/main` on Chet → push local main before deploy. `lodge crt-flipper-bridge` has no `update` subcommand; `install` is idempotent (re-SCPs sources, rebuilds). `lodge ssh` is interactive-only (opens a TTY); for one-shot remote commands use direct `ssh flocca@chet.tailc1c72f.ts.net "<cmd>"` (daemon) or `ssh flocca@lodge.tailc1c72f.ts.net "<cmd>"` (bridge).
 
-**Deploy mechanics:** `lodge crt-player update` does `git reset --hard origin/main` on the Pi → push local main before deploy. `lodge crt-flipper-bridge` has no `update` subcommand; `install` is idempotent (re-SCPs sources, rebuilds). `lodge ssh` is interactive-only (opens a TTY); for one-shot remote commands use direct `ssh flocca@lodge.tailc1c72f.ts.net "<cmd>"`.
+**Re-OAuth shortcut:** scope-only re-deploy after re-running `crt-bootstrap` on Mac doesn't need full `lodge crt-player install`: `scp ~/.local/share/crt-player/oauth_token.json flocca@chet.tailc1c72f.ts.net:/opt/lodge/crt-player/secrets/ && ssh flocca@chet.tailc1c72f.ts.net "chmod 600 /opt/lodge/crt-player/secrets/oauth_token.json && docker restart lodge-crt-player"`.
 
-**Re-OAuth shortcut:** scope-only re-deploy after re-running `crt-bootstrap` on Mac doesn't need full `lodge crt-player install`: `scp ~/.local/share/crt-player/oauth_token.json flocca@chet.tailc1c72f.ts.net:/opt/lodge/crt-player/secrets/ && ssh flocca@chet.tailc1c72f.ts.net "chmod 600 /opt/lodge/crt-player/secrets/oauth_token.json && docker restart lodge-crt-player"`. (Daemon moved to Chet in split-host migration 2026-05-22.)
-
-**Flipper command byte → HTTP endpoint** (in `../lodge-tools/services/crt-flipper-bridge/bridge.py` COMMAND_TABLE): `0x01`→next, `0x02`→prev, `0x03`→toggle, `0x04`→stop, `0x05`→loop/toggle, `0x06`→sync, `0x07`→calibrate, `0x08`→seek/back/15, `0x09`→seek/forward/30, `0x0A`→delete/current. Bridge runs in Docker on the same Pi (host network + `/run/dbus` mount + `NET_ADMIN`). When you add/rename a `/control/*` endpoint in this repo, mirror the change in the bridge's COMMAND_TABLE. Bridge ops: [`../lodge-tools/services/crt-flipper-bridge/CLAUDE.md`](../lodge-tools/services/crt-flipper-bridge/CLAUDE.md).
+**Flipper command byte → HTTP endpoint** (in `../homelab/services/crt-flipper-bridge/bridge.py` COMMAND_TABLE): `0x01`→next, `0x02`→prev, `0x03`→toggle, `0x04`→stop, `0x05`→loop/toggle, `0x06`→sync, `0x07`→calibrate, `0x08`→seek/back/15, `0x09`→seek/forward/30, `0x0A`→delete/current. The bridge runs in Docker on Lodge (host network + `/run/dbus` mount + `NET_ADMIN`). When you add/rename a `/control/*` endpoint in this repo, mirror the change in the bridge's COMMAND_TABLE.
 
 ## Integration Tests
 
@@ -135,7 +133,7 @@ TUI client tests (`tests/test_ui.py`) use Textual's `app.run_test()` / Pilot API
 - pychromecast `MediaStatus.idle_reason` distinguishes natural end (`"FINISHED"`) from transition-IDLE (`"CANCELLED"`/`"INTERRUPTED"` fired when loading new media). Don't treat PLAYING→IDLE as playback end without checking the reason — a late IDLE from the previous item can arrive after `reset_playback_ended()` and falsely end the new item.
 - Textual `Static` with overridden `render()` doesn't update the widget's internal `_content` size cache (applies to `tui_client/ui.py`). Use `watch_*` reactive methods that call `self.update(...)` instead — otherwise title changes may render from stale content and `height: auto` won't adapt.
 - Running scripts standalone (outside `./run.sh`) needs `set -a; source .env; set +a` before `python ...` — the `.env` file has no `export` prefix, so a plain `source` only sets shell-local vars and Python won't see them.
-- The `flipper_app/` Flipper FAP is its own subproject: `ufbt` SDK, no Python tests. Spec: `docs/superpowers/specs/2026-05-10-flipper-remote-design.md`. Uses a forked Serial profile (Momentum FW source in `flipper_app/libs/serial_profile.{c,h}`) with custom `mac_xor` to bypass the firmware's BtSrv RPC handler — without that, button TX is silently dropped. Pairs with the bridge in `lodge-tools/services/crt-flipper-bridge/`. Detailed subproject guidance: [flipper_app/CLAUDE.md](flipper_app/CLAUDE.md).
+- The `flipper_app/` Flipper FAP is its own subproject: `ufbt` SDK, no Python tests. Spec: `docs/superpowers/specs/2026-05-10-flipper-remote-design.md`. Uses a forked Serial profile (Momentum FW source in `flipper_app/libs/serial_profile.{c,h}`) with custom `mac_xor` to bypass the firmware's BtSrv RPC handler — without that, button TX is silently dropped. Pairs with the bridge in `../homelab/services/crt-flipper-bridge/`. Detailed subproject guidance: [flipper_app/CLAUDE.md](flipper_app/CLAUDE.md).
 - Don't add `sources=` to a Flipper `application.fam` if you have subdirs: ufbt auto-discovery is recursive, and explicit globs (`["*.c", "libs/*.c"]`) cause duplicate-definition link errors.
 
 ## Language
