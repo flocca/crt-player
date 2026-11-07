@@ -21,6 +21,9 @@ from typing import AsyncIterator, Callable
 
 log = logging.getLogger(__name__)
 
+# Seconds the position may run ahead of the last report or command.
+MAX_EXTRAPOLATION_S = 3.0
+
 
 class ReceiverChannel:
     def __init__(
@@ -46,6 +49,9 @@ class ReceiverChannel:
         self._timestamp: float = 0.0
         self.duration: float = 0.0
         self.paused: bool = True
+        # True after the last subscriber left: nobody is playing anything we
+        # can hear about, so the position stays where it was.
+        self._frozen: bool = False
 
     # ------------------------------------------------------------------
     # Subscribers
@@ -82,6 +88,10 @@ class ReceiverChannel:
             return
         self._subscribers.remove(q)
         if not self._subscribers:
+            if self._position is not None:
+                self._position = self.live_position
+                self._timestamp = self._clock()
+            self._frozen = True
             self._connected_event.clear()
             log.info("Receiver page disconnected")
             if self._on_disconnect is not None:
@@ -134,6 +144,9 @@ class ReceiverChannel:
             self._position = self.live_position
             self._timestamp = self._clock()
             self.paused = False
+        if kind in ("load", "seek", "play"):
+            # A command nobody receives doesn't start anything on the TV.
+            self._frozen = not self._subscribers
         for q in self._subscribers:
             q.put_nowait(msg)
 
@@ -154,6 +167,7 @@ class ReceiverChannel:
             self.duration = float(report.get("duration") or 0.0)
             self.paused = bool(report.get("paused"))
             self._timestamp = self._clock()
+            self._frozen = False
         elif event == "ended":
             if self._expected_src is not None and src == self._expected_src:
                 self._ended_event.set()
@@ -166,9 +180,12 @@ class ReceiverChannel:
     def live_position(self) -> float | None:
         if self._position is None:
             return None
-        if self.paused:
+        if self.paused or self._frozen:
             return self._position
-        pos = self._position + (self._clock() - self._timestamp)
+        # The page reports every second while playing: past a few seconds of
+        # silence it is stalled or gone, so stop running ahead of it.
+        elapsed = min(self._clock() - self._timestamp, MAX_EXTRAPOLATION_S)
+        pos = self._position + elapsed
         if self.duration > 0:
             pos = min(pos, self.duration)
         return pos

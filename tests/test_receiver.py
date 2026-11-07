@@ -56,33 +56,68 @@ def test_send_reaches_every_subscriber():
 def test_live_position_extrapolates_while_playing_and_clamps_to_duration():
     clock = Clock()
     ch = ReceiverChannel(MARGINS, clock=clock)
+    ch.subscribe()
     ch.send({"type": "load", "url": "u1", "position": 30.0, "autoplay": True})
-    clock.t += 5
-    assert ch.live_position == pytest.approx(35.0)
-    ch.handle_report({"event": "status", "position": 90.0, "duration": 100.0, "paused": False, "src": "u1"})
-    clock.t += 50
+    clock.t += 2
+    assert ch.live_position == pytest.approx(32.0)
+    ch.handle_report({"event": "status", "position": 99.0, "duration": 100.0, "paused": False, "src": "u1"})
+    clock.t += 2.5
     assert ch.live_position == pytest.approx(100.0)
 
 
 def test_pause_freezes_live_position():
     clock = Clock()
     ch = ReceiverChannel(MARGINS, clock=clock)
+    ch.subscribe()
     ch.send({"type": "load", "url": "u1", "position": 10.0, "autoplay": True})
-    clock.t += 4
+    clock.t += 2
     ch.send({"type": "pause"})
     clock.t += 60
-    assert ch.live_position == pytest.approx(14.0)
+    assert ch.live_position == pytest.approx(12.0)
 
 
 def test_play_restarts_extrapolation_from_frozen_position():
     clock = Clock()
     ch = ReceiverChannel(MARGINS, clock=clock)
+    ch.subscribe()
     ch.send({"type": "load", "url": "u1", "position": 10.0, "autoplay": False})
     clock.t += 60
     assert ch.live_position == pytest.approx(10.0)
     ch.send({"type": "play"})
     clock.t += 3
     assert ch.live_position == pytest.approx(13.0)
+
+
+def test_command_sent_to_nobody_does_not_start_extrapolating():
+    clock = Clock()
+    ch = ReceiverChannel(MARGINS, clock=clock)
+    ch.send({"type": "load", "url": "u1", "position": 10.0, "autoplay": True})
+    clock.t += 2
+    assert ch.live_position == pytest.approx(10.0)
+
+
+def test_extrapolation_is_capped_past_the_last_report():
+    """Reports arrive every second while playing; a silent page must not make
+    the position run ahead without limit."""
+    clock = Clock()
+    ch = ReceiverChannel(MARGINS, clock=clock)
+    ch.subscribe()
+    ch.send({"type": "load", "url": "u1", "position": 0.0, "autoplay": True})
+    ch.handle_report({"event": "status", "position": 100.0, "duration": 1000.0, "paused": False, "src": "u1"})
+    clock.t += 60
+    assert ch.live_position == pytest.approx(103.0)
+
+
+def test_last_disconnect_freezes_position():
+    clock = Clock()
+    ch = ReceiverChannel(MARGINS, clock=clock)
+    q = ch.subscribe()
+    ch.send({"type": "load", "url": "u1", "position": 0.0, "autoplay": True})
+    ch.handle_report({"event": "status", "position": 100.0, "duration": 1000.0, "paused": False, "src": "u1"})
+    clock.t += 0.5
+    ch.unsubscribe(q)
+    clock.t += 20
+    assert ch.live_position == pytest.approx(100.5)
 
 
 def test_seek_sets_position():

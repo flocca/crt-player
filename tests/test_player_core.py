@@ -97,6 +97,18 @@ def _make_player(library, cc=None, clock=None, **kwargs):
     return pc, receiver, q, cc
 
 
+def _page_reports(receiver):
+    """Emulate the page's once-a-second status report while playing, so a
+    test can jump the fake clock further than ReceiverChannel extrapolates."""
+    if receiver._position is None or receiver.paused:
+        return
+    pos = receiver._position + (receiver._clock() - receiver._timestamp)
+    receiver.handle_report({
+        "event": "status", "position": pos, "duration": receiver.duration,
+        "paused": False, "src": receiver._expected_src,
+    })
+
+
 def loads(msgs):
     return [m for m in msgs if m["type"] == "load"]
 
@@ -356,6 +368,7 @@ async def test_pause_snapshots_position_and_opens_menu_on_current_video():
     pc, receiver, q, cc = _make_player(library, clock=clock)
     await pc.play("b")
     clock.t += 77
+    _page_reports(receiver)
     drain(q)
 
     result = await pc.toggle()
@@ -399,9 +412,9 @@ async def test_seek_while_paused_clamps_and_updates_saved_position():
 
     r = await pc.seek_relative(30)
     assert r.did_action
-    assert item.playback_position == 600.0
+    assert item.playback_position == 599.5  # SEEK_END_MARGIN_S short of the end
     msgs = drain(q)
-    assert {"type": "seek", "position": 600.0} in msgs
+    assert {"type": "seek", "position": 599.5} in msgs
     assert menus(msgs), "the menu view is re-sent so the time updates"
 
     await pc.seek_relative(-1000)
@@ -436,6 +449,7 @@ async def test_seek_while_playing_sends_seek_from_live_position():
     pc, receiver, q, cc = _make_player(library, clock=clock)
     await pc.play("a")
     clock.t += 20
+    _page_reports(receiver)
     drain(q)
 
     r = await pc.seek_relative(30)
@@ -512,6 +526,7 @@ async def test_stop_saves_live_position_for_resume():
     pc, receiver, q, cc = _make_player(library, clock=clock)
     await pc.play("A")
     clock.t += 245
+    _page_reports(receiver)
 
     await pc.stop()
 
@@ -550,6 +565,7 @@ async def test_resume_after_stop_loads_saved_position():
     pc, receiver, q, cc = _make_player(library, clock=clock)
     await pc.play("A")
     clock.t += 245
+    _page_reports(receiver)
     await pc.stop()
     drain(q)
 
@@ -1264,6 +1280,7 @@ async def test_calibrate_while_playing_pauses_saves_position_and_returns_to_menu
     pc, receiver, q, cc = _make_player(library, clock=clock)
     await pc.play("b")
     clock.t += 50
+    _page_reports(receiver)
     drain(q)
 
     await pc.calibrate()
@@ -1416,6 +1433,7 @@ async def test_receiver_blip_while_playing_resends_autoplay_load(monkeypatch):
     pc, receiver, q, cc = _make_player(library, clock=clock)
     await pc.play("a")
     clock.t += 30
+    _page_reports(receiver)
 
     receiver.unsubscribe(q)
     q2 = receiver.subscribe()
@@ -1550,3 +1568,141 @@ async def test_watch_idle_does_nothing_when_app_already_closed():
     task.cancel()
 
     cc.quit_app.assert_not_called()
+
+
+# ---------------------------------------------------------------------
+# Final review fixes
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sync_removal_after_cursor_moved_still_stops_the_loaded_video():
+    """The sync thread removes the item and moves the cursor before the loop
+    runs stop_and_remove: the video on the page is still the removed one."""
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "b", 30.0)
+    library.items.pop(1)
+    library.cursor_video_id = "c"
+
+    await pc.stop_and_remove("b")
+
+    assert pc.state == "idle" and pc.menu is None
+    assert {"type": "blank"} in drain(q)
+
+
+@pytest.mark.asyncio
+async def test_menu_delete_refuses_when_cursor_left_the_paused_video():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "b", 30.0)
+    await _select_command(pc, "delete")
+    await pc.toggle()  # armed on "b"
+    library.cursor_video_id = "c"  # sync moved the cursor meanwhile
+
+    await pc.toggle()
+
+    assert [i.video_id for i in library.items] == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_next_while_playing_saves_the_outgoing_position():
+    clock = Clock()
+    library = _make_library(["a", "b"])
+    library.items[0].playback_position = 10.0
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("a")
+    clock.t += 2
+
+    await pc.next()
+
+    assert library.items[0].playback_position == 12.0
+    assert library.cursor_video_id == "b"
+
+
+@pytest.mark.asyncio
+async def test_picking_a_video_while_the_page_relaunches_loads_it_from_its_own_position(monkeypatch):
+    """Page lost within the grace (another app took the Chromecast): picking
+    another video relaunches the page, and the reconnect must not load the
+    new video at the old video's position."""
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 5.0)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "b", 120.0)
+    receiver.unsubscribe(q)
+    cc.receiver_app_active = False
+    pages = []
+    cc.launch_receiver = MagicMock(side_effect=lambda url: pages.append(receiver.subscribe()))
+
+    await pc.next()  # highlight "c"
+    await pc.toggle()
+
+    page_loads = loads(drain(pages[0]))
+    assert [m["url"].rsplit("/", 1)[-1] for m in page_loads] == ["c.mp4"]
+    assert page_loads[-1]["position"] == 0.0
+    assert library.items[1].playback_position == 120.0
+    assert library.cursor_video_id == "c" and pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_resume_while_page_is_gone_relaunches_at_saved_position(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 5.0)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 120.0)
+    receiver.unsubscribe(q)
+    cc.receiver_app_active = False
+    pages = []
+    cc.launch_receiver = MagicMock(side_effect=lambda url: pages.append(receiver.subscribe()))
+
+    r = await pc.toggle()  # OK on the paused video
+
+    cc.launch_receiver.assert_called_once()
+    load = loads(drain(pages[0]))[-1]
+    assert load["position"] == 120.0 and load["autoplay"] is True
+    assert r.did_action and pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_seek_past_end_while_paused_stops_short_of_the_end():
+    """At exactly `duration` the element resumes from 0 instead of ending."""
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 590.0)
+    receiver.handle_report({
+        "event": "status", "position": 590.0, "duration": 600.0, "paused": True,
+        "src": "http://10.0.0.5:8765/media/a.mp4",
+    })
+
+    await pc.seek_relative(30)
+
+    assert library.items[0].playback_position == 599.5
+
+
+@pytest.mark.asyncio
+async def test_second_calibrate_during_clip_generation_is_ignored(monkeypatch):
+    gate = asyncio.Event()
+
+    async def slow_clip(path, *a, **k):
+        await gate.wait()
+        return path
+
+    gen = AsyncMock(side_effect=slow_clip)
+    monkeypatch.setattr("crt.calibration.generate_calibration_clip", gen)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 5.0)
+
+    first = asyncio.create_task(pc.calibrate())
+    second = asyncio.create_task(pc.calibrate())
+    await asyncio.sleep(0.01)
+    gate.set()
+    await asyncio.gather(first, second)
+    await pc.next()  # ends calibration
+
+    assert gen.await_count == 1
+    assert pc.state == "paused" and pc.menu is not None
+
+
+@pytest.mark.asyncio
+async def test_play_while_calibrating_removes_the_pattern(monkeypatch, fake_clip):
+    monkeypatch.setattr("crt.player_core.CALIBRATION_TIMEOUT_S", 0.02)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 5.0)
+    await pc.calibrate()
+    drain(q)
+
+    await pc.play("b")  # TUI /control/play/{id}
+    await asyncio.sleep(0.05)
+
+    msgs = drain(q)
+    assert {"type": "calibration", "url": None} in msgs
+    assert loads(msgs)[-1]["url"].endswith("/media/b.mp4")
+    assert pc.state == "playing"

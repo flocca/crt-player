@@ -251,18 +251,27 @@
     }
   }
 
+  // While a load waits for its metadata, later play/pause/seek commands
+  // update what it will do once the metadata arrives (a pause sent right
+  // after a load must win over the load's own autoplay).
+  var pending = null;
+
   function load(msg) {
     var token = ++loadToken;
+    pending = null;
     // Same file already loaded (e.g. the event stream reconnected): seek in
     // place instead of reloading, so the screen does not go black.
     if (currentSrc() === msg.url && main.readyState >= 1) {
       startAt(msg.position, msg.autoplay);
       return;
     }
+    pending = { autoplay: msg.autoplay, position: msg.position };
     var onMeta = function () {
       main.removeEventListener("loadedmetadata", onMeta);
-      if (token !== loadToken) { return; }
-      startAt(msg.position, msg.autoplay);
+      if (token !== loadToken || pending === null) { return; }
+      var want = pending;
+      pending = null;
+      startAt(want.position, want.autoplay);
     };
     main.addEventListener("loadedmetadata", onMeta);
     main.setAttribute("src", msg.url);
@@ -271,6 +280,7 @@
 
   function blank() {
     loadToken++;
+    pending = null;
     main.pause();
     main.removeAttribute("src");
     main.load();
@@ -302,11 +312,16 @@
       case "config": applyMargins(msg.margins); break;
       case "load": load(msg); break;
       case "play":
+        if (pending !== null) { pending.autoplay = true; break; }
         var p = main.play();
         if (p && p.catch) { p.catch(function (e) { report("error", { error: "play() failed: " + e }); }); }
         break;
-      case "pause": main.pause(); break;
+      case "pause":
+        if (pending !== null) { pending.autoplay = false; }
+        main.pause();
+        break;
       case "seek":
+        if (pending !== null) { pending.position = msg.position; break; }
         try { main.currentTime = msg.position; } catch (e) { /* ignore */ }
         break;
       case "blank": blank(); break;
