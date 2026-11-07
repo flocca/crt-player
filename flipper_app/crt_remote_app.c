@@ -1,6 +1,7 @@
 #include <furi.h>
 #include <gui/gui.h>
 #include <input/input.h>
+#include <notification/notification_messages.h>
 
 #include <bt/bt_service/bt.h>
 #include <furi_hal_bt.h>
@@ -235,6 +236,12 @@ int32_t crt_remote_app(void* p) {
                     app.scene = SceneExtraMenu;
                     app.menu_index = 0;
                     view_port_update(app.view_port);
+                    // Haptic confirmation that the long press opened the menu.
+                    // Goes through the notification service so the user's
+                    // Settings → Vibro preference is honoured.
+                    NotificationApp* notifications = furi_record_open(RECORD_NOTIFICATION);
+                    notification_message(notifications, &sequence_single_vibro);
+                    furi_record_close(RECORD_NOTIFICATION);
                 }
                 // Long-press Back in either scene is intentionally unbound (was STOP in v1).
             }

@@ -80,7 +80,7 @@ The FAP runs in two scenes — `SceneHome` and `SceneExtraMenu` — selected by 
 | Left (short) | `0x08` | `/control/seek/back/15` |
 | Right (short) | `0x09` | `/control/seek/forward/30` |
 | OK (short) | `0x03` | `/control/toggle` |
-| OK (long) | — | enters `SceneExtraMenu` (in-FAP only) |
+| OK (long) | — | enters `SceneExtraMenu` (in-FAP only), with a short vibration (`sequence_single_vibro`, honours Settings → Vibro) |
 | Back (short) | — | exit app |
 
 ### SceneExtraMenu
