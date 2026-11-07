@@ -1243,3 +1243,310 @@ async def test_delete_current_from_paused_state_stops_first():
     assert [i.video_id for i in library.items] == ["b"]
     assert pc.state == "idle" and pc.menu is None
     assert {"type": "blank"} in drain(q)
+
+
+# ---------------------------------------------------------------------
+# Calibration inside the page
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_clip(monkeypatch):
+    gen = AsyncMock(side_effect=lambda path, *a, **k: path)
+    monkeypatch.setattr("crt.calibration.generate_calibration_clip", gen)
+    return gen
+
+
+@pytest.mark.asyncio
+async def test_calibrate_while_playing_pauses_saves_position_and_returns_to_menu(fake_clip):
+    clock = Clock()
+    library = _make_library(["a", "b", "c"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("b")
+    clock.t += 50
+    drain(q)
+
+    await pc.calibrate()
+
+    item_b = library.items[1]
+    assert pc.state == "calibrating" and item_b.playback_position == 50.0
+    msgs = drain(q)
+    assert {"type": "pause"} in msgs
+    assert {"type": "menu", "view": None} in msgs
+    cal = [m for m in msgs if m["type"] == "calibration"][-1]
+    assert cal["url"] == "http://10.0.0.5:8765/media/calibration_pattern.mp4"
+    fake_clip.assert_awaited_once()
+
+    r = await pc.next()  # any key ends it, and does nothing else
+
+    assert r.did_action
+    msgs = drain(q)
+    assert {"type": "calibration", "url": None} in msgs
+    assert not loads(msgs)
+    assert pc.state == "paused" and pc.menu.selected == Entry("video", "b")
+    assert menus(msgs)[-1]["view"] is not None
+    assert library.cursor_video_id == "b" and item_b.status != "done"
+    assert item_b.playback_position == 50.0
+
+
+@pytest.mark.asyncio
+async def test_calibrate_from_menu_returns_to_menu(fake_clip):
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 12.0)
+    await _select_command(pc, "calibrate")
+
+    await pc.toggle()
+    assert pc.state == "calibrating" and pc.menu is None
+
+    await pc.seek_relative(30)  # ends calibration, no seek
+
+    msgs = drain(q)
+    assert not [m for m in msgs if m["type"] == "seek"]
+    assert pc.state == "paused" and pc.menu.selected == Entry("video", "a")
+    assert library.items[0].playback_position == 12.0
+
+
+@pytest.mark.asyncio
+async def test_calibrate_from_idle_returns_to_blank(fake_clip):
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+
+    await pc.calibrate()
+    assert pc.state == "calibrating"
+    await pc.toggle()
+
+    msgs = drain(q)
+    assert {"type": "calibration", "url": None} in msgs and {"type": "blank"} in msgs
+    assert pc.state == "idle" and pc.menu is None
+    assert not loads(msgs)
+
+
+@pytest.mark.asyncio
+async def test_calibration_times_out(monkeypatch, fake_clip):
+    monkeypatch.setattr("crt.player_core.CALIBRATION_TIMEOUT_S", 0.01)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 5.0)
+    await _select_command(pc, "calibrate")
+    await pc.toggle()
+
+    await asyncio.sleep(0.05)
+
+    assert pc.state == "paused"
+    assert {"type": "calibration", "url": None} in drain(q)
+
+
+@pytest.mark.asyncio
+async def test_calibration_timer_cancelled_when_ended_by_key(monkeypatch, fake_clip):
+    monkeypatch.setattr("crt.player_core.CALIBRATION_TIMEOUT_S", 0.03)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 5.0)
+    await _select_command(pc, "calibrate")
+    await pc.toggle()
+    await pc.toggle()  # ends calibration → paused menu
+    await pc.toggle()  # OK on the paused video → resume
+    drain(q)
+
+    await asyncio.sleep(0.06)
+
+    assert pc.state == "playing"
+    assert drain(q) == []
+
+
+@pytest.mark.asyncio
+async def test_live_position_is_zero_while_calibrating(fake_clip):
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 70.0)
+    await pc.calibrate()
+
+    assert pc.live_position() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_stop_while_calibrating_blanks_and_keeps_position(fake_clip):
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 70.0)
+    await pc.calibrate()
+
+    await pc.stop()
+
+    assert pc.state == "idle" and {"type": "blank"} in drain(q)
+    assert library.items[0].playback_position == 70.0
+    assert library.items[0].status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_natural_end_ignored_during_calibration(fake_clip):
+    library = _make_library(["A", "B"])
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    await pc.play("A")
+    await pc.calibrate()
+    receiver.handle_report({
+        "event": "ended", "position": 9.0, "duration": 9.0, "paused": True,
+        "src": "http://10.0.0.5:8765/media/A.mp4",
+    })
+
+    await _run_watcher_once(pc)
+
+    assert library.cursor_video_id == "A" and library.items[0].status == "paused"
+
+
+# ---------------------------------------------------------------------
+# Lost page, reconnect, idle close
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_receiver_blip_within_grace_keeps_pause_and_resends(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 0.05)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 120.0)
+
+    receiver.unsubscribe(q)
+    q2 = receiver.subscribe()
+    await asyncio.sleep(0.1)
+
+    msgs = drain(q2)
+    assert msgs[0]["type"] == "config"
+    load = loads(msgs)[-1]
+    assert load["autoplay"] is False and load["position"] == 120.0
+    assert load["url"].endswith("/media/b.mp4")
+    assert menus(msgs)[-1]["view"] is not None
+    assert pc.state == "paused"
+
+
+@pytest.mark.asyncio
+async def test_receiver_blip_while_playing_resends_autoplay_load(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 0.05)
+    clock = Clock()
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("a")
+    clock.t += 30
+
+    receiver.unsubscribe(q)
+    q2 = receiver.subscribe()
+    await asyncio.sleep(0.1)
+
+    load = loads(drain(q2))[-1]
+    assert load["autoplay"] is True and load["position"] == 30.0
+    assert pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_receiver_blip_while_calibrating_restores_video_and_pattern(monkeypatch, fake_clip):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 0.05)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 70.0)
+    await pc.calibrate()
+
+    receiver.unsubscribe(q)
+    q2 = receiver.subscribe()
+    await asyncio.sleep(0.1)
+
+    msgs = drain(q2)
+    load = loads(msgs)[-1]
+    assert load["autoplay"] is False and load["position"] == 70.0
+    cal = [m for m in msgs if m["type"] == "calibration"][-1]
+    assert cal["url"].endswith("/media/calibration_pattern.mp4")
+    assert pc.state == "calibrating"
+
+
+@pytest.mark.asyncio
+async def test_receiver_lost_after_grace_goes_idle_and_keeps_position(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 0.01)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 120.0)
+
+    receiver.unsubscribe(q)
+    await asyncio.sleep(0.05)
+
+    item_b = library.items[1]
+    assert pc.state == "idle" and pc.menu is None
+    assert item_b.playback_position == 120.0 and item_b.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_toggle_after_lost_relaunches_and_resumes_from_saved_position(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 0.01)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 120.0)
+    receiver.unsubscribe(q)
+    await asyncio.sleep(0.05)
+    cc.receiver_app_active = False
+    pages = []
+    cc.launch_receiver = MagicMock(side_effect=lambda url: pages.append(receiver.subscribe()))
+
+    await pc.toggle()
+
+    cc.launch_receiver.assert_called_once()
+    load = loads(drain(pages[0]))[-1]
+    assert load["position"] == 120.0 and load["url"].endswith("/media/b.mp4")
+    assert pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_watch_idle_closes_app_after_timeout():
+    clock = Clock()
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 33.0, clock=clock)
+    clock.t += 1800
+
+    task = asyncio.create_task(pc.watch_idle(1800, poll_s=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    cc.quit_app.assert_called_once()
+    item_b = library.items[1]
+    assert pc.state == "idle" and item_b.status == "ready"
+    assert item_b.playback_position == 33.0 and pc.menu is None
+
+
+@pytest.mark.asyncio
+async def test_watch_idle_waits_for_the_full_timeout():
+    clock = Clock()
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 3.0, clock=clock)
+    clock.t += 1799
+
+    task = asyncio.create_task(pc.watch_idle(1800, poll_s=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    cc.quit_app.assert_not_called()
+    assert pc.state == "paused"
+
+
+@pytest.mark.asyncio
+async def test_watch_idle_leaves_playing_alone():
+    clock = Clock()
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("a")
+    clock.t += 100000
+
+    task = asyncio.create_task(pc.watch_idle(1800, poll_s=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    cc.quit_app.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_watch_idle_closes_once_after_stop():
+    clock = Clock()
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("a")
+    await pc.stop()
+    clock.t += 1800
+
+    task = asyncio.create_task(pc.watch_idle(1800, poll_s=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    cc.quit_app.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_watch_idle_does_nothing_when_app_already_closed():
+    clock = Clock()
+    library = _make_library(["a"])
+    cc = _make_chromecast()
+    cc.receiver_app_active = False
+    pc = PlayerCore(library, cc, ReceiverChannel(MARGINS), clock=clock)
+    clock.t += 5000
+
+    task = asyncio.create_task(pc.watch_idle(1800, poll_s=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    cc.quit_app.assert_not_called()

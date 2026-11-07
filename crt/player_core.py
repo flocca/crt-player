@@ -34,6 +34,11 @@ log = logging.getLogger(__name__)
 RECEIVER_CONNECT_TIMEOUT_S = 20.0
 # Seconds a menu notice stays on screen.
 NOTICE_S = 2.0
+# Seconds the calibration pattern stays without a key press.
+CALIBRATION_TIMEOUT_S = 60.0
+# Seconds after the page's last event-stream subscriber leaves before the
+# page counts as lost (a short blip reconnects within this window).
+RECEIVER_LOST_GRACE_S = 10.0
 
 
 @dataclass
@@ -90,7 +95,28 @@ class PlayerCore:
         # item is re-queued (issue #10). Wired to pipeline.wake_prepare so the
         # prepare loop re-downloads/re-encodes it immediately.
         self._on_cache_miss = on_cache_miss
-        self.state: str = "idle"
+        # When the player last became idle/paused (None while playing or
+        # calibrating, and after the idle close): drives watch_idle.
+        self._inactive_since: float | None = clock()
+        self._state: str = "idle"
+        self._calibration_timer: asyncio.TimerHandle | None = None
+        self._calibration_return: str = "idle"
+        self._calibration_url: str | None = None
+        self._lost_task: asyncio.Task | None = None
+        receiver.set_callbacks(self._on_receiver_connect, self._on_receiver_disconnect)
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @state.setter
+    def state(self, value: str) -> None:
+        if value in ("idle", "paused"):
+            if value != self._state:
+                self._inactive_since = self._clock()
+        else:
+            self._inactive_since = None
+        self._state = value
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -216,6 +242,9 @@ class PlayerCore:
         an item that can't be cast. Returns an ActionResult describing the
         outcome (issue #6). While paused it moves the menu highlight instead.
         """
+        if self.state == "calibrating":
+            await self._end_calibration()
+            return _DID_ACTION
         if self.state == "paused" and self.menu is not None:
             return self._move_menu(+1)
         if not self.library.items:
@@ -248,6 +277,9 @@ class PlayerCore:
         backward from the last item — symmetric to next()/toggle() (issue #5).
         While paused it moves the menu highlight instead.
         """
+        if self.state == "calibrating":
+            await self._end_calibration()
+            return _DID_ACTION
         if self.state == "paused" and self.menu is not None:
             return self._move_menu(-1)
         if not self.library.items:
@@ -296,6 +328,9 @@ class PlayerCore:
         with a cache file and casts it. If the cursor lands on an unready item
         (encoding/queued), the remote's toggle skips ahead instead of no-op.
         """
+        if self.state == "calibrating":
+            await self._end_calibration()
+            return _DID_ACTION
         if self.state == "playing":
             self._pause()
             return _DID_ACTION
@@ -432,6 +467,7 @@ class PlayerCore:
         return _DID_ACTION
 
     def _blank(self) -> None:
+        self._cancel_calibration_timer()
         self.menu = None
         if self.receiver.connected:
             self.receiver.send({"type": "menu", "view": None})
@@ -455,6 +491,9 @@ class PlayerCore:
         [0, duration] (no upper clamp while the duration is unknown). While
         paused the new position is also the resume point, and the menu is
         re-sent so its time line updates."""
+        if self.state == "calibrating":
+            await self._end_calibration()
+            return _DID_ACTION
         if self.state not in ("playing", "paused"):
             return _NO_CC_SESSION
         item = self.library.cursor_item()
@@ -617,20 +656,157 @@ class PlayerCore:
             except Exception:
                 log.exception("on_playback_finished failed")
 
-    async def calibrate(self) -> None:
-        """Cast a calibration pattern to the Chromecast.
+    # ------------------------------------------------------------------
+    # Calibration (a page state, not a playlist item)
+    # ------------------------------------------------------------------
 
-        Uses calibration.generate_calibration_clip(out_path, duration_s) which
-        is an async coroutine that renders an MP4 via ffmpeg and returns the
-        path.  The resulting file is served from TEMP_DIR via the media server.
+    async def calibrate(self) -> None:
+        """Show the calibration pattern inside the page.
+
+        A video that is playing is paused first with its position saved. The
+        pattern stays until any key (toggle/next/prev/seek) or for
+        CALIBRATION_TIMEOUT_S, then the player goes back to the paused menu on
+        the same video (or to a black screen if nothing was playing). Its end
+        never marks a video done and its time never touches a resume position.
+
+        The clip comes from calibration.generate_calibration_clip(out_path),
+        an async coroutine that renders an MP4 via ffmpeg into TEMP_DIR, served
+        by the media route.
         """
         from crt import calibration
 
-        await self.chromecast.wait_for_connection()
+        if self.state == "calibrating":
+            return
+        if not await self._ensure_receiver():
+            log.warning("Calibration skipped: receiver page unavailable")
+            return
         out_path = os.path.join(config.TEMP_DIR, "calibration_pattern.mp4")
         await calibration.generate_calibration_clip(out_path)
-        local_ip = _get_local_ip()
-        filename = os.path.basename(out_path)
-        url = f"http://{local_ip}:{config.SERVER_PORT}/media/{filename}"
-        await asyncio.to_thread(self.chromecast.cast_url, url, start_position=0.0)
-        log.info("Calibration pattern cast to Chromecast")
+        # Re-read the state: ffmpeg took a while and a key may have arrived.
+        if self.state == "playing":
+            self._pause(open_menu=False)
+        self._calibration_return = "paused" if self.state == "paused" else "idle"
+        self.menu = None
+        self._calibration_url = self._media_url(os.path.basename(out_path))
+        self.receiver.send({"type": "menu", "view": None})
+        self.receiver.send({"type": "calibration", "url": self._calibration_url})
+        self.state = "calibrating"
+        self._cancel_calibration_timer()
+        self._calibration_timer = asyncio.get_running_loop().call_later(
+            CALIBRATION_TIMEOUT_S,
+            lambda: asyncio.ensure_future(self._end_calibration()),
+        )
+        log.info("Calibration pattern shown (returns to %s)", self._calibration_return)
+
+    def _cancel_calibration_timer(self) -> None:
+        if self._calibration_timer is not None:
+            self._calibration_timer.cancel()
+            self._calibration_timer = None
+
+    async def _end_calibration(self) -> None:
+        self._cancel_calibration_timer()
+        if self.state != "calibrating":
+            return
+        self.receiver.send({"type": "calibration", "url": None})
+        item = self.library.cursor_item()
+        if self._calibration_return == "paused" and item is not None:
+            self.state = "paused"
+            self.menu = PauseMenu(item.video_id)
+            self._send_menu()
+        else:
+            self._blank()
+            self.state = "idle"
+        log.info("Calibration ended (now %s)", self.state)
+
+    # ------------------------------------------------------------------
+    # Page connection: blips, loss, idle close
+    # ------------------------------------------------------------------
+
+    def _on_receiver_connect(self) -> None:
+        """The page (re)connected. After a short blip, put it back where it
+        was: same video and position, paused with the menu or playing."""
+        if self._lost_task is not None:
+            self._lost_task.cancel()
+            self._lost_task = None
+        if self.state == "calibrating":
+            item = self.library.cursor_item()
+            if self._calibration_return == "paused" and item is not None and item.filename:
+                # The video under the pattern, so ending calibration lands
+                # on a paused frame that OK can resume.
+                self.receiver.send({
+                    "type": "load",
+                    "url": self._media_url(item.filename),
+                    "position": item.playback_position,
+                    "autoplay": False,
+                })
+            self.receiver.send({"type": "calibration", "url": self._calibration_url})
+            return
+        item = self.library.cursor_item()
+        if item is None or not item.filename:
+            return
+        if self.state in ("playing", "paused"):
+            self._snapshot_position(item)
+            self.receiver.send({
+                "type": "load",
+                "url": self._media_url(item.filename),
+                "position": item.playback_position,
+                "autoplay": self.state == "playing",
+            })
+            if self.state == "paused":
+                self._send_menu()
+            log.info("Receiver page reconnected: restored %s while %s", item.video_id, self.state)
+
+    def _on_receiver_disconnect(self) -> None:
+        if self._lost_task is not None:
+            self._lost_task.cancel()
+        self._lost_task = asyncio.get_running_loop().create_task(self._lost_after_grace())
+
+    async def _lost_after_grace(self) -> None:
+        await asyncio.sleep(RECEIVER_LOST_GRACE_S)
+        self._lost_task = None
+        if self.receiver.connected:
+            return
+        if self.state not in ("playing", "paused", "calibrating"):
+            return
+        item = self.library.cursor_item()
+        if item is not None and item.status in ("playing", "paused"):
+            self._snapshot_position(item)
+            item.status = "ready"
+        self._cancel_calibration_timer()
+        self.menu = None
+        self.state = "idle"
+        log.warning(
+            "Receiver page lost for %.0fs: player idle (%s saved at %.1fs)",
+            RECEIVER_LOST_GRACE_S,
+            item.video_id if item else None,
+            item.playback_position if item else 0.0,
+        )
+
+    async def watch_idle(self, close_after_s: float, poll_s: float = 30.0) -> None:
+        """Background loop: after `close_after_s` without playback (idle or
+        paused), save the position and close the DashCast app. The next play
+        reopens it (logo) and resumes from the saved position."""
+        while True:
+            await asyncio.sleep(poll_s)
+            try:
+                await self._close_if_idle(close_after_s)
+            except Exception:
+                log.exception("idle close check failed")
+
+    async def _close_if_idle(self, close_after_s: float) -> None:
+        if self.state not in ("idle", "paused") or self._inactive_since is None:
+            return
+        if self._clock() - self._inactive_since < close_after_s:
+            return
+        if not (self.receiver.connected or self.chromecast.receiver_app_active):
+            return
+        if self.state == "paused":
+            item = self.library.cursor_item()
+            if item is not None:
+                self._snapshot_position(item)
+                item.status = "ready"
+        self.menu = None
+        self.state = "idle"
+        log.info("No playback for %.0fs: closing the receiver app", close_after_s)
+        await asyncio.to_thread(self.chromecast.quit_app)
+        self._inactive_since = None
