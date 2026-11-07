@@ -142,6 +142,21 @@ async def test_wait_connected_times_out_and_succeeds():
 
 
 @pytest.mark.asyncio
+async def test_wait_new_subscriber_ignores_existing_ones():
+    ch = ReceiverChannel(MARGINS)
+    ch.subscribe()  # stale page still hanging on
+    seen = ch.subscriptions
+    assert await ch.wait_new_subscriber(seen, 0.01) is False
+
+    async def late():
+        await asyncio.sleep(0.01)
+        ch.subscribe()
+
+    asyncio.create_task(late())
+    assert await ch.wait_new_subscriber(seen, 1.0) is True
+
+
+@pytest.mark.asyncio
 async def test_sse_events_yields_data_and_pings_then_unsubscribes():
     ch = ReceiverChannel(MARGINS)
     gen = sse_events(ch, ping_s=0.01)

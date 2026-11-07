@@ -1,3 +1,4 @@
+import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock
 
@@ -5,16 +6,30 @@ import pytest
 
 from crt import config
 from crt.library_store import LibraryStore, QueueItem
+from crt.pause_menu import Entry
 from crt.player_core import PlayerCore
+from crt.receiver import ReceiverChannel
+
+MARGINS = {"top": 0, "bottom": 0, "left": 0, "right": 0}
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
 
 
 @pytest.fixture(autouse=True)
 def _cache_dir(tmp_path, monkeypatch):
     """Point TEMP_DIR at an isolated dir so the encoded cache files the helpers
     create (and that cache_file_present() checks — issue #10) live somewhere
-    real and per-test. SERVER_PORT is fixed for deterministic media URLs."""
+    real and per-test. SERVER_PORT and the LAN IP are fixed for deterministic
+    URLs."""
     monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
     monkeypatch.setattr(config, "SERVER_PORT", 8765)
+    monkeypatch.setattr("crt.player_core._get_local_ip", lambda: "10.0.0.5")
     return tmp_path
 
 
@@ -31,416 +46,6 @@ def _make_library(video_ids):
         _write_cache_file(fname)
         ls.items.append(QueueItem(url=f"u/{vid}", video_id=vid, title=vid, status="ready", filename=fname))
     return ls
-
-
-def _make_chromecast():
-    cc = MagicMock()
-    cc.connected = True
-    cc.cast_url = MagicMock()
-    cc.stop = MagicMock()
-    cc.pause_or_resume = MagicMock()
-    cc.player_state = "IDLE"
-    cc.live_current_time = 0.0
-    cc.wait_for_connection = AsyncMock()
-    # Default: a live media session exists, so toggle takes the normal
-    # pause/resume path rather than the session-loss recast path (issue #7).
-    cc.is_session_lost = MagicMock(return_value=False)
-    return cc
-
-
-@pytest.mark.asyncio
-async def test_next_with_no_cursor_advances_to_first_item():
-    library = _make_library(["A", "B", "C"])
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.next()
-
-    assert library.cursor_video_id == "A"
-
-
-@pytest.mark.asyncio
-async def test_next_advances_cursor_by_one():
-    library = _make_library(["A", "B", "C"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.next()
-
-    assert library.cursor_video_id == "B"
-
-
-@pytest.mark.asyncio
-async def test_prev_moves_cursor_back():
-    library = _make_library(["A", "B", "C"])
-    library.cursor_video_id = "B"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.prev()
-
-    assert library.cursor_video_id == "A"
-
-
-@pytest.mark.asyncio
-async def test_prev_at_first_item_is_no_op():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.prev()
-
-    assert library.cursor_video_id == "A"
-
-
-@pytest.mark.asyncio
-async def test_next_at_end_no_loop_stops_at_last():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "B"
-    library.loop_mode = False
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.next()
-
-    assert library.cursor_video_id == "B"
-
-
-@pytest.mark.asyncio
-async def test_next_at_end_with_loop_wraps_to_first():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "B"
-    library.loop_mode = True
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.next()
-
-    assert library.cursor_video_id == "A"
-
-
-@pytest.mark.asyncio
-async def test_play_specific_video_id():
-    library = _make_library(["A", "B", "C"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.play("C")
-
-    assert library.cursor_video_id == "C"
-
-
-@pytest.mark.asyncio
-async def test_play_unknown_video_id_raises():
-    library = _make_library(["A"])
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    with pytest.raises(KeyError):
-        await pc.play("NOPE")
-
-
-@pytest.mark.asyncio
-async def test_stop_calls_chromecast_stop():
-    library = _make_library(["A"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    await pc.stop()
-
-    cc.stop.assert_called_once()
-    assert pc.state == "idle"
-
-
-@pytest.mark.asyncio
-async def test_toggle_when_playing_pauses():
-    library = _make_library(["A"])
-    cc = _make_chromecast()
-    cc.player_state = "PLAYING"
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    await pc.toggle()
-
-    cc.pause_or_resume.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_toggle_when_idle_with_no_cursor_starts_first_item():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = None
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.toggle()
-
-    assert library.cursor_video_id == "A"
-
-
-@pytest.mark.asyncio
-async def test_toggle_when_idle_with_cursor_starts_cursor_item():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "B"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "idle"
-
-    await pc.toggle()
-
-    assert library.cursor_video_id == "B"
-
-
-@pytest.mark.asyncio
-async def test_stop_and_remove_stops_if_video_id_is_current():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    await pc.stop_and_remove("A")
-
-    cc.stop.assert_called_once()
-    assert pc.state == "idle"
-
-
-@pytest.mark.asyncio
-async def test_stop_and_remove_no_op_if_video_id_is_not_current():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    await pc.stop_and_remove("B")
-
-    cc.stop.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_cast_current_calls_chromecast_cast_url(monkeypatch):
-    library = _make_library(["A"])
-    library.cursor_video_id = "A"
-    library.items[0].status = "ready"
-    library.items[0].filename = "A.mp4"
-    library.items[0].playback_position = 42.0
-
-    cc = _make_chromecast()
-    cc.connected = True
-    pc = PlayerCore(library, cc)
-
-    await pc._cast_current()
-
-    cc.wait_for_connection.assert_awaited()
-    args, kwargs = cc.cast_url.call_args
-    assert "A.mp4" in args[0]
-    assert kwargs.get("start_position") == 42.0
-
-
-@pytest.mark.asyncio
-async def test_on_playback_finished_advances_cursor():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.on_playback_finished()
-
-    assert library.cursor_video_id == "B"
-
-
-@pytest.mark.asyncio
-async def test_on_playback_finished_at_end_no_loop_stops():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "B"
-    library.loop_mode = False
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.on_playback_finished()
-
-    assert library.cursor_video_id == "B"
-    assert pc.state == "idle"
-
-
-@pytest.mark.asyncio
-async def test_on_playback_finished_at_end_with_loop_wraps():
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "B"
-    library.loop_mode = True
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.on_playback_finished()
-
-    assert library.cursor_video_id == "A"
-
-
-@pytest.mark.asyncio
-async def test_prev_recasts_item_previously_playing(monkeypatch):
-    """Regression: prev su item che era stato in 'playing' deve ri-castare,
-    non bloccare con 'cursor not ready'. Il file è ancora in cache."""
-    library = _make_library(["A", "B"])
-    library.items[0].status = "playing"  # A era playing prima del next
-    library.items[1].status = "playing"  # B sta playing ora
-    library.cursor_video_id = "B"
-
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-
-    await pc.prev()
-
-    assert library.cursor_video_id == "A"
-    cc.cast_url.assert_called_once()
-    assert library.items[0].status == "playing"  # ora è di nuovo current
-    assert library.items[1].status == "ready"  # de-staled
-
-
-@pytest.mark.asyncio
-async def test_stop_resets_current_item_to_ready():
-    """Regression: dopo stop il cursor item torna 'ready' così un toggle/play
-    successivo lo ri-casta invece di skipparlo."""
-    library = _make_library(["A"])
-    library.items[0].status = "playing"
-    library.cursor_video_id = "A"
-
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    await pc.stop()
-
-    assert pc.state == "idle"
-    assert library.items[0].status == "ready"
-
-
-@pytest.mark.asyncio
-async def test_stop_saves_live_position_for_resume():
-    """Regression (issue #13): stop must snapshot the live position onto the
-    cursor item so a later toggle/play resumes near where playback left off,
-    instead of relying solely on the 30s periodic save (which can be
-    arbitrarily stale, or never have ticked at all for a short session)."""
-    library = _make_library(["A"])
-    library.items[0].status = "playing"
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    cc.live_current_time = 245.0
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    await pc.stop()
-
-    assert library.items[0].playback_position == 245.0
-
-
-@pytest.mark.asyncio
-async def test_stop_captures_position_before_issuing_chromecast_stop():
-    """The live position must be read BEFORE chromecast.stop() tears down the
-    media session — reading it after risks an already-reset/stale value."""
-    library = _make_library(["A"])
-    library.items[0].status = "playing"
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    cc.live_current_time = 245.0
-
-    def _reset_on_stop():
-        cc.live_current_time = 0.0
-
-    cc.stop = MagicMock(side_effect=_reset_on_stop)
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    await pc.stop()
-
-    assert library.items[0].playback_position == 245.0
-
-
-@pytest.mark.asyncio
-async def test_stop_does_not_touch_position_when_not_playing():
-    """A stop issued while the cursor item is already idle/ready must not
-    clobber a previously saved resume position with a bogus live read."""
-    library = _make_library(["A"])
-    library.items[0].status = "ready"
-    library.items[0].playback_position = 88.0
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    cc.live_current_time = 3.0
-    pc = PlayerCore(library, cc)
-    pc.state = "idle"
-
-    await pc.stop()
-
-    assert library.items[0].playback_position == 88.0
-
-
-@pytest.mark.asyncio
-async def test_toggle_after_stop_recasts_cursor_item(monkeypatch):
-    """Regression: toggle dopo stop deve ricastare l'item corrente."""
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "A"
-    library.items[0].status = "ready"  # post-stop
-
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "idle"
-
-    await pc.toggle()
-
-    cc.cast_url.assert_called_once()
-    assert pc.state == "casting"
-    assert library.cursor_video_id == "A"
-
-
-@pytest.mark.asyncio
-async def test_watch_natural_end_advances_cursor_on_finished_event():
-    """Regression: il watcher deve invocare on_playback_finished quando
-    chromecast.wait_for_playback_end() ritorna."""
-    import asyncio
-
-    library = _make_library(["A", "B"])
-    library.cursor_video_id = "A"
-    library.items[0].status = "playing"
-
-    cc = _make_chromecast()
-    cc.connected = True
-    # Simula natural end. L'event viene set una sola volta; reset_playback_ended
-    # lo cancella, così la 2a iterazione del watcher si blocca in attesa.
-    end_event = asyncio.Event()
-    end_event.set()
-
-    async def _wait_end():
-        await end_event.wait()
-
-    cc.wait_for_playback_end = _wait_end
-    cc.reset_playback_ended = MagicMock(side_effect=end_event.clear)
-
-    pc = PlayerCore(library, cc)
-    task = asyncio.create_task(pc.watch_natural_end())
-    # Lascia girare una sola iterazione: dopo reset, l'event è clear → la 2a
-    # iterazione si blocca su await end_event.wait(). Cancelliamo il task.
-    await asyncio.sleep(0.05)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    assert library.items[0].status == "done"
-    assert library.cursor_video_id == "B"
-    cc.reset_playback_ended.assert_called()
-
-
-# ---------------------------------------------------------------------
-# Skip-non-playable navigation: next/prev/toggle/on_playback_finished
-# devono saltare gli item senza cache (filename=None) e atterrare solo
-# su roba castabile. Da remoto un toggle/next/prev su item ancora in
-# encoding/queued non deve essere un no-op silenzioso.
-# ---------------------------------------------------------------------
 
 
 def _make_mixed_library(specs):
@@ -462,30 +67,662 @@ def _make_mixed_library(specs):
     return ls
 
 
+def _make_chromecast():
+    cc = MagicMock()
+    cc.connected = True
+    cc.wait_for_connection = AsyncMock()
+    cc.launch_receiver = MagicMock()
+    cc.receiver_app_active = True
+    cc.quit_app = MagicMock()
+    return cc
+
+
+def drain(q):
+    out = []
+    while not q.empty():
+        out.append(q.get_nowait())
+    return out
+
+
+def _make_player(library, cc=None, clock=None, **kwargs):
+    """PlayerCore wired to a real ReceiverChannel with one connected page
+    (queue `q`, already drained of the config message)."""
+    cc = cc or _make_chromecast()
+    receiver = ReceiverChannel(MARGINS, clock=clock) if clock else ReceiverChannel(MARGINS)
+    q = receiver.subscribe()
+    drain(q)
+    if clock is not None:
+        kwargs["clock"] = clock
+    pc = PlayerCore(library, cc, receiver, **kwargs)
+    return pc, receiver, q, cc
+
+
+def loads(msgs):
+    return [m for m in msgs if m["type"] == "load"]
+
+
+def menus(msgs):
+    return [m for m in msgs if m["type"] == "menu"]
+
+
+async def _paused_on(library_ids, cursor, position, clock=None, **kwargs):
+    """Library with every id ready, `cursor` playing from `position`, then
+    paused through toggle(). Returns (pc, receiver, q, cc, library)."""
+    library = _make_library(library_ids)
+    library.cursor_video_id = cursor
+    library.items[library_ids.index(cursor)].playback_position = position
+    pc, receiver, q, cc = _make_player(library, clock=clock or Clock(), **kwargs)
+    await pc.play(cursor)
+    await pc.toggle()
+    drain(q)
+    return pc, receiver, q, cc, library
+
+
+# ---------------------------------------------------------------------
+# Navigation while playing / idle (unchanged behaviour)
+# ---------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_next_skips_items_without_filename(monkeypatch):
-    library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+async def test_next_with_no_cursor_advances_to_first_item():
+    library = _make_library(["A", "B", "C"])
+    pc, *_ = _make_player(library)
 
     await pc.next()
 
-    assert library.cursor_video_id == "C"
-    cc.cast_url.assert_called_once()
+    assert library.cursor_video_id == "A"
 
 
 @pytest.mark.asyncio
-async def test_prev_skips_items_without_filename(monkeypatch):
-    library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
-    library.cursor_video_id = "C"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+async def test_next_advances_cursor_by_one():
+    library = _make_library(["A", "B", "C"])
+    library.cursor_video_id = "A"
+    pc, *_ = _make_player(library)
+
+    await pc.next()
+
+    assert library.cursor_video_id == "B"
+
+
+@pytest.mark.asyncio
+async def test_prev_moves_cursor_back():
+    library = _make_library(["A", "B", "C"])
+    library.cursor_video_id = "B"
+    pc, *_ = _make_player(library)
 
     await pc.prev()
 
     assert library.cursor_video_id == "A"
-    cc.cast_url.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_prev_at_first_item_is_no_op():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    pc, *_ = _make_player(library)
+
+    await pc.prev()
+
+    assert library.cursor_video_id == "A"
+
+
+@pytest.mark.asyncio
+async def test_next_at_end_no_loop_stops_at_last():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "B"
+    library.loop_mode = False
+    pc, *_ = _make_player(library)
+
+    await pc.next()
+
+    assert library.cursor_video_id == "B"
+
+
+@pytest.mark.asyncio
+async def test_next_at_end_with_loop_wraps_to_first():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "B"
+    library.loop_mode = True
+    pc, *_ = _make_player(library)
+
+    await pc.next()
+
+    assert library.cursor_video_id == "A"
+
+
+@pytest.mark.asyncio
+async def test_play_specific_video_id():
+    library = _make_library(["A", "B", "C"])
+    library.cursor_video_id = "A"
+    pc, *_ = _make_player(library)
+
+    await pc.play("C")
+
+    assert library.cursor_video_id == "C"
+
+
+@pytest.mark.asyncio
+async def test_play_unknown_video_id_raises():
+    library = _make_library(["A"])
+    pc, *_ = _make_player(library)
+
+    with pytest.raises(KeyError):
+        await pc.play("NOPE")
+
+
+@pytest.mark.asyncio
+async def test_toggle_when_idle_with_no_cursor_starts_first_item():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = None
+    pc, *_ = _make_player(library)
+
+    await pc.toggle()
+
+    assert library.cursor_video_id == "A"
+
+
+@pytest.mark.asyncio
+async def test_toggle_when_idle_with_cursor_starts_cursor_item():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "B"
+    pc, *_ = _make_player(library)
+
+    await pc.toggle()
+
+    assert library.cursor_video_id == "B"
+
+
+# ---------------------------------------------------------------------
+# Casting through the receiver page
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cast_sends_load_with_saved_position():
+    library = _make_library(["a"])
+    library.items[0].playback_position = 42.0
+    pc, receiver, q, cc = _make_player(library)
+
+    result = await pc.play("a")
+
+    msgs = drain(q)
+    load = loads(msgs)[-1]
+    assert load["url"] == "http://10.0.0.5:8765/media/a.mp4"
+    assert load["position"] == 42.0 and load["autoplay"] is True
+    assert {"type": "menu", "view": None} in msgs
+    assert result.did_action and pc.state == "playing"
+    assert library.items[0].status == "playing"
+    cc.launch_receiver.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cast_launches_dashcast_when_page_not_connected():
+    library = _make_library(["a"])
+    cc = _make_chromecast()
+    receiver = ReceiverChannel(MARGINS)
+    pages = []
+    cc.launch_receiver = MagicMock(side_effect=lambda url: pages.append(receiver.subscribe()))
+    pc = PlayerCore(library, cc, receiver)
+
+    result = await pc.play("a")
+
+    cc.launch_receiver.assert_called_once()
+    assert cc.launch_receiver.call_args.args[0] == "http://10.0.0.5:8765/receiver"
+    cc.wait_for_connection.assert_awaited()
+    assert result.did_action and pc.state == "playing"
+    assert loads(drain(pages[0]))[-1]["url"].endswith("/media/a.mp4")
+
+
+@pytest.mark.asyncio
+async def test_cast_relaunches_when_another_app_took_the_chromecast():
+    """A stale page subscriber must not count: launch and wait for a new one."""
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+    cc.receiver_app_active = False
+    cc.launch_receiver = MagicMock(side_effect=lambda url: receiver.subscribe())
+
+    result = await pc.play("a")
+
+    cc.launch_receiver.assert_called_once()
+    assert result.did_action
+
+
+@pytest.mark.asyncio
+async def test_cast_fails_cleanly_when_page_never_connects(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_CONNECT_TIMEOUT_S", 0.01)
+    library = _make_library(["a"])
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc, ReceiverChannel(MARGINS))
+
+    result = await pc.play("a")
+
+    assert result.did_action is False and pc.state == "idle"
+    assert library.items[0].status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_cast_fails_cleanly_when_launch_raises(monkeypatch):
+    library = _make_library(["a"])
+    cc = _make_chromecast()
+    cc.launch_receiver = MagicMock(side_effect=RuntimeError("Chromecast not connected"))
+    pc = PlayerCore(library, cc, ReceiverChannel(MARGINS))
+
+    result = await pc.play("a")
+
+    assert result.did_action is False and pc.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_prev_recasts_item_previously_playing():
+    """Regression: prev su item che era stato in 'playing' deve ri-castare,
+    non bloccare con 'cursor not ready'. Il file è ancora in cache."""
+    library = _make_library(["A", "B"])
+    library.items[0].status = "playing"  # A era playing prima del next
+    library.items[1].status = "playing"  # B sta playing ora
+    library.cursor_video_id = "B"
+    pc, receiver, q, cc = _make_player(library)
+
+    await pc.prev()
+
+    assert library.cursor_video_id == "A"
+    assert len(loads(drain(q))) == 1
+    assert library.items[0].status == "playing"  # ora è di nuovo current
+    assert library.items[1].status == "ready"  # de-staled
+
+
+@pytest.mark.asyncio
+async def test_toggle_after_stop_recasts_cursor_item():
+    """Regression: toggle dopo stop deve ricastare l'item corrente."""
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    pc, receiver, q, cc = _make_player(library)
+
+    await pc.toggle()
+
+    assert len(loads(drain(q))) == 1
+    assert pc.state == "playing"
+    assert library.cursor_video_id == "A"
+
+
+# ---------------------------------------------------------------------
+# Pause opens the menu; next/prev/seek while paused
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pause_snapshots_position_and_opens_menu_on_current_video():
+    clock = Clock()
+    library = _make_library(["a", "b", "c"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("b")
+    clock.t += 77
+    drain(q)
+
+    result = await pc.toggle()
+
+    msgs = drain(q)
+    assert {"type": "pause"} in msgs
+    view = menus(msgs)[-1]["view"]
+    assert [r["selected"] for r in view["rows"]] == [False, True, False]
+    assert result.did_action
+    assert pc.state == "paused" and library.items[1].playback_position == 77.0
+    assert library.items[1].status == "paused"
+    assert pc.menu.selected == Entry("video", "b")
+
+
+@pytest.mark.asyncio
+async def test_next_and_prev_move_highlight_while_paused():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "b", 0.0)
+
+    r = await pc.next()
+
+    assert r.did_action and library.cursor_video_id == "b"
+    msgs = drain(q)
+    assert not loads(msgs)
+    assert pc.menu.selected == Entry("video", "c")
+    assert [r["selected"] for r in menus(msgs)[-1]["view"]["rows"]] == [False, False, True]
+
+    await pc.prev()
+    await pc.prev()
+    assert pc.menu.selected == Entry("video", "a")
+    assert pc.state == "paused"
+
+
+@pytest.mark.asyncio
+async def test_seek_while_paused_clamps_and_updates_saved_position():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 590.0)
+    item = library.items[1]
+    receiver.handle_report({
+        "event": "status", "position": 590.0, "duration": 600.0, "paused": True,
+        "src": "http://10.0.0.5:8765/media/b.mp4",
+    })
+
+    r = await pc.seek_relative(30)
+    assert r.did_action
+    assert item.playback_position == 600.0
+    msgs = drain(q)
+    assert {"type": "seek", "position": 600.0} in msgs
+    assert menus(msgs), "the menu view is re-sent so the time updates"
+
+    await pc.seek_relative(-1000)
+    assert item.playback_position == 0.0
+    assert pc.state == "paused"
+
+
+@pytest.mark.asyncio
+async def test_seek_while_paused_without_duration_has_no_upper_clamp():
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 100.0)
+
+    await pc.seek_relative(30)
+
+    assert library.items[0].playback_position == 130.0
+
+
+@pytest.mark.asyncio
+async def test_seek_while_paused_clears_delete_confirm():
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 100.0)
+    pc.menu.confirming_delete = True
+
+    await pc.seek_relative(-15)
+
+    assert pc.menu.confirming_delete is False
+
+
+@pytest.mark.asyncio
+async def test_seek_while_playing_sends_seek_from_live_position():
+    clock = Clock()
+    library = _make_library(["a"])
+    library.items[0].playback_position = 10.0
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("a")
+    clock.t += 20
+    drain(q)
+
+    r = await pc.seek_relative(30)
+
+    assert r.did_action
+    assert drain(q) == [{"type": "seek", "position": 60.0}]
+    assert pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_seek_when_idle_reports_no_session():
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+
+    result = await pc.seek_relative(-15)
+
+    assert result.did_action is False
+    assert result.reason == "no_chromecast_session"
+    assert drain(q) == []
+
+
+@pytest.mark.asyncio
+async def test_live_position_reads_receiver_only_when_active():
+    clock = Clock()
+    library = _make_library(["a"])
+    library.items[0].playback_position = 5.0
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    assert pc.live_position() == 0.0
+    await pc.play("a")
+    clock.t += 3
+    assert pc.live_position() == 8.0
+
+
+# ---------------------------------------------------------------------
+# Stop
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_blanks_page_and_keeps_app_open():
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+    drain(q)
+
+    result = await pc.stop()
+
+    msgs = drain(q)
+    assert {"type": "blank"} in msgs and {"type": "menu", "view": None} in msgs
+    cc.quit_app.assert_not_called()
+    assert result.did_action and pc.state == "idle" and pc.menu is None
+
+
+@pytest.mark.asyncio
+async def test_stop_resets_current_item_to_ready():
+    """Regression: dopo stop il cursor item torna 'ready' così un toggle/play
+    successivo lo ri-casta invece di skipparlo."""
+    library = _make_library(["A"])
+    pc, *_ = _make_player(library)
+    await pc.play("A")
+
+    await pc.stop()
+
+    assert pc.state == "idle"
+    assert library.items[0].status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_stop_saves_live_position_for_resume():
+    """Regression (issue #13): stop must snapshot the live position onto the
+    cursor item so a later toggle/play resumes near where playback left off."""
+    clock = Clock()
+    library = _make_library(["A"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("A")
+    clock.t += 245
+
+    await pc.stop()
+
+    assert library.items[0].playback_position == 245.0
+
+
+@pytest.mark.asyncio
+async def test_stop_while_paused_saves_paused_position():
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 120.0)
+
+    await pc.stop()
+
+    assert library.items[0].playback_position == 120.0
+    assert library.items[0].status == "ready" and pc.menu is None
+
+
+@pytest.mark.asyncio
+async def test_stop_does_not_touch_position_when_not_playing():
+    """A stop issued while the cursor item is already idle/ready must not
+    clobber a previously saved resume position with a bogus live read."""
+    library = _make_library(["A"])
+    library.items[0].playback_position = 88.0
+    library.cursor_video_id = "A"
+    pc, receiver, q, cc = _make_player(library)
+    receiver.handle_report({"event": "status", "position": 3.0, "duration": 9.0, "paused": False, "src": None})
+
+    await pc.stop()
+
+    assert library.items[0].playback_position == 88.0
+
+
+@pytest.mark.asyncio
+async def test_resume_after_stop_loads_saved_position():
+    clock = Clock()
+    library = _make_library(["A"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("A")
+    clock.t += 245
+    await pc.stop()
+    drain(q)
+
+    await pc.toggle()
+
+    assert loads(drain(q))[-1]["position"] == 245.0
+
+
+@pytest.mark.asyncio
+async def test_stop_and_remove_stops_if_video_id_is_current():
+    library = _make_library(["A", "B"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("A")
+    drain(q)
+
+    await pc.stop_and_remove("A")
+
+    assert {"type": "blank"} in drain(q)
+    assert pc.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_stop_and_remove_stops_if_current_is_paused():
+    pc, receiver, q, cc, library = await _paused_on(["A", "B"], "A", 3.0)
+
+    await pc.stop_and_remove("A")
+
+    assert {"type": "blank"} in drain(q)
+    assert pc.state == "idle" and pc.menu is None
+
+
+@pytest.mark.asyncio
+async def test_stop_and_remove_no_op_if_video_id_is_not_current():
+    library = _make_library(["A", "B"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("A")
+    drain(q)
+
+    await pc.stop_and_remove("B")
+
+    assert drain(q) == []
+    assert pc.state == "playing"
+
+
+# ---------------------------------------------------------------------
+# Natural end
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_playback_finished_advances_cursor():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    pc, *_ = _make_player(library)
+
+    await pc.on_playback_finished()
+
+    assert library.cursor_video_id == "B"
+
+
+@pytest.mark.asyncio
+async def test_on_playback_finished_at_end_no_loop_stops():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "B"
+    library.loop_mode = False
+    pc, receiver, q, cc = _make_player(library)
+
+    await pc.on_playback_finished()
+
+    assert library.cursor_video_id == "B"
+    assert pc.state == "idle"
+    assert {"type": "blank"} in drain(q)
+
+
+@pytest.mark.asyncio
+async def test_on_playback_finished_at_end_with_loop_wraps():
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "B"
+    library.loop_mode = True
+    pc, *_ = _make_player(library)
+
+    await pc.on_playback_finished()
+
+    assert library.cursor_video_id == "A"
+
+
+async def _run_watcher_once(pc):
+    task = asyncio.create_task(pc.watch_natural_end())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_watch_natural_end_advances_cursor_on_ended_report():
+    library = _make_library(["A", "B"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("A")
+    receiver.handle_report({
+        "event": "ended", "position": 9.0, "duration": 9.0, "paused": True,
+        "src": "http://10.0.0.5:8765/media/A.mp4",
+    })
+
+    await _run_watcher_once(pc)
+
+    assert library.items[0].status == "done"
+    assert library.cursor_video_id == "B"
+    assert pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_natural_end_ignored_unless_playing():
+    pc, receiver, q, cc, library = await _paused_on(["A", "B"], "A", 3.0)
+    receiver.handle_report({
+        "event": "ended", "position": 9.0, "duration": 9.0, "paused": True,
+        "src": "http://10.0.0.5:8765/media/A.mp4",
+    })
+
+    await _run_watcher_once(pc)
+
+    assert library.cursor_video_id == "A"
+    assert pc.state == "paused"
+    assert library.items[0].status == "paused"
+
+
+@pytest.mark.asyncio
+async def test_late_ended_for_previous_video_does_not_advance():
+    library = _make_library(["A", "B", "C"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("A")
+    await pc.next()  # now B
+    receiver.handle_report({
+        "event": "ended", "position": 9.0, "duration": 9.0, "paused": True,
+        "src": "http://10.0.0.5:8765/media/A.mp4",
+    })
+
+    await _run_watcher_once(pc)
+
+    assert library.cursor_video_id == "B"
+
+
+# ---------------------------------------------------------------------
+# Skip-non-playable navigation: next/prev/toggle/on_playback_finished
+# devono saltare gli item senza cache (filename=None) e atterrare solo
+# su roba castabile.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_next_skips_items_without_filename():
+    library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
+    library.cursor_video_id = "A"
+    pc, receiver, q, cc = _make_player(library)
+
+    await pc.next()
+
+    assert library.cursor_video_id == "C"
+    assert len(loads(drain(q))) == 1
+
+
+@pytest.mark.asyncio
+async def test_prev_skips_items_without_filename():
+    library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
+    library.cursor_video_id = "C"
+    pc, receiver, q, cc = _make_player(library)
+
+    await pc.prev()
+
+    assert library.cursor_video_id == "A"
+    assert len(loads(drain(q))) == 1
 
 
 @pytest.mark.asyncio
@@ -493,44 +730,38 @@ async def test_next_no_playable_forward_is_noop():
     library = _make_mixed_library([("A", True), ("B", False), ("C", False)])
     library.cursor_video_id = "A"
     library.loop_mode = False
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, receiver, q, cc = _make_player(library)
 
     await pc.next()
 
-    # Nessun item playable dopo A, no loop → cursore resta su A, nessun cast.
     assert library.cursor_video_id == "A"
-    cc.cast_url.assert_not_called()
+    assert loads(drain(q)) == []
 
 
 @pytest.mark.asyncio
-async def test_next_with_loop_wraps_skipping_unready(monkeypatch):
+async def test_next_with_loop_wraps_skipping_unready():
     library = _make_mixed_library([("A", True), ("B", False), ("C", False)])
     library.cursor_video_id = "A"
     library.loop_mode = True
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, receiver, q, cc = _make_player(library)
 
     await pc.next()
 
-    # B e C non castabili, loop attivo → wrap su A (l'unico playable).
     assert library.cursor_video_id == "A"
-    cc.cast_url.assert_called_once()
+    assert len(loads(drain(q))) == 1
 
 
 @pytest.mark.asyncio
-async def test_on_playback_finished_skips_unready_items(monkeypatch):
+async def test_on_playback_finished_skips_unready_items():
     library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
     library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, receiver, q, cc = _make_player(library)
 
     await pc.on_playback_finished()
 
-    # Fine naturale di A → B in encoding viene skippato → atterra su C.
     assert library.items[0].status == "done"
     assert library.cursor_video_id == "C"
-    cc.cast_url.assert_called_once()
+    assert len(loads(drain(q))) == 1
 
 
 @pytest.mark.asyncio
@@ -538,91 +769,67 @@ async def test_on_playback_finished_no_next_playable_goes_idle():
     library = _make_mixed_library([("A", True), ("B", False), ("C", False)])
     library.cursor_video_id = "A"
     library.loop_mode = False
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, receiver, q, cc = _make_player(library)
     pc.state = "playing"
 
     await pc.on_playback_finished()
 
     assert library.items[0].status == "done"
     assert pc.state == "idle"
-    cc.cast_url.assert_not_called()
+    assert loads(drain(q)) == []
 
 
 @pytest.mark.asyncio
-async def test_toggle_idle_with_cursor_on_unready_finds_playable_forward(monkeypatch):
+async def test_toggle_idle_with_cursor_on_unready_finds_playable_forward():
     library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
-    library.cursor_video_id = "B"  # cursore su item non castabile
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "idle"
+    library.cursor_video_id = "B"
+    pc, receiver, q, cc = _make_player(library)
 
     await pc.toggle()
 
-    # Da idle con cursore su B (encoding), toggle deve scendere a C.
     assert library.cursor_video_id == "C"
-    cc.cast_url.assert_called_once()
+    assert len(loads(drain(q))) == 1
 
 
 @pytest.mark.asyncio
 async def test_toggle_idle_nothing_playable_is_noop():
     library = _make_mixed_library([("A", False), ("B", False)])
     library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "idle"
+    pc, receiver, q, cc = _make_player(library)
 
     await pc.toggle()
 
-    cc.cast_url.assert_not_called()
+    assert loads(drain(q)) == []
 
 
 @pytest.mark.asyncio
-async def test_toggle_idle_with_cursor_on_ready_casts_cursor(monkeypatch):
-    """Cursor item è già playable: toggle lo casta direttamente, senza
-    scendere oltre."""
+async def test_toggle_idle_with_cursor_on_ready_casts_cursor():
     library = _make_mixed_library([("A", True), ("B", True)])
     library.cursor_video_id = "B"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "idle"
+    pc, receiver, q, cc = _make_player(library)
 
     await pc.toggle()
 
     assert library.cursor_video_id == "B"
-    cc.cast_url.assert_called_once()
+    assert len(loads(drain(q))) == 1
+
+
+# ---------------------------------------------------------------------
+# delete_current
+# ---------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_seek_relative_calls_chromecast_via_to_thread():
-    library = _make_library(["A"])
-    cc = _make_chromecast()
-    cc.seek_relative = MagicMock()
-    pc = PlayerCore(library, cc)
-
-    await pc.seek_relative(-15)
-
-    cc.seek_relative.assert_called_once_with(-15)
-
-
-@pytest.mark.asyncio
-async def test_delete_current_full_path(tmp_path, monkeypatch):
-    import crt.config as cfg
-    import os
-
-    monkeypatch.setattr(cfg, "TEMP_DIR", str(tmp_path))
-
+async def test_delete_current_full_path(tmp_path):
     library = _make_library(["A", "B"])
-    library.cursor_video_id = "A"
     library.items[0].playlist_item_id = "PLITEM_A"
     library.items[0].filename = "A_pal_crop.mp4"  # matches cached_encoded_filename("A")
     cache_file = tmp_path / "A_pal_crop.mp4"
     cache_file.write_text("dummy")
-
-    cc = _make_chromecast()
     yt = MagicMock()
-    pc = PlayerCore(library, cc, youtube_client=yt)
-    pc.state = "playing"  # prime state so the idle-guard allows stop()
+    pc, receiver, q, cc = _make_player(library, youtube_client=yt)
+    await pc.play("A")
+    drain(q)
 
     await pc.delete_current()
 
@@ -631,22 +838,18 @@ async def test_delete_current_full_path(tmp_path, monkeypatch):
     assert not cache_file.exists()
     # remote removal
     yt.delete_playlist_item.assert_called_once_with("PLITEM_A")
-    # stop was called
-    cc.stop.assert_called()
+    # stopped first
+    assert {"type": "blank"} in drain(q)
+    assert pc.state == "idle"
 
 
 @pytest.mark.asyncio
-async def test_delete_current_missing_playlist_item_id_skips_remote(tmp_path, monkeypatch):
-    import crt.config as cfg
-    monkeypatch.setattr(cfg, "TEMP_DIR", str(tmp_path))
-
+async def test_delete_current_missing_playlist_item_id_skips_remote():
     library = _make_library(["A"])
     library.cursor_video_id = "A"
     library.items[0].playlist_item_id = None
-
-    cc = _make_chromecast()
     yt = MagicMock()
-    pc = PlayerCore(library, cc, youtube_client=yt)
+    pc, *_ = _make_player(library, youtube_client=yt)
 
     await pc.delete_current()
 
@@ -655,18 +858,13 @@ async def test_delete_current_missing_playlist_item_id_skips_remote(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_delete_current_youtube_failure_keeps_local_removal(tmp_path, monkeypatch):
-    import crt.config as cfg
-    monkeypatch.setattr(cfg, "TEMP_DIR", str(tmp_path))
-
+async def test_delete_current_youtube_failure_keeps_local_removal():
     library = _make_library(["A"])
     library.cursor_video_id = "A"
     library.items[0].playlist_item_id = "PLITEM_A"
-
-    cc = _make_chromecast()
     yt = MagicMock()
     yt.delete_playlist_item.side_effect = OSError("network failure")
-    pc = PlayerCore(library, cc, youtube_client=yt)
+    pc, *_ = _make_player(library, youtube_client=yt)
 
     # Should NOT raise
     await pc.delete_current()
@@ -678,10 +876,8 @@ async def test_delete_current_youtube_failure_keeps_local_removal(tmp_path, monk
 async def test_delete_current_with_no_cursor_is_noop():
     library = _make_library(["A"])
     library.cursor_video_id = None
-
-    cc = _make_chromecast()
     yt = MagicMock()
-    pc = PlayerCore(library, cc, youtube_client=yt)
+    pc, *_ = _make_player(library, youtube_client=yt)
 
     await pc.delete_current()  # should not raise
 
@@ -690,38 +886,32 @@ async def test_delete_current_with_no_cursor_is_noop():
 
 
 # ---------------------------------------------------------------------
-# Issue #5: prev() recovers from a stale/phantom cursor
-# (cursor_video_id points at a video no longer in the library).
-# NEXT/TOGGLE already recover; PREV must behave symmetrically.
+# Issue #5: prev() recovers from a stale/phantom cursor.
 # ---------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_prev_with_phantom_cursor_recovers_to_last_playable(monkeypatch):
+async def test_prev_with_phantom_cursor_recovers_to_last_playable():
     library = _make_library(["A", "B", "C"])
     library.cursor_video_id = "GHOST"  # not in library
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, receiver, q, cc = _make_player(library)
 
     await pc.prev()
 
-    # Symmetric to next/toggle: jump to the last playable item and cast it.
     assert library.cursor_video_id == "C"
-    cc.cast_url.assert_called_once()
+    assert len(loads(drain(q))) == 1
 
 
 @pytest.mark.asyncio
-async def test_prev_with_phantom_cursor_skips_unready(monkeypatch):
+async def test_prev_with_phantom_cursor_skips_unready():
     library = _make_mixed_library([("A", True), ("B", True), ("C", False)])
     library.cursor_video_id = "GHOST"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, receiver, q, cc = _make_player(library)
 
     await pc.prev()
 
-    # Last item C is still encoding → scan backward lands on B.
     assert library.cursor_video_id == "B"
-    cc.cast_url.assert_called_once()
+    assert len(loads(drain(q))) == 1
 
 
 # ---------------------------------------------------------------------
@@ -730,11 +920,10 @@ async def test_prev_with_phantom_cursor_skips_unready(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_next_returns_did_action_true_on_cast(monkeypatch):
+async def test_next_returns_did_action_true_on_cast():
     library = _make_library(["A", "B"])
     library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, *_ = _make_player(library)
 
     result = await pc.next()
 
@@ -747,8 +936,7 @@ async def test_next_returns_did_action_false_when_no_playable():
     library = _make_mixed_library([("A", True), ("B", False)])
     library.cursor_video_id = "A"
     library.loop_mode = False
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, *_ = _make_player(library)
 
     result = await pc.next()
 
@@ -758,9 +946,7 @@ async def test_next_returns_did_action_false_when_no_playable():
 
 @pytest.mark.asyncio
 async def test_next_returns_no_items_on_empty_library():
-    library = LibraryStore()
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, *_ = _make_player(LibraryStore())
 
     result = await pc.next()
 
@@ -772,8 +958,7 @@ async def test_next_returns_no_items_on_empty_library():
 async def test_prev_at_first_returns_cursor_unchanged():
     library = _make_library(["A", "B"])
     library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, *_ = _make_player(library)
 
     result = await pc.prev()
 
@@ -782,26 +967,12 @@ async def test_prev_at_first_returns_cursor_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_prev_phantom_cursor_returns_did_action_true(monkeypatch):
+async def test_prev_phantom_cursor_returns_did_action_true():
     library = _make_library(["A", "B"])
     library.cursor_video_id = "GHOST"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
+    pc, *_ = _make_player(library)
 
     result = await pc.prev()
-
-    assert result.did_action is True
-
-
-@pytest.mark.asyncio
-async def test_toggle_pause_returns_did_action_true():
-    library = _make_library(["A"])
-    cc = _make_chromecast()
-    cc.player_state = "PLAYING"
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    result = await pc.toggle()
 
     assert result.did_action is True
 
@@ -810,9 +981,7 @@ async def test_toggle_pause_returns_did_action_true():
 async def test_toggle_idle_nothing_playable_returns_reason():
     library = _make_mixed_library([("A", False)])
     library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc)
-    pc.state = "idle"
+    pc, *_ = _make_player(library)
 
     result = await pc.toggle()
 
@@ -821,95 +990,7 @@ async def test_toggle_idle_nothing_playable_returns_reason():
 
 
 # ---------------------------------------------------------------------
-# Issue #7a: toggle after a long pause detects the lost media session
-# and recasts the cursor item from its saved position, instead of a
-# silent no-op that lies about being "playing".
-# ---------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_toggle_with_lost_session_recasts_from_position(monkeypatch):
-    library = _make_library(["A"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    cc.is_session_lost = MagicMock(return_value=True)
-    cc.current_time = 1232.5  # real pause position preserved across the loss
-    pc = PlayerCore(library, cc)
-    pc.state = "paused"  # we believe we are paused
-
-    result = await pc.toggle()
-
-    # Must recast (a plain pause/resume would be a silent no-op) from the
-    # preserved pause position.
-    cc.cast_url.assert_called_once()
-    _, kwargs = cc.cast_url.call_args
-    assert kwargs.get("start_position") == 1232.5
-    assert result.did_action is True
-    assert pc.state == "casting"
-
-
-@pytest.mark.asyncio
-async def test_toggle_lost_session_no_playable_cursor_is_reported(monkeypatch):
-    library = _make_mixed_library([("A", False)])  # cursor item not ready
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    cc.is_session_lost = MagicMock(return_value=True)
-    pc = PlayerCore(library, cc)
-    pc.state = "paused"
-
-    result = await pc.toggle()
-
-    cc.cast_url.assert_not_called()
-    assert result.did_action is False
-    assert result.reason == "no_playable_item"
-
-
-@pytest.mark.asyncio
-async def test_toggle_with_live_session_does_not_recast():
-    """When the session is alive, toggle must pause/resume, never recast."""
-    library = _make_library(["A"])
-    library.cursor_video_id = "A"
-    cc = _make_chromecast()
-    cc.is_session_lost = MagicMock(return_value=False)
-    cc.player_state = "PLAYING"
-    pc = PlayerCore(library, cc)
-    pc.state = "playing"
-
-    await pc.toggle()
-
-    cc.pause_or_resume.assert_called_once()
-    cc.cast_url.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_seek_relative_reports_no_session_when_chromecast_noop():
-    library = _make_library(["A"])
-    cc = _make_chromecast()
-    cc.seek_relative = MagicMock(return_value=False)  # no active session
-    pc = PlayerCore(library, cc)
-
-    result = await pc.seek_relative(-15)
-
-    assert result.did_action is False
-    assert result.reason == "no_chromecast_session"
-
-
-@pytest.mark.asyncio
-async def test_seek_relative_reports_did_action_when_seek_issued():
-    library = _make_library(["A"])
-    cc = _make_chromecast()
-    cc.seek_relative = MagicMock(return_value=True)
-    pc = PlayerCore(library, cc)
-
-    result = await pc.seek_relative(30)
-
-    assert result.did_action is True
-
-
-# ---------------------------------------------------------------------
-# Issue #10: a missing encoded file (filename set, MP4 gone from disk) must
-# not be cast as a dead URL. The cast/find paths re-queue it and wake the
-# pipeline via the on_cache_miss callback instead of silently no-oping.
+# Issue #10: a missing encoded file must not be cast as a dead URL.
 # ---------------------------------------------------------------------
 
 
@@ -918,13 +999,12 @@ async def test_cast_current_requeues_when_cache_file_missing():
     library = _make_library(["A"])
     library.cursor_video_id = "A"
     os.unlink(os.path.join(config.TEMP_DIR, "A.mp4"))  # file vanishes
-    cc = _make_chromecast()
     woke = MagicMock()
-    pc = PlayerCore(library, cc, on_cache_miss=woke)
+    pc, receiver, q, cc = _make_player(library, on_cache_miss=woke)
 
     await pc._cast_current()
 
-    cc.cast_url.assert_not_called()
+    assert loads(drain(q)) == []
     assert library.items[0].status == "queued"
     assert library.items[0].filename is None
     woke.assert_called_once()
@@ -935,13 +1015,11 @@ async def test_next_skips_and_requeues_stale_cache_item():
     library = _make_library(["A", "B", "C"])
     library.cursor_video_id = "A"
     os.unlink(os.path.join(config.TEMP_DIR, "B.mp4"))  # B's file gone
-    cc = _make_chromecast()
     woke = MagicMock()
-    pc = PlayerCore(library, cc, on_cache_miss=woke)
+    pc, *_ = _make_player(library, on_cache_miss=woke)
 
     await pc.next()
 
-    # B is skipped (stale cache) and re-queued; cursor lands on C.
     assert library.cursor_video_id == "C"
     assert library.items[1].status == "queued"
     assert library.items[1].filename is None
@@ -950,37 +1028,14 @@ async def test_next_skips_and_requeues_stale_cache_item():
 
 @pytest.mark.asyncio
 async def test_play_missing_file_returns_no_playable():
-    """Issue #1 from review: play() must not report did_action=true when the
-    cache file is gone and nothing is cast."""
     library = _make_library(["A"])
     os.unlink(os.path.join(config.TEMP_DIR, "A.mp4"))
-    cc = _make_chromecast()
     woke = MagicMock()
-    pc = PlayerCore(library, cc, on_cache_miss=woke)
+    pc, receiver, q, cc = _make_player(library, on_cache_miss=woke)
 
     result = await pc.play("A")
 
-    cc.cast_url.assert_not_called()
-    assert result.did_action is False
-    assert result.reason == "no_playable_item"
-    assert library.items[0].status == "queued"
-    woke.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_toggle_lost_session_missing_file_requeues():
-    library = _make_library(["A"])
-    library.cursor_video_id = "A"
-    os.unlink(os.path.join(config.TEMP_DIR, "A.mp4"))
-    cc = _make_chromecast()
-    cc.is_session_lost = MagicMock(return_value=True)
-    woke = MagicMock()
-    pc = PlayerCore(library, cc, on_cache_miss=woke)
-    pc.state = "paused"
-
-    result = await pc.toggle()
-
-    cc.cast_url.assert_not_called()
+    assert loads(drain(q)) == []
     assert result.did_action is False
     assert result.reason == "no_playable_item"
     assert library.items[0].status == "queued"

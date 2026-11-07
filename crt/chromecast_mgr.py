@@ -6,6 +6,8 @@ import threading
 from typing import Callable
 
 import pychromecast
+from pychromecast.config import APP_DASHCAST
+from pychromecast.controllers.dashcast import DashCastController
 from pychromecast.controllers.media import MediaStatusListener
 
 from crt import config
@@ -40,6 +42,7 @@ class ChromecastManager:
         self._playback_ended_event = asyncio.Event()
         self._connected_event = asyncio.Event()
         self._last_logged_app_id: str | None = "__sentinel__"
+        self._dashcast: DashCastController | None = None
 
     def set_status_callback(self, callback: Callable) -> None:
         self._on_status_change = callback
@@ -63,6 +66,8 @@ class ChromecastManager:
             return False
         self.cast = chromecasts[0]
         self.cast.wait()
+        self._dashcast = DashCastController()
+        self.cast.register_handler(self._dashcast)
         self.device_name = self.cast.name
         self.connected = True
         self._connected_event.set()
@@ -330,6 +335,27 @@ class ChromecastManager:
         self._safe_cmd(lambda: self.cast.media_controller.seek(new_pos))
         self.current_time = new_pos
         return True
+
+    # ─── Receiver page through DashCast ────────────────────────────
+
+    def launch_receiver(self, url: str) -> None:
+        """Open DashCast on our page. Blocking (pychromecast I/O): call it via
+        asyncio.to_thread. force=True makes the receiver navigate to the page
+        instead of iframing it in DashCast's HTTPS shell (mixed content blocks
+        an HTTP page there). Every call restarts the app and shows its logo."""
+        if self.cast is None or self._dashcast is None:
+            raise RuntimeError("Chromecast not connected")
+        log.info("launch_receiver: url=%s pre_app_id=%s", url, self.cast.app_id)
+        self._dashcast.load_url(url, force=True)
+
+    @property
+    def receiver_app_active(self) -> bool:
+        return self.cast is not None and self.cast.app_id == APP_DASHCAST
+
+    def quit_app(self) -> None:
+        if self.cast is not None:
+            log.info("chromecast: quit_app (app_id=%s)", self.cast.app_id)
+            self._safe_cmd(self.cast.quit_app)
 
     def adjust_volume(self, delta: int) -> None:
         if not self.cast:

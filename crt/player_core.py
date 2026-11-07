@@ -1,8 +1,13 @@
 """PlayerCore — transport layer for the headless sync daemon.
 
-Manages cursor navigation (next/prev/play), casting via ChromecastManager,
-and autoplay/loop on playback completion.  Does not download or encode —
-it consumes items that are already in status='ready' with a filename set.
+Manages cursor navigation (next/prev/play), playback through the receiver
+page (opened on the Chromecast via DashCast, driven over ReceiverChannel),
+the pause menu, and autoplay/loop on playback completion. Does not download
+or encode — it consumes items that are already in status='ready' with a
+filename set.
+
+States: idle | playing | paused | calibrating. While paused the TV shows the
+pause menu (PauseMenu) and next/prev/toggle/seek are reinterpreted for it.
 """
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -18,9 +24,16 @@ from googleapiclient.errors import HttpError
 from crt import config
 from crt.chromecast_mgr import ChromecastManager
 from crt.library_store import LibraryStore, QueueItem
+from crt.pause_menu import PauseMenu
+from crt.receiver import ReceiverChannel
 from crt.youtube_client import YouTubeAuthError
 
 log = logging.getLogger(__name__)
+
+# Seconds to wait for the page to connect after launching DashCast.
+RECEIVER_CONNECT_TIMEOUT_S = 20.0
+# Seconds a menu notice stays on screen.
+NOTICE_S = 2.0
 
 
 @dataclass
@@ -58,12 +71,20 @@ class PlayerCore:
         self,
         library: LibraryStore,
         chromecast: ChromecastManager,
+        receiver: ReceiverChannel,
         youtube_client=None,
         on_cache_miss: Callable[[], None] | None = None,
+        on_sync_request: Callable[[], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.library = library
         self.chromecast = chromecast
+        self.receiver = receiver
         self.youtube = youtube_client
+        # Wired by the daemon to sync_engine.kick (menu command "Sync now").
+        self.on_sync_request = on_sync_request
+        self._clock = clock
+        self.menu: PauseMenu | None = None
         # Invoked when an item's encoded file is found missing on disk and the
         # item is re-queued (issue #10). Wired to pipeline.wake_prepare so the
         # prepare loop re-downloads/re-encodes it immediately.
@@ -99,6 +120,57 @@ class PlayerCore:
         if self.library.cursor_video_id is None:
             return None
         return self._index_of(self.library.cursor_video_id)
+
+    def _media_url(self, filename: str) -> str:
+        return f"http://{_get_local_ip()}:{config.SERVER_PORT}/media/{filename}"
+
+    def _snapshot_position(self, item: QueueItem) -> None:
+        """Copy the page's live position onto the item (resume point)."""
+        live = self.receiver.live_position
+        item.playback_position = live or item.playback_position or 0.0
+
+    def _send_menu(self) -> None:
+        if self.menu is None:
+            return
+        self.receiver.send({
+            "type": "menu",
+            "view": self.menu.view(self.library.items, self.library.cursor_video_id),
+        })
+
+    def _video_ids(self) -> list[str]:
+        return [i.video_id for i in self.library.items]
+
+    def live_position(self) -> float:
+        """Where playback is now, for /status and the periodic save."""
+        if self.state in ("playing", "paused"):
+            return self.receiver.live_position or 0.0
+        return 0.0
+
+    async def _ensure_receiver(self) -> bool:
+        """Make sure our page is open on the Chromecast and connected.
+
+        Launching DashCast restarts the app (logo on screen), so it only
+        happens when the page is not connected or another app is in front.
+        """
+        if self.receiver.connected and self.chromecast.receiver_app_active:
+            return True
+        await self.chromecast.wait_for_connection()
+        url = f"http://{_get_local_ip()}:{config.SERVER_PORT}/receiver"
+        seen = self.receiver.subscriptions
+        try:
+            await asyncio.to_thread(self.chromecast.launch_receiver, url)
+        except Exception as e:
+            log.error("Launching the receiver page failed: %s", e)
+            return False
+        # Wait for a NEW connection: a stale subscriber left over from a page
+        # that another app replaced must not count.
+        if not await self.receiver.wait_new_subscriber(seen, RECEIVER_CONNECT_TIMEOUT_S):
+            log.error(
+                "Receiver page did not connect within %.0fs of launching %s",
+                RECEIVER_CONNECT_TIMEOUT_S, url,
+            )
+            return False
+        return True
 
     def _find_playable_index(self, *, start_idx: int, direction: int, wrap: bool) -> int | None:
         """Scan items starting at start_idx in `direction` (+1 forward, -1 backward),
@@ -141,8 +213,10 @@ class PlayerCore:
 
         Skips items still encoding/queued — the remote should never land on
         an item that can't be cast. Returns an ActionResult describing the
-        outcome (issue #6).
+        outcome (issue #6). While paused it moves the menu highlight instead.
         """
+        if self.state == "paused" and self.menu is not None:
+            return self._move_menu(+1)
         if not self.library.items:
             return _NO_ITEMS
         n = len(self.library.items)
@@ -171,7 +245,10 @@ class PlayerCore:
         Skips items still encoding/queued. No wrap. Recovers from a stale /
         phantom cursor (a video_id no longer in the library) by scanning
         backward from the last item — symmetric to next()/toggle() (issue #5).
+        While paused it moves the menu highlight instead.
         """
+        if self.state == "paused" and self.menu is not None:
+            return self._move_menu(-1)
         if not self.library.items:
             return _NO_ITEMS
         idx = self._cursor_index()
@@ -205,23 +282,24 @@ class PlayerCore:
             return _DID_ACTION
         return _NO_PLAYABLE
 
+    def _move_menu(self, delta: int) -> ActionResult:
+        self.menu.move(self._video_ids(), delta)
+        self._send_menu()
+        return _DID_ACTION
+
     async def toggle(self) -> ActionResult:
-        """play→pause, paused→resume, idle→start nearest playable item.
+        """playing→pause (menu opens), paused→resume, idle→start nearest
+        playable item.
 
         From idle, scans forward from the cursor (inclusive) for the first item
         with a cache file and casts it. If the cursor lands on an unready item
         (encoding/queued), the remote's toggle skips ahead instead of no-op.
-
-        When we believe we are active (playing/casting/paused) but the
-        Chromecast media session has been reclaimed during a long pause, a
-        plain pause/resume is a silent no-op (issue #7). Detect that and
-        recast the cursor item from the last known position instead.
         """
-        if self.state in ("playing", "casting", "paused"):
-            if self.chromecast.is_session_lost():
-                return await self._recast_after_session_loss()
-            await asyncio.to_thread(self.chromecast.pause_or_resume)
-            self.state = "paused" if self.state in ("playing", "casting") else "playing"
+        if self.state == "playing":
+            self._pause()
+            return _DID_ACTION
+        if self.state == "paused":
+            self._resume()
             return _DID_ACTION
         if not self.library.items:
             return _NO_ITEMS
@@ -237,71 +315,91 @@ class PlayerCore:
             return _DID_ACTION
         return _NO_PLAYABLE
 
-    async def _recast_after_session_loss(self) -> ActionResult:
-        """Recast the cursor item from its last known position after the media
-        session was reclaimed by the TV (issue #7)."""
-        idx = self._cursor_index()
-        if idx is None:
-            log.info("toggle: session lost but no cursor item")
-            return _NO_PLAYABLE
-        item = self.library.items[idx]
-        if not item.cache_file_present():
-            # File vanished while the session was lost — recast is impossible.
-            # Re-queue so the pipeline rebuilds it (issue #10).
-            if item.filename:
-                self._requeue_missing_cache(item)
-            log.info("toggle: session lost but cursor item not playable")
-            return _NO_PLAYABLE
-        resume_pos = self.chromecast.current_time or item.playback_position or 0.0
-        item.playback_position = resume_pos
+    def _pause(self, open_menu: bool = True) -> None:
+        """Pause the page, save the position on the cursor item, open the menu."""
+        item = self.library.cursor_item()
+        if item is not None:
+            self._snapshot_position(item)
+            item.status = "paused"
+        self.receiver.send({"type": "pause"})
+        self.state = "paused"
+        if open_menu:
+            self.menu = PauseMenu(self.library.cursor_video_id or "")
+            self._send_menu()
         log.info(
-            "toggle: media session lost — recasting %s from %.1fs",
-            item.video_id, resume_pos,
+            "Paused %s at %.1fs",
+            item.video_id if item else None,
+            item.playback_position if item else 0.0,
         )
-        if await self._cast_current():
-            return _DID_ACTION
-        return _NO_PLAYABLE
+
+    def _resume(self) -> None:
+        item = self.library.cursor_item()
+        self.receiver.send({"type": "menu", "view": None})
+        self.receiver.send({"type": "play"})
+        if item is not None:
+            item.status = "playing"
+        self.menu = None
+        self.state = "playing"
 
     async def stop(self) -> ActionResult:
         """Stop playback and set state to idle. Cursor stays on the current item;
         its status reverts to 'ready' so a subsequent toggle/play re-casts it
         from where it left off.
 
-        The live position is snapshotted BEFORE issuing the stop command
-        (issue #13): chromecast.stop() tears down the media session, after
-        which the cached position may already reflect the post-teardown
-        state. Without this, resume relied solely on the 30s periodic save,
-        which can be stale by up to a full interval — or, for a session
-        stopped within the first 30s, never have saved at all — landing the
-        next play back near the beginning instead of where playback left off.
+        The live position is snapshotted onto the item first (issue #13):
+        without it, resume relied solely on the 30s periodic save, which can be
+        stale by up to a full interval. The page stays open on a black screen
+        so the next play starts without the DashCast logo.
         """
-        idx = self._cursor_index()
-        item = self.library.items[idx] if idx is not None else None
-        if item is not None and item.status in ("playing", "casting", "paused"):
-            item.playback_position = self.chromecast.live_current_time or item.playback_position or 0.0
+        item = self.library.cursor_item()
+        if item is not None and item.status in ("playing", "paused"):
+            self._snapshot_position(item)
             item.status = "ready"
-        await asyncio.to_thread(self.chromecast.stop)
+        self._blank()
         self.state = "idle"
         return _DID_ACTION
 
+    def _blank(self) -> None:
+        self.menu = None
+        if self.receiver.connected:
+            self.receiver.send({"type": "menu", "view": None})
+            self.receiver.send({"type": "blank"})
+
     async def stop_and_remove(self, video_id: str) -> None:
-        """If video_id is the currently playing/casting/paused item, stop it.
+        """If video_id is the currently playing/paused item, stop it.
 
         The caller is responsible for actually removing the item from the
         library after this returns.
         """
         if (
             self.library.cursor_video_id == video_id
-            and self.state in ("playing", "casting", "paused")
+            and self.state in ("playing", "paused", "calibrating")
         ):
-            await asyncio.to_thread(self.chromecast.stop)
+            self._blank()
             self.state = "idle"
 
     async def seek_relative(self, seconds: int) -> ActionResult:
-        issued = await asyncio.to_thread(self.chromecast.seek_relative, seconds)
-        if issued:
-            return _DID_ACTION
-        return _NO_CC_SESSION
+        """Seek the page by `seconds` from the live position, clamped to
+        [0, duration] (no upper clamp while the duration is unknown). While
+        paused the new position is also the resume point, and the menu is
+        re-sent so its time line updates."""
+        if self.state not in ("playing", "paused"):
+            return _NO_CC_SESSION
+        item = self.library.cursor_item()
+        current = self.receiver.live_position
+        if current is None:
+            current = item.playback_position if item is not None else 0.0
+        new = max(0.0, current + seconds)
+        if self.receiver.duration > 0:
+            new = min(new, self.receiver.duration)
+        self.receiver.send({"type": "seek", "position": new})
+        if self.state == "paused":
+            if item is not None:
+                item.playback_position = new
+            if self.menu is not None:
+                self.menu.confirming_delete = False
+                self._send_menu()
+        return _DID_ACTION
 
     async def delete_current(self) -> None:
         item = self.library.cursor_item()
@@ -350,21 +448,26 @@ class PlayerCore:
         start = idx + 1
         if start >= n:
             if not self.library.loop_mode:
-                self.state = "idle"
+                self._end_of_playlist()
                 return
             start = 0
         new_idx = self._find_playable_index(
             start_idx=start, direction=1, wrap=self.library.loop_mode,
         )
         if new_idx is None:
-            self.state = "idle"
+            self._end_of_playlist()
             return
         self.library.cursor_video_id = self.library.items[new_idx].video_id
         # The found item validated as cache-present, but if its file vanished in
         # the find→cast window (TOCTOU) _cast_current re-queues and casts nothing
-        # — go idle rather than leave a phantom "casting" state.
+        # — go idle rather than leave a phantom "playing" state.
         if not await self._cast_current():
-            self.state = "idle"
+            self._end_of_playlist()
+
+    def _end_of_playlist(self) -> None:
+        """Nothing left to play: black screen, like after Stop."""
+        self._blank()
+        self.state = "idle"
 
     # ------------------------------------------------------------------
     # Cast helpers
@@ -395,6 +498,10 @@ class PlayerCore:
                 )
             return False
 
+        if not await self._ensure_receiver():
+            log.warning("Cannot play %s: receiver page unavailable", item.video_id)
+            return False
+
         # Any item currently labelled playing/casting/paused but that's no longer
         # the cursor is stale — revert to "ready" so a future cursor move back
         # doesn't trip the "already playing" guard.
@@ -402,32 +509,36 @@ class PlayerCore:
             if other is not item and other.status in ("playing", "casting", "paused"):
                 other.status = "ready"
 
-        await self.chromecast.wait_for_connection()
-        local_ip = _get_local_ip()
-        url = f"http://{local_ip}:{config.SERVER_PORT}/media/{item.filename}"
-        item.status = "casting"
-        # Defensive: clear any stale "FINISHED" flag from the previous item so
-        # the natural-end watcher doesn't fire immediately for the new cast.
-        self.chromecast.reset_playback_ended()
-        await asyncio.to_thread(
-            self.chromecast.cast_url,
-            url,
-            start_position=item.playback_position,
-        )
-        self.state = "casting"
+        # Clear a stale "ended" from the previous item so the natural-end
+        # watcher doesn't fire immediately for the new one.
+        self.receiver.reset_ended()
+        self.receiver.send({"type": "menu", "view": None})
+        self.receiver.send({
+            "type": "load",
+            "url": self._media_url(item.filename),
+            "position": item.playback_position,
+            "autoplay": True,
+        })
+        self.menu = None
         item.status = "playing"
-        log.info("Casting %s (resume from %.1fs)", item.video_id, item.playback_position)
+        self.state = "playing"
+        log.info("Playing %s (resume from %.1fs)", item.video_id, item.playback_position)
         return True
 
     async def watch_natural_end(self) -> None:
-        """Background loop: when the Chromecast reports natural end of the
-        current item (idle_reason == 'FINISHED'), advance the cursor and autoplay.
+        """Background loop: when the page reports the natural end of the
+        loaded video, advance the cursor and autoplay. Only acts while
+        playing (a late `ended` during pause or calibration is ignored; one
+        for a previous video is already filtered by ReceiverChannel).
 
         Daemon spawns this as a long-running task. Does not return until
         cancelled via task.cancel()."""
         while True:
-            await self.chromecast.wait_for_playback_end()
-            self.chromecast.reset_playback_ended()
+            await self.receiver.wait_ended()
+            self.receiver.reset_ended()
+            if self.state != "playing":
+                log.info("Ignoring natural end while %s", self.state)
+                continue
             try:
                 await self.on_playback_finished()
             except Exception:

@@ -35,6 +35,10 @@ class ReceiverChannel:
         self._on_disconnect: Callable[[], None] | None = None
         self._connected_event = asyncio.Event()
         self._ended_event = asyncio.Event()
+        # Total subscribe() calls ever: lets a caller that just launched the
+        # page wait for a NEW connection, not a stale one still hanging on.
+        self.subscriptions: int = 0
+        self._subscribed_event = asyncio.Event()
         # Local playback model. _position is None until something is loaded
         # or the page reports.
         self._expected_src: str | None = None
@@ -64,7 +68,9 @@ class ReceiverChannel:
         q.put_nowait({"type": "config", "margins": dict(self.margins)})
         was_connected = self.connected
         self._subscribers.append(q)
+        self.subscriptions += 1
         self._connected_event.set()
+        self._subscribed_event.set()
         if not was_connected:
             log.info("Receiver page connected")
             if self._on_connect is not None:
@@ -89,6 +95,21 @@ class ReceiverChannel:
         except asyncio.TimeoutError:
             return False
         return self.connected
+
+    async def wait_new_subscriber(self, after: int, timeout_s: float) -> bool:
+        """Wait until `subscriptions` exceeds `after` (a value read earlier)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while self.subscriptions <= after:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            self._subscribed_event.clear()
+            try:
+                await asyncio.wait_for(self._subscribed_event.wait(), remaining)
+            except asyncio.TimeoutError:
+                return self.subscriptions > after
+        return True
 
     # ------------------------------------------------------------------
     # Daemon → page
