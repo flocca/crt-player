@@ -48,14 +48,27 @@ def test_full_flow_sync_download_cast(integration_daemon, integration_config):
         f"item not ready within {integration_config['encode_wait_s']}s"
     )
 
-    # Trigger play
-    r = httpx.post(f"{base}/control/play/{target_vid}")
+    # Trigger play: the first play launches DashCast on the receiver page and
+    # returns once the page is connected (up to ~20s).
+    r = httpx.post(f"{base}/control/play/{target_vid}", timeout=40)
     assert r.status_code == 200
+    assert r.json()["did_action"] is True
 
-    # Wait for playback to start
+    # Let the page load the video and report back.
     time.sleep(5)
     status = httpx.get(f"{base}/status").json()
-    assert status["player"]["state"] in ("casting", "playing")
+    assert status["player"]["state"] == "playing"
+    assert status["player"]["current_time_s"] > 0
+
+    # Pause opens the menu on the TV; OK on the paused video resumes.
+    httpx.post(f"{base}/control/toggle")
+    status = httpx.get(f"{base}/status").json()
+    assert status["player"]["state"] == "paused"
+    assert status["player"]["menu_open"] is True
+    httpx.post(f"{base}/control/toggle")
+    status = httpx.get(f"{base}/status").json()
+    assert status["player"]["state"] == "playing"
+    assert status["player"]["menu_open"] is False
 
     # Cleanup
     httpx.post(f"{base}/control/stop")
