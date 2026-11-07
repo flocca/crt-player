@@ -35,10 +35,10 @@ log = logging.getLogger(__name__)
 RECEIVER_CONNECT_TIMEOUT_S = 20.0
 # Seconds a menu notice stays on screen.
 NOTICE_S = 2.0
-# Notices that stay until a key: the page cannot play the loaded file, or
-# ffmpeg failed to render the calibration pattern.
+# Stays until a key: the page cannot play the loaded file.
 MEDIA_ERROR_NOTICE = "Errore nel video"
-CALIBRATION_FAILED_NOTICE = "Calibrazione non riuscita"
+# Calibration asked before the startup render finished, or after it failed.
+CALIBRATION_NOT_READY_NOTICE = "Calibrazione non pronta"
 # Seconds the calibration pattern stays without a key press.
 CALIBRATION_TIMEOUT_S = 60.0
 # Seconds after the page's last event-stream subscriber leaves before the
@@ -82,6 +82,9 @@ def _get_local_ip() -> str:
 
 
 class PlayerCore:
+    # Path of the calibration clip once prepare_calibration rendered it.
+    _calibration_clip: str | None = None
+
     def __init__(
         self,
         library: LibraryStore,
@@ -118,7 +121,6 @@ class PlayerCore:
         # removal, a pick during a relaunch), so position and stop decisions
         # follow this, not the cursor.
         self._loaded_video_id: str | None = None
-        self._calibration_pending = False
         self._launch_task: asyncio.Task | None = None
         # The page reported a media error on the loaded video: resuming it
         # reloads the file instead of sending `play` to a broken element.
@@ -745,66 +747,44 @@ class PlayerCore:
     # Calibration (a page state, not a playlist item)
     # ------------------------------------------------------------------
 
+    async def prepare_calibration(self) -> None:
+        """Render the calibration clip once; the daemon runs this in the
+        background at startup (the margins it draws do not change while the
+        daemon runs). Until it is done, or if ffmpeg fails, calibrate() only
+        says the pattern is not ready."""
+        from crt import calibration
+
+        out_path = os.path.join(config.TEMP_DIR, "calibration_pattern.mp4")
+        try:
+            await calibration.generate_calibration_clip(out_path)
+        except Exception:
+            log.exception("Rendering the calibration pattern failed")
+            return
+        self._calibration_clip = out_path
+        log.info("Calibration pattern ready: %s", out_path)
+
     async def calibrate(self) -> None:
         """Show the calibration pattern inside the page.
 
-        A video that is playing is paused first with its position saved,
-        before the clip is rendered (ffmpeg takes a few seconds). A command
-        that changes the player meanwhile (resume, another video, stop, a new
-        pause) wins and the pattern is not shown; a pause left without its
-        menu (render failed or dropped) gets the menu back. The pattern stays
-        until any key (toggle/next/prev/seek) or for
+        Never waits: the clip is rendered at startup (prepare_calibration).
+        A video that is playing is paused first with its position saved. The
+        pattern stays until any key (toggle/next/prev/seek) or for
         CALIBRATION_TIMEOUT_S, then the player goes back to the paused menu on
         the same video (or to a black screen if nothing was playing). Its end
         never marks a video done and its time never touches a resume position.
-
-        The clip comes from calibration.generate_calibration_clip(out_path),
-        an async coroutine that renders an MP4 via ffmpeg into TEMP_DIR, served
-        by the media route.
         """
-        from crt import calibration
-
-        if self.state == "calibrating" or self._calibration_pending:
+        if self.state == "calibrating":
             return
-        self._calibration_pending = True
-        try:
-            if self.state == "playing":
-                self._pause(open_menu=False)
-            # A new pause opens a new menu, so its identity catches commands
-            # that leave state and video as they were.
-            before = (self.state, self._loaded_video_id, self.menu)
-            out_path = os.path.join(config.TEMP_DIR, "calibration_pattern.mp4")
-            try:
-                await calibration.generate_calibration_clip(out_path)
-            except Exception:
-                self._open_menu_if_paused(CALIBRATION_FAILED_NOTICE)
-                raise
-            if (self.state, self._loaded_video_id, self.menu) != before:
-                log.info("Calibration dropped: the player changed while rendering the clip")
-                return
-            self._show_calibration(out_path)
-        finally:
-            self._calibration_pending = False
-            self._open_menu_if_paused()
-
-    def _open_menu_if_paused(self, notice: str | None = None) -> None:
-        """Every pause shows the menu: restore it after calibrate paused
-        without one and did not show the pattern."""
-        if self.state != "paused":
+        if self._calibration_clip is None:
+            log.warning("Calibration requested but the pattern is not ready")
+            if self.menu is not None:
+                self._flash_notice(CALIBRATION_NOT_READY_NOTICE)
             return
-        if self.menu is None:
-            item = self._loaded_item()
-            self.menu = PauseMenu(item.video_id if item is not None else "")
-        elif notice is None:
-            return
-        if notice is not None:
-            self.menu.notice = notice
-        self._send_menu()
-
-    def _show_calibration(self, out_path: str) -> None:
+        if self.state == "playing":
+            self._pause(open_menu=False)
         self._calibration_return = "paused" if self.state == "paused" else "idle"
         self.menu = None
-        self._calibration_url = self._media_url(os.path.basename(out_path))
+        self._calibration_url = self._media_url(os.path.basename(self._calibration_clip))
         self.receiver.send({"type": "menu", "view": None})
         self.receiver.send({"type": "calibration", "url": self._calibration_url})
         self.state = "calibrating"
@@ -890,11 +870,12 @@ class PlayerCore:
 
     async def _lost_after_grace(self) -> None:
         await asyncio.sleep(RECEIVER_LOST_GRACE_S)
+        if self._launch_task is not None and not self._launch_task.done():
+            # A launch is under way: judge the page once it is over. A page
+            # that connects meanwhile cancels this task.
+            await asyncio.wait({self._launch_task})
         self._lost_task = None
         if self.receiver.connected:
-            return
-        if self._launch_task is not None and not self._launch_task.done():
-            # A launch is under way: it decides (a new page, or _drop_page).
             return
         self._drop_page(f"page lost for {RECEIVER_LOST_GRACE_S:.0f}s")
 
@@ -926,7 +907,9 @@ class PlayerCore:
         self._load_failed = True
         if self.state == "playing":
             self._pause()
-        self._open_menu_if_paused(MEDIA_ERROR_NOTICE)
+        if self.menu is not None:
+            self.menu.notice = MEDIA_ERROR_NOTICE
+            self._send_menu()
 
     async def watch_idle(self, close_after_s: float, poll_s: float = 30.0) -> None:
         """Background loop: after `close_after_s` without playback (idle or

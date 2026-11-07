@@ -174,6 +174,9 @@ async def main_async() -> None:
         asyncio.create_task(chromecast.discover_loop(), name="cc_discovery"),
         asyncio.create_task(pipeline.run_prepare(), name="pipeline_prepare"),
         asyncio.create_task(player.watch_natural_end(), name="player_natural_end"),
+        # One-shot: calibrate() never waits for ffmpeg (CRT_MARGIN_* only
+        # change with a restart, so one render serves the whole run).
+        asyncio.create_task(player.prepare_calibration(), name="calibration_clip"),
         asyncio.create_task(
             player.watch_idle(config.RECEIVER_IDLE_CLOSE_S), name="player_idle_close",
         ),

@@ -1245,9 +1245,11 @@ async def test_delete_current_from_paused_state_stops_first():
 
 @pytest.fixture
 def fake_clip(monkeypatch):
-    gen = AsyncMock(side_effect=lambda path, *a, **k: path)
-    monkeypatch.setattr("crt.calibration.generate_calibration_clip", gen)
-    return gen
+    """The pattern the daemon renders at startup (prepare_calibration) is
+    ready for every PlayerCore of the test."""
+    path = os.path.join(config.TEMP_DIR, "calibration_pattern.mp4")
+    monkeypatch.setattr(PlayerCore, "_calibration_clip", path)
+    return path
 
 
 @pytest.mark.asyncio
@@ -1269,7 +1271,6 @@ async def test_calibrate_while_playing_pauses_saves_position_and_returns_to_menu
     assert {"type": "menu", "view": None} in msgs
     cal = [m for m in msgs if m["type"] == "calibration"][-1]
     assert cal["url"] == "http://10.0.0.5:8765/media/calibration_pattern.mp4"
-    fake_clip.assert_awaited_once()
 
     r = await pc.next()  # any key ends it, and does nothing else
 
@@ -1650,29 +1651,6 @@ async def test_seek_past_end_while_paused_stops_short_of_the_end():
 
 
 @pytest.mark.asyncio
-async def test_second_calibrate_during_clip_generation_is_ignored(monkeypatch):
-    gate = asyncio.Event()
-
-    async def slow_clip(path, *a, **k):
-        await gate.wait()
-        return path
-
-    gen = AsyncMock(side_effect=slow_clip)
-    monkeypatch.setattr("crt.calibration.generate_calibration_clip", gen)
-    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 5.0)
-
-    first = asyncio.create_task(pc.calibrate())
-    second = asyncio.create_task(pc.calibrate())
-    await asyncio.sleep(0.01)
-    gate.set()
-    await asyncio.gather(first, second)
-    await pc.next()  # ends calibration
-
-    assert gen.await_count == 1
-    assert pc.state == "paused" and pc.menu is not None
-
-
-@pytest.mark.asyncio
 async def test_play_while_calibrating_removes_the_pattern(monkeypatch, fake_clip):
     monkeypatch.setattr("crt.player_core.CALIBRATION_TIMEOUT_S", 0.02)
     pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 5.0)
@@ -1872,54 +1850,6 @@ async def test_failed_play_keeps_cursor_and_pause_targets_the_loaded_video():
 # ---------------------------------------------------------------------
 
 
-def _gated_clip(monkeypatch):
-    gate = asyncio.Event()
-
-    async def slow_clip(path, *a, **k):
-        await gate.wait()
-        return path
-
-    monkeypatch.setattr("crt.calibration.generate_calibration_clip", AsyncMock(side_effect=slow_clip))
-    return gate
-
-
-@pytest.mark.asyncio
-async def test_calibrate_pauses_before_rendering(monkeypatch):
-    gate = _gated_clip(monkeypatch)
-    clock = Clock()
-    library = _make_library(["a"])
-    pc, receiver, q, cc = _make_player(library, clock=clock)
-    await pc.play("a")
-    clock.t += 30
-    _page_reports(receiver)
-
-    task = asyncio.create_task(pc.calibrate())
-    await asyncio.sleep(0.01)
-
-    assert pc.state == "paused" and {"type": "pause"} in drain(q)
-    assert library.items[0].playback_position == 30.0
-    gate.set()
-    await task
-    assert pc.state == "calibrating"
-
-
-@pytest.mark.asyncio
-async def test_resume_during_rendering_drops_the_calibration(monkeypatch):
-    gate = _gated_clip(monkeypatch)
-    library = _make_library(["a"])
-    pc, receiver, q, cc = _make_player(library)
-    await pc.play("a")
-
-    task = asyncio.create_task(pc.calibrate())
-    await asyncio.sleep(0.01)
-    await pc.toggle()  # resume while ffmpeg renders
-    gate.set()
-    await task
-
-    assert pc.state == "playing"
-    assert not [m for m in drain(q) if m["type"] == "calibration"]
-
-
 # ---------------------------------------------------------------------
 # Media errors and menu refresh
 # ---------------------------------------------------------------------
@@ -2036,34 +1966,80 @@ async def test_media_error_under_calibration_is_kept_for_the_menu(fake_clip):
     assert loads(msgs) and {"type": "play"} not in msgs
 
 
+# ---------------------------------------------------------------------
+# Review round 3: no await left in calibrate, one owner for "page lost"
+# ---------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_failed_render_while_playing_opens_the_menu(monkeypatch):
-    gen = AsyncMock(side_effect=RuntimeError("ffmpeg failed"))
+async def test_prepare_calibration_renders_once_and_calibrate_uses_it(monkeypatch):
+    gen = AsyncMock(side_effect=lambda path, *a, **k: path)
     monkeypatch.setattr("crt.calibration.generate_calibration_clip", gen)
     library = _make_library(["a"])
     pc, receiver, q, cc = _make_player(library)
-    await pc.play("a")
 
-    with pytest.raises(RuntimeError):
-        await pc.calibrate()
+    await pc.prepare_calibration()
+    await pc.calibrate()
+    await pc.next()  # ends it
+    await pc.calibrate()
 
-    assert pc.state == "paused" and pc.menu is not None
-    assert pc.menu.notice == "Calibrazione non riuscita"
+    gen.assert_awaited_once()
+    assert pc.state == "calibrating"
+    cal = [m for m in drain(q) if m["type"] == "calibration"][-1]
+    assert cal["url"].endswith("/media/calibration_pattern.mp4")
 
 
 @pytest.mark.asyncio
-async def test_resume_and_pause_again_during_rendering_drops_the_calibration(monkeypatch):
-    gate = _gated_clip(monkeypatch)
+async def test_calibrate_before_the_pattern_is_ready_only_says_so(monkeypatch):
+    gen = AsyncMock(side_effect=RuntimeError("ffmpeg failed"))
+    monkeypatch.setattr("crt.calibration.generate_calibration_clip", gen)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 5.0)
+
+    await pc.prepare_calibration()  # failure is logged, not raised
+    await pc.calibrate()
+
+    assert pc.state == "paused"
+    assert pc.menu.notice == "Calibrazione non pronta"
+    assert not [m for m in drain(q) if m["type"] == "calibration"]
+
+
+@pytest.mark.asyncio
+async def test_calibrate_while_playing_without_pattern_keeps_playing():
     library = _make_library(["a"])
     pc, receiver, q, cc = _make_player(library)
     await pc.play("a")
 
-    task = asyncio.create_task(pc.calibrate())
-    await asyncio.sleep(0.01)
-    await pc.toggle()  # resume
-    await pc.toggle()  # pause again: a new menu
-    gate.set()
-    await task
+    await pc.calibrate()
 
-    assert pc.state == "paused" and pc.menu is not None
-    assert not [m for m in drain(q) if m["type"] == "calibration"]
+    assert pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_page_lost_during_a_launch_is_checked_when_the_launch_ends(monkeypatch):
+    """The new page connects and drops while launch_receiver still blocks:
+    once the launch ends, nobody is connected and the player goes idle."""
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 0.01)
+    library = _make_library(["a"])
+    cc = _make_chromecast()
+    receiver = ReceiverChannel(MARGINS)
+    gate = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def blip():
+        receiver.unsubscribe(receiver.subscribe())  # connects, then drops
+
+    def slow_launch(url):
+        loop.call_soon_threadsafe(blip)
+        asyncio.run_coroutine_threadsafe(gate.wait(), loop).result()
+
+    cc.launch_receiver = MagicMock(side_effect=slow_launch)
+    pc = PlayerCore(library, cc, receiver)
+    await pc.play("a")
+    await asyncio.sleep(0.05)  # past the grace, launch still blocking
+    assert pc.state == "playing"
+
+    gate.set()
+    await _launched(pc)
+    await asyncio.sleep(0.01)
+
+    assert pc.state == "idle"
