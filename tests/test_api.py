@@ -406,3 +406,38 @@ def test_delete_current_503_when_no_player():
     resp = client.post("/control/delete/current")
 
     assert resp.status_code == 503
+
+
+# ─── /receiver ──────────────────────────────────────────────
+
+def test_receiver_page_is_served_as_html():
+    client = TestClient(create_app(LibraryStore()))
+    r = client.get("/receiver")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert r.headers["cache-control"] == "no-store"
+    assert "<title>" in r.text
+
+
+def test_receiver_report_is_forwarded_to_channel():
+    receiver = MagicMock()
+    client = TestClient(create_app(LibraryStore(), receiver=receiver))
+    body = {"event": "status", "position": 1.0, "duration": 2.0, "paused": False, "src": "u"}
+    r = client.post("/receiver/report", json=body)
+    assert r.json() == {"ok": True}
+    receiver.handle_report.assert_called_once_with(body)
+
+
+def test_receiver_endpoints_503_without_channel():
+    client = TestClient(create_app(LibraryStore()))
+    assert client.post("/receiver/report", json={}).status_code == 503
+    assert client.get("/receiver/events").status_code == 503
+
+
+def test_media_supports_range_requests(tmp_path):
+    (tmp_path / "v.mp4").write_bytes(bytes(1000))
+    client = TestClient(create_app(LibraryStore(), media_dir=str(tmp_path)))
+    r = client.get("/media/v.mp4", headers={"Range": "bytes=100-199"})
+    assert r.status_code == 206
+    assert r.headers["content-range"] == "bytes 100-199/1000"
+    assert len(r.content) == 100
