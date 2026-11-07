@@ -81,8 +81,10 @@ def create_app(
             "player": {
                 "state": getattr(pc, "state", "idle") if pc else "idle",
                 "current_video_id": library.cursor_video_id,
-                "current_time_s": getattr(cc, "live_current_time", None) if cc else None,
-                "duration_s": getattr(cc, "duration", None) if cc else None,
+                # Position and duration come from the receiver page.
+                "current_time_s": pc.live_position() if pc else None,
+                "duration_s": receiver.duration if receiver is not None else None,
+                "menu_open": getattr(pc, "menu", None) is not None if pc else False,
                 "chromecast": "connected" if (cc and getattr(cc, "connected", False)) else "disconnected",
             },
         }

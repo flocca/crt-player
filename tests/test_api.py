@@ -82,6 +82,34 @@ def test_get_status_includes_youtube_pipeline_player():
     assert body["player"]["chromecast"] == "connected"
 
 
+def test_status_reports_player_position_duration_and_menu():
+    library = LibraryStore()
+    library.cursor_video_id = "A"
+    player = MagicMock()
+    player.state = "paused"
+    player.live_position = MagicMock(return_value=61.5)
+    player.menu = object()
+    receiver = MagicMock()
+    receiver.duration = 600.0
+    chromecast = MagicMock()
+    chromecast.connected = True
+    app = create_app(library, player=player, receiver=receiver)
+    app.state.chromecast = chromecast
+
+    p = TestClient(app).get("/status").json()["player"]
+
+    assert p["state"] == "paused" and p["current_time_s"] == 61.5
+    assert p["duration_s"] == 600.0 and p["menu_open"] is True
+    assert p["current_video_id"] == "A" and p["chromecast"] == "connected"
+
+
+def test_status_without_player_or_receiver():
+    p = TestClient(create_app(LibraryStore())).get("/status").json()["player"]
+
+    assert p["state"] == "idle" and p["current_time_s"] is None
+    assert p["duration_s"] is None and p["menu_open"] is False
+
+
 # ─── /control/* ──────────────────────────────────────────────
 
 def test_post_control_next_calls_player():

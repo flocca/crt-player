@@ -6,6 +6,7 @@ import os
 import signal
 import sys
 import time
+from typing import Callable
 
 import uvicorn
 
@@ -15,6 +16,7 @@ from crt.chromecast_mgr import ChromecastManager
 from crt.library_store import LibraryStore
 from crt.pipeline import PipelineWorker
 from crt.player_core import PlayerCore
+from crt.receiver import ReceiverChannel
 from crt.sync_engine import SyncEngine
 from crt.youtube_client import YouTubeAuthError, YouTubeClient
 
@@ -64,7 +66,7 @@ def cleanup_temp_files(library: LibraryStore) -> None:
 
 
 async def periodic_save_loop(
-    library, chromecast, state_file: str, interval_s: float
+    library, position: Callable[[], float], state_file: str, interval_s: float
 ) -> None:
     """Persist state to disk every interval_s seconds (issue #4).
 
@@ -73,14 +75,15 @@ async def periodic_save_loop(
     This loop bounds that loss to one interval. The shutdown path keeps its
     own final flush. A failing save is logged and retried on the next tick —
     it must never kill the loop.
+
+    `position` is PlayerCore.live_position: the page's position, extrapolated
+    between reports, and 0.0 while idle or calibrating (save_state ignores a
+    zero, so the stored resume point survives).
     """
     while True:
         await asyncio.sleep(interval_s)
         try:
-            # live_current_time (not the current_time snapshot) so a tick
-            # landing between two status pushes during a long steady PLAYING
-            # stretch still saves close to the real position (issue #12/#13).
-            pos = getattr(chromecast, "live_current_time", 0.0) or 0.0
+            pos = position() or 0.0
             library.save_state(state_file, playback_position=pos)
             log.debug("periodic save_state -> %s (pos=%.1f)", state_file, pos)
         except Exception:
@@ -104,8 +107,14 @@ async def main_async() -> None:
         except (YouTubeAuthError, FileNotFoundError) as e:
             log.warning("YouTube client unavailable, remote delete + sync disabled: %s", e)
 
+    receiver = ReceiverChannel({
+        "top": config.MARGIN_TOP,
+        "bottom": config.MARGIN_BOTTOM,
+        "left": config.MARGIN_LEFT,
+        "right": config.MARGIN_RIGHT,
+    })
     player = PlayerCore(
-        library, chromecast, youtube_client=yt_client,
+        library, chromecast, receiver, youtube_client=yt_client,
         on_cache_miss=pipeline.wake_prepare,
     )
 
@@ -135,6 +144,8 @@ async def main_async() -> None:
             on_add=_on_yt_add,
         )
         log.info("SyncEngine ready (playlist=%s)", config.YT_PLAYLIST_ID)
+        # Menu command "Sync now".
+        player.on_sync_request = sync_engine.kick
 
     app = create_app(
         library=library,
@@ -142,6 +153,7 @@ async def main_async() -> None:
         sync_engine=sync_engine,
         pipeline=pipeline,
         media_dir=config.TEMP_DIR,
+        receiver=receiver,
     )
     app.state.chromecast = chromecast
 
@@ -156,8 +168,11 @@ async def main_async() -> None:
         asyncio.create_task(pipeline.run_prepare(), name="pipeline_prepare"),
         asyncio.create_task(player.watch_natural_end(), name="player_natural_end"),
         asyncio.create_task(
+            player.watch_idle(config.RECEIVER_IDLE_CLOSE_S), name="player_idle_close",
+        ),
+        asyncio.create_task(
             periodic_save_loop(
-                library, chromecast, config.STATE_FILE, config.SAVE_INTERVAL_S
+                library, player.live_position, config.STATE_FILE, config.SAVE_INTERVAL_S
             ),
             name="periodic_save",
         ),
@@ -189,15 +204,11 @@ async def main_async() -> None:
             t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    library.save_state(config.STATE_FILE, playback_position=chromecast.live_current_time)
+    library.save_state(config.STATE_FILE, playback_position=player.live_position())
     chromecast.set_status_callback(None)
     chromecast.set_connection_callback(None)
     pipeline.cancel_current()
-    if chromecast.cast:
-        try:
-            chromecast.cast.quit_app()
-        except Exception:
-            pass
+    chromecast.quit_app()
     chromecast.shutdown()
     log.info("Daemon stopped")
 

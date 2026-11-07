@@ -96,6 +96,7 @@ def integration_daemon(integration_config, real_chromecast_per_test, tmp_path_fa
     from crt.library_store import LibraryStore
     from crt.pipeline import PipelineWorker
     from crt.player_core import PlayerCore
+    from crt.receiver import ReceiverChannel
     from crt.sync_engine import SyncEngine
     from crt.youtube_client import YouTubeClient
 
@@ -109,9 +110,14 @@ def integration_daemon(integration_config, real_chromecast_per_test, tmp_path_fa
     library = LibraryStore()
     cc = real_chromecast_per_test
     pipeline = PipelineWorker(library, cc)
-    player = PlayerCore(library, cc)
+    receiver = ReceiverChannel({
+        "top": cfg.MARGIN_TOP, "bottom": cfg.MARGIN_BOTTOM,
+        "left": cfg.MARGIN_LEFT, "right": cfg.MARGIN_RIGHT,
+    })
+    player = PlayerCore(library, cc, receiver)
     yt = YouTubeClient.from_token_file(cfg.YT_TOKEN_FILE, cfg.YT_CLIENT_SECRETS)
     sync_engine = SyncEngine(library, yt, cfg.YT_PLAYLIST_ID)
+    player.on_sync_request = sync_engine.kick
 
     app = create_app(
         library=library,
@@ -119,6 +125,7 @@ def integration_daemon(integration_config, real_chromecast_per_test, tmp_path_fa
         sync_engine=sync_engine,
         pipeline=pipeline,
         media_dir=cfg.TEMP_DIR,
+        receiver=receiver,
     )
     app.state.chromecast = cc
 
