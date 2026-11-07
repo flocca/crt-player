@@ -124,7 +124,9 @@
   main.addEventListener("ended", function () { report("ended"); });
   main.addEventListener("error", function () {
     var err = main.error ? ("media error " + main.error.code) : "media error";
-    if (currentSrc()) { report("error", { error: err }); }
+    // media: true marks a file the element cannot play (the daemon pauses
+    // with a notice); script and play() errors are only logged.
+    if (currentSrc()) { report("error", { error: err, media: true }); }
   });
   window.onerror = function (message) {
     report("error", { error: String(message) });

@@ -277,6 +277,7 @@ async def test_cast_launches_dashcast_when_page_not_connected():
     pc = PlayerCore(library, cc, receiver)
 
     result = await pc.play("a")
+    await _launched(pc)
 
     cc.launch_receiver.assert_called_once()
     assert cc.launch_receiver.call_args.args[0] == "http://10.0.0.5:8765/receiver"
@@ -294,34 +295,10 @@ async def test_cast_relaunches_when_another_app_took_the_chromecast():
     cc.launch_receiver = MagicMock(side_effect=lambda url: receiver.subscribe())
 
     result = await pc.play("a")
+    await _launched(pc)
 
     cc.launch_receiver.assert_called_once()
-    assert result.did_action
-
-
-@pytest.mark.asyncio
-async def test_cast_fails_cleanly_when_page_never_connects(monkeypatch):
-    monkeypatch.setattr("crt.player_core.RECEIVER_CONNECT_TIMEOUT_S", 0.01)
-    library = _make_library(["a"])
-    cc = _make_chromecast()
-    pc = PlayerCore(library, cc, ReceiverChannel(MARGINS))
-
-    result = await pc.play("a")
-
-    assert result.did_action is False and pc.state == "idle"
-    assert library.items[0].status == "ready"
-
-
-@pytest.mark.asyncio
-async def test_cast_fails_cleanly_when_launch_raises(monkeypatch):
-    library = _make_library(["a"])
-    cc = _make_chromecast()
-    cc.launch_receiver = MagicMock(side_effect=RuntimeError("Chromecast not connected"))
-    pc = PlayerCore(library, cc, ReceiverChannel(MARGINS))
-
-    result = await pc.play("a")
-
-    assert result.did_action is False and pc.state == "idle"
+    assert result.did_action and pc.state == "playing"
 
 
 @pytest.mark.asyncio
@@ -1011,14 +988,14 @@ async def test_toggle_idle_nothing_playable_returns_reason():
 
 
 @pytest.mark.asyncio
-async def test_cast_current_requeues_when_cache_file_missing():
+async def test_cast_requeues_when_cache_file_missing():
     library = _make_library(["A"])
     library.cursor_video_id = "A"
     os.unlink(os.path.join(config.TEMP_DIR, "A.mp4"))  # file vanishes
     woke = MagicMock()
     pc, receiver, q, cc = _make_player(library, on_cache_miss=woke)
 
-    await pc._cast_current()
+    assert pc._cast(library.items[0]).did_action is False
 
     assert loads(drain(q)) == []
     assert library.items[0].status == "queued"
@@ -1486,6 +1463,7 @@ async def test_toggle_after_lost_relaunches_and_resumes_from_saved_position(monk
     cc.launch_receiver = MagicMock(side_effect=lambda url: pages.append(receiver.subscribe()))
 
     await pc.toggle()
+    await _launched(pc)
 
     cc.launch_receiver.assert_called_once()
     load = loads(drain(pages[0]))[-1]
@@ -1630,6 +1608,7 @@ async def test_picking_a_video_while_the_page_relaunches_loads_it_from_its_own_p
 
     await pc.next()  # highlight "c"
     await pc.toggle()
+    await _launched(pc)
 
     page_loads = loads(drain(pages[0]))
     assert [m["url"].rsplit("/", 1)[-1] for m in page_loads] == ["c.mp4"]
@@ -1648,6 +1627,7 @@ async def test_resume_while_page_is_gone_relaunches_at_saved_position(monkeypatc
     cc.launch_receiver = MagicMock(side_effect=lambda url: pages.append(receiver.subscribe()))
 
     r = await pc.toggle()  # OK on the paused video
+    await _launched(pc)
 
     cc.launch_receiver.assert_called_once()
     load = loads(drain(pages[0]))[-1]
@@ -1706,3 +1686,309 @@ async def test_play_while_calibrating_removes_the_pattern(monkeypatch, fake_clip
     assert {"type": "calibration", "url": None} in msgs
     assert loads(msgs)[-1]["url"].endswith("/media/b.mp4")
     assert pc.state == "playing"
+
+
+# ---------------------------------------------------------------------
+# Commands never wait for the page: the launch runs in the background and
+# the page gets the player's state when it connects.
+# ---------------------------------------------------------------------
+
+
+def _player_without_page(library):
+    """PlayerCore whose page is not open: launch_receiver opens a new page
+    (subscribes a queue, collected in `pages`)."""
+    cc = _make_chromecast()
+    receiver = ReceiverChannel(MARGINS)
+    pages = []
+    cc.launch_receiver = MagicMock(side_effect=lambda url: pages.append(receiver.subscribe()))
+    pc = PlayerCore(library, cc, receiver)
+    return pc, receiver, pages, cc
+
+
+async def _launched(pc):
+    if pc._launch_task is not None:
+        await pc._launch_task
+
+
+@pytest.mark.asyncio
+async def test_play_without_page_acks_at_once_and_launches_in_background():
+    library = _make_library(["a"])
+    pc, receiver, pages, cc = _player_without_page(library)
+
+    result = await pc.play("a")
+
+    assert result.did_action and result.reason == "launching"
+    assert pc.state == "playing"
+    cc.launch_receiver.assert_not_called()  # not yet: the ack does not wait
+
+    await _launched(pc)
+
+    cc.launch_receiver.assert_called_once()
+    load = loads(drain(pages[0]))[-1]
+    assert load["url"].endswith("/media/a.mp4") and load["autoplay"] is True
+
+
+@pytest.mark.asyncio
+async def test_stop_during_launch_wins():
+    library = _make_library(["a"])
+    pc, receiver, pages, cc = _player_without_page(library)
+    await pc.play("a")
+
+    await pc.stop()
+    await _launched(pc)
+
+    msgs = drain(pages[0])
+    assert not loads(msgs)
+    assert {"type": "blank"} in msgs
+    assert pc.state == "idle" and library.items[0].status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_second_toggle_during_launch_pauses_without_a_second_launch():
+    library = _make_library(["a"])
+    library.items[0].playback_position = 40.0
+    pc, receiver, pages, cc = _player_without_page(library)
+    await pc.toggle()
+
+    await pc.toggle()
+    await _launched(pc)
+
+    cc.launch_receiver.assert_called_once()
+    msgs = drain(pages[0])
+    load = loads(msgs)[-1]
+    assert load["autoplay"] is False and load["position"] == 40.0
+    assert menus(msgs)[-1]["view"] is not None
+    assert pc.state == "paused"
+
+
+@pytest.mark.asyncio
+async def test_launch_that_never_connects_goes_idle(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_CONNECT_TIMEOUT_S", 0.01)
+    library = _make_library(["a"])
+    library.items[0].playback_position = 15.0
+    cc = _make_chromecast()
+    pc = PlayerCore(library, cc, ReceiverChannel(MARGINS))
+    await pc.play("a")
+
+    await _launched(pc)
+
+    assert pc.state == "idle"
+    assert library.items[0].status == "ready"
+    assert library.items[0].playback_position == 15.0
+
+
+@pytest.mark.asyncio
+async def test_launch_that_raises_goes_idle():
+    library = _make_library(["a"])
+    cc = _make_chromecast()
+    cc.launch_receiver = MagicMock(side_effect=RuntimeError("Chromecast not connected"))
+    pc = PlayerCore(library, cc, ReceiverChannel(MARGINS))
+    await pc.play("a")
+
+    await _launched(pc)
+
+    assert pc.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_ended_already_woken_is_dropped_after_a_newer_load():
+    library = _make_library(["A", "B", "C"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("A")
+    task = asyncio.create_task(pc.watch_natural_end())
+    await asyncio.sleep(0)  # watcher waiting
+    receiver.handle_report({
+        "event": "ended", "position": 9.0, "duration": 9.0, "paused": True,
+        "src": "http://10.0.0.5:8765/media/A.mp4",
+    })
+    await pc.next()  # B loaded before the watcher runs
+
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert library.cursor_video_id == "B"
+    assert library.items[1].status == "playing"
+
+
+# ---------------------------------------------------------------------
+# Every new page subscription gets the player's state
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconnect_after_stop_blanks_the_page(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 5.0)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 20.0)
+    receiver.unsubscribe(q)
+    await pc.stop()  # the page cannot hear it
+
+    q2 = receiver.subscribe()
+
+    msgs = drain(q2)
+    assert {"type": "blank"} in msgs and {"type": "menu", "view": None} in msgs
+    assert not loads(msgs)
+
+
+@pytest.mark.asyncio
+async def test_new_page_overlapping_a_stale_subscriber_gets_the_state():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 120.0)
+
+    q2 = receiver.subscribe()  # the old connection is still listed
+
+    msgs = drain(q2)
+    load = loads(msgs)[-1]
+    assert load["url"].endswith("/media/b.mp4") and load["position"] == 120.0
+    assert load["autoplay"] is False
+    assert menus(msgs)[-1]["view"] is not None
+
+
+# ---------------------------------------------------------------------
+# The cursor moves only when a video is actually loaded
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_play_keeps_cursor_and_pause_targets_the_loaded_video():
+    library = _make_mixed_library([("A", True), ("B", False)])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("A")
+
+    result = await pc.play("B")
+    await pc.toggle()
+
+    assert result.did_action is False
+    assert library.cursor_video_id == "A"
+    assert pc.state == "paused" and pc.menu.current_video_id == "A"
+    assert library.items[0].status == "paused"
+    assert library.items[1].status == "encoding"
+
+
+# ---------------------------------------------------------------------
+# Calibration pauses before rendering the clip
+# ---------------------------------------------------------------------
+
+
+def _gated_clip(monkeypatch):
+    gate = asyncio.Event()
+
+    async def slow_clip(path, *a, **k):
+        await gate.wait()
+        return path
+
+    monkeypatch.setattr("crt.calibration.generate_calibration_clip", AsyncMock(side_effect=slow_clip))
+    return gate
+
+
+@pytest.mark.asyncio
+async def test_calibrate_pauses_before_rendering(monkeypatch):
+    gate = _gated_clip(monkeypatch)
+    clock = Clock()
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("a")
+    clock.t += 30
+    _page_reports(receiver)
+
+    task = asyncio.create_task(pc.calibrate())
+    await asyncio.sleep(0.01)
+
+    assert pc.state == "paused" and {"type": "pause"} in drain(q)
+    assert library.items[0].playback_position == 30.0
+    gate.set()
+    await task
+    assert pc.state == "calibrating"
+
+
+@pytest.mark.asyncio
+async def test_resume_during_rendering_drops_the_calibration(monkeypatch):
+    gate = _gated_clip(monkeypatch)
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+
+    task = asyncio.create_task(pc.calibrate())
+    await asyncio.sleep(0.01)
+    await pc.toggle()  # resume while ffmpeg renders
+    gate.set()
+    await task
+
+    assert pc.state == "playing"
+    assert not [m for m in drain(q) if m["type"] == "calibration"]
+
+
+# ---------------------------------------------------------------------
+# Media errors and menu refresh
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_media_error_pauses_with_the_menu_and_a_notice():
+    library = _make_library(["a", "b"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+    drain(q)
+
+    receiver.handle_report({
+        "event": "error", "error": "media error 3", "media": True,
+        "src": "http://10.0.0.5:8765/media/a.mp4",
+    })
+
+    assert pc.state == "paused" and pc.menu is not None
+    assert menus(drain(q))[-1]["view"]["notice"] == "Errore nel video"
+
+    await pc.toggle()  # OK on the failed video reloads it
+
+    assert loads(drain(q))[-1]["url"].endswith("/media/a.mp4")
+    assert pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_non_media_error_and_stale_src_error_are_only_logged():
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+
+    receiver.handle_report({
+        "event": "error", "error": "play() failed: AbortError",
+        "src": "http://10.0.0.5:8765/media/a.mp4",
+    })
+    receiver.handle_report({
+        "event": "error", "error": "media error 2", "media": True,
+        "src": "http://10.0.0.5:8765/media/old.mp4",
+    })
+
+    assert pc.state == "playing" and pc.menu is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_menu_sends_only_when_the_view_changes():
+    library = _make_mixed_library([("a", True), ("b", False)])
+    library.items[1].progress = 43.0
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+    await pc.toggle()
+    drain(q)
+
+    pc.refresh_menu()
+    assert menus(drain(q)) == []
+
+    library.items[1].progress = 80.0
+    pc.refresh_menu()
+    rows = menus(drain(q))[-1]["view"]["rows"]
+    assert "80%" in rows[1]["symbol"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_menu_without_menu_is_noop():
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+    drain(q)
+
+    pc.refresh_menu()
+
+    assert drain(q) == []

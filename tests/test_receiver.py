@@ -27,18 +27,6 @@ def test_subscribe_sends_config_first_and_marks_connected():
     assert drain(q) == [{"type": "config", "margins": MARGINS}]
 
 
-def test_connect_and_disconnect_callbacks_fire_on_edges():
-    ch = ReceiverChannel(MARGINS)
-    events = []
-    ch.set_callbacks(lambda: events.append("on"), lambda: events.append("off"))
-    a = ch.subscribe()
-    b = ch.subscribe()
-    ch.unsubscribe(a)
-    ch.unsubscribe(b)
-    assert events == ["on", "off"]
-    assert not ch.connected
-
-
 def test_send_without_subscribers_is_noop():
     ReceiverChannel(MARGINS).send({"type": "play"})  # must not raise
 
@@ -202,3 +190,52 @@ async def test_sse_events_yields_data_and_pings_then_unsubscribes():
     assert await gen.__anext__() == 'data: {"type": "play"}\n\n'
     await gen.aclose()
     assert not ch.connected
+
+
+def test_connect_callback_fires_for_every_new_subscription():
+    """A replacement page may subscribe before the old connection is gone:
+    it still needs the player's state."""
+    ch = ReceiverChannel(MARGINS)
+    events = []
+    ch.set_callbacks(lambda: events.append("on"), lambda: events.append("off"))
+    a = ch.subscribe()
+    b = ch.subscribe()
+    ch.unsubscribe(a)
+    ch.unsubscribe(b)
+    assert events == ["on", "on", "off"]
+    assert not ch.connected
+
+
+@pytest.mark.asyncio
+async def test_wait_ended_returns_the_src_that_ended():
+    ch = ReceiverChannel(MARGINS)
+    ch.send({"type": "load", "url": "u1", "position": 0.0, "autoplay": True})
+    ch.handle_report({"event": "ended", "position": 1.0, "duration": 1.0, "paused": True, "src": "u1"})
+    assert await asyncio.wait_for(ch.wait_ended(), 0.05) == "u1"
+    ch.send({"type": "load", "url": "u2", "position": 0.0, "autoplay": True})
+    assert ch.expected_src == "u2"
+
+
+def test_media_error_for_the_loaded_src_fires_the_callback():
+    ch = ReceiverChannel(MARGINS)
+    errors = []
+    ch.set_callbacks(None, None, on_media_error=lambda: errors.append(1))
+    ch.send({"type": "load", "url": "u1", "position": 0.0, "autoplay": True})
+    ch.handle_report({"event": "error", "error": "play() failed", "src": "u1"})
+    ch.handle_report({"event": "error", "error": "media error 3", "media": True, "src": "u0"})
+    assert errors == []
+    ch.handle_report({"event": "error", "error": "media error 3", "media": True, "src": "u1"})
+    assert errors == [1]
+
+
+def test_freeze_stops_extrapolation_until_the_page_reports():
+    clock = Clock()
+    ch = ReceiverChannel(MARGINS, clock=clock)
+    ch.subscribe()  # a stale subscriber
+    ch.send({"type": "load", "url": "u1", "position": 50.0, "autoplay": True})
+    ch.freeze()
+    clock.t += 2
+    assert ch.live_position == pytest.approx(50.0)
+    ch.handle_report({"event": "status", "position": 51.0, "duration": 99.0, "paused": False, "src": "u1"})
+    clock.t += 1
+    assert ch.live_position == pytest.approx(52.0)

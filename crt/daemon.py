@@ -124,6 +124,12 @@ async def main_async() -> None:
     # work from non-event-loop threads in Python 3.12+.
     main_loop = asyncio.get_running_loop()
 
+    # Pipeline updates (progress, a finished encode) come from worker threads
+    # too: redraw an open pause menu on the loop.
+    pipeline.set_update_callback(
+        lambda: main_loop.call_soon_threadsafe(player.refresh_menu),
+    )
+
     sync_engine = None
     if yt_client is not None:
         def _on_yt_remove(video_id: str):
@@ -142,6 +148,7 @@ async def main_async() -> None:
             library, yt_client, config.YT_PLAYLIST_ID,
             on_remove=_on_yt_remove,
             on_add=_on_yt_add,
+            on_synced=player.refresh_menu,
         )
         log.info("SyncEngine ready (playlist=%s)", config.YT_PLAYLIST_ID)
         # Menu command "Sync now".

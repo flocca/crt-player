@@ -9,7 +9,8 @@ so the daemon can answer "where are we now" without a round trip.
 Messages daemon→page: config{margins}, load{url, position, autoplay}, play{},
 pause{}, seek{position}, blank{}, menu{view}, calibration{url}.
 Reports page→daemon: {event: hello|status|ended|error, position, duration,
-paused, src, error}.
+paused, src, error, media}; `media` is true on an error of the <video>
+element itself (bad file), not on a script or play() error.
 """
 from __future__ import annotations
 
@@ -36,8 +37,10 @@ class ReceiverChannel:
         self._subscribers: list[asyncio.Queue] = []
         self._on_connect: Callable[[], None] | None = None
         self._on_disconnect: Callable[[], None] | None = None
+        self._on_media_error: Callable[[], None] | None = None
         self._connected_event = asyncio.Event()
         self._ended_event = asyncio.Event()
+        self._ended_src: str | None = None
         # Total subscribe() calls ever: lets a caller that just launched the
         # page wait for a NEW connection, not a stale one still hanging on.
         self.subscriptions: int = 0
@@ -65,9 +68,15 @@ class ReceiverChannel:
         self,
         on_connect: Callable[[], None] | None,
         on_disconnect: Callable[[], None] | None,
+        on_media_error: Callable[[], None] | None = None,
     ) -> None:
+        """on_connect fires on every new subscription, not only the first: a
+        replacement page can subscribe before the old connection is gone, and
+        it starts empty. on_disconnect fires when the last subscriber leaves.
+        on_media_error fires on a media error for the loaded src."""
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
+        self._on_media_error = on_media_error
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
@@ -77,10 +86,9 @@ class ReceiverChannel:
         self.subscriptions += 1
         self._connected_event.set()
         self._subscribed_event.set()
-        if not was_connected:
-            log.info("Receiver page connected")
-            if self._on_connect is not None:
-                self._on_connect()
+        log.info("Receiver page connected (%s)", "another subscriber" if was_connected else "first")
+        if self._on_connect is not None:
+            self._on_connect()
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
@@ -150,6 +158,20 @@ class ReceiverChannel:
         for q in self._subscribers:
             q.put_nowait(msg)
 
+    def freeze(self) -> None:
+        """Stop extrapolating until the page reports: nobody is playing the
+        last load yet (a launch is under way; a subscriber still listed may
+        be a page another app replaced)."""
+        if self._position is not None:
+            self._position = self.live_position
+            self._timestamp = self._clock()
+        self._frozen = True
+
+    @property
+    def expected_src(self) -> str | None:
+        """The URL of the last load."""
+        return self._expected_src
+
     # ------------------------------------------------------------------
     # Page → daemon
     # ------------------------------------------------------------------
@@ -170,11 +192,19 @@ class ReceiverChannel:
             self._frozen = False
         elif event == "ended":
             if self._expected_src is not None and src == self._expected_src:
+                self._ended_src = src
                 self._ended_event.set()
             else:
                 log.info("Ignoring ended report for stale src %s", src)
         elif event == "error":
             log.warning("Receiver page error (src=%s): %s", src, report.get("error"))
+            if (
+                report.get("media")
+                and self._expected_src is not None
+                and src == self._expected_src
+                and self._on_media_error is not None
+            ):
+                self._on_media_error()
 
     @property
     def live_position(self) -> float | None:
@@ -190,8 +220,12 @@ class ReceiverChannel:
             pos = min(pos, self.duration)
         return pos
 
-    async def wait_ended(self) -> None:
+    async def wait_ended(self) -> str | None:
+        """Wait for a natural end; returns the src that ended, which the
+        caller compares with `expected_src` when it acts (a newer load may
+        have come in between)."""
         await self._ended_event.wait()
+        return self._ended_src
 
     def reset_ended(self) -> None:
         self._ended_event.clear()

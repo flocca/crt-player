@@ -34,6 +34,7 @@ class SyncEngine:
         playlist_id: str,
         on_remove=None,
         on_add=None,
+        on_synced=None,
         clock=time.monotonic,
     ):
         """on_remove: callback(video_id) invoked BEFORE an item is removed.
@@ -41,12 +42,16 @@ class SyncEngine:
 
         on_add: callback() invoked AFTER one or more items are added to the library.
         Wakes the PipelineWorker so it picks up the new queued items immediately
-        instead of waiting for an external signal."""
+        instead of waiting for an external signal.
+
+        on_synced: callback() invoked on the event loop after every sync
+        attempt (the pause menu redraws its rows)."""
         self.library = library
         self.yt = yt_client
         self.playlist_id = playlist_id
         self._on_remove = on_remove
         self._on_add = on_add
+        self._on_synced = on_synced
         self._clock = clock
         # video_id -> (retries spent, clock time before which no new retry).
         # In memory on purpose: a daemon restart (the usual way a fix to the
@@ -194,6 +199,11 @@ class SyncEngine:
         backoff = 0
         while True:
             await asyncio.to_thread(self.run_sync_once)
+            if self._on_synced is not None:
+                try:
+                    self._on_synced()
+                except Exception:
+                    log.exception("on_synced callback failed")
             if self.state == "degraded":
                 backoff = min((backoff or 30) * 2, 1800)  # 30s → 60s → ... → 30m
                 wait = backoff
