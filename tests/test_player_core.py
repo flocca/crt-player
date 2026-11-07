@@ -1040,3 +1040,206 @@ async def test_play_missing_file_returns_no_playable():
     assert result.reason == "no_playable_item"
     assert library.items[0].status == "queued"
     woke.assert_called_once()
+
+
+# ---------------------------------------------------------------------
+# Menu selection (OK while paused), commands and delete confirm
+# ---------------------------------------------------------------------
+
+
+async def _select_command(pc, key):
+    """Move the highlight onto command `key` with next()."""
+    for _ in range(50):
+        if pc.menu.selected == Entry("command", key):
+            return
+        await pc.next()
+    raise AssertionError(f"command {key} not reachable")
+
+
+@pytest.mark.asyncio
+async def test_ok_on_current_video_resumes():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "b", 30.0)
+
+    r = await pc.toggle()
+
+    msgs = drain(q)
+    assert {"type": "menu", "view": None} in msgs and {"type": "play"} in msgs
+    assert not loads(msgs), "resume must not reload the video"
+    assert r.did_action
+    assert pc.state == "playing" and pc.menu is None
+    assert library.items[1].status == "playing"
+
+
+@pytest.mark.asyncio
+async def test_ok_on_other_ready_video_plays_it():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "b", 30.0)
+
+    await pc.next()
+    r = await pc.toggle()
+
+    assert r.did_action
+    assert library.cursor_video_id == "c"
+    assert loads(drain(q))[-1]["url"].endswith("/media/c.mp4")
+    assert pc.state == "playing" and pc.menu is None
+    assert library.items[1].status == "ready"
+    assert library.items[1].playback_position == 30.0
+
+
+@pytest.mark.asyncio
+async def test_ok_on_done_video_with_cache_plays_it():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 30.0)
+    library.items[0].status = "done"
+
+    await pc.prev()
+    await pc.toggle()
+
+    assert library.cursor_video_id == "a"
+    assert pc.state == "playing"
+
+
+@pytest.mark.asyncio
+async def test_ok_on_unready_video_shows_notice_and_keeps_cursor():
+    library = _make_mixed_library([("a", True), ("b", True), ("c", False)])
+    library.items[2].status = "queued"
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    await pc.play("b")
+    await pc.toggle()
+
+    await pc.next()
+    drain(q)
+    r = await pc.toggle()
+
+    assert r.did_action is False and r.reason == "no_playable_item"
+    assert library.cursor_video_id == "b"
+    assert pc.state == "paused"
+    assert menus(drain(q))[-1]["view"]["notice"] == "non ancora pronto"
+
+
+@pytest.mark.asyncio
+async def test_notice_clears_after_notice_s(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NOTICE_S", 0.01)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 3.0)
+    await _select_command(pc, "loop")
+    await pc.toggle()
+
+    await asyncio.sleep(0.05)
+
+    assert menus(drain(q))[-1]["view"]["notice"] is None
+    assert pc.menu.notice is None
+
+
+@pytest.mark.asyncio
+async def test_newer_notice_cancels_pending_clear(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NOTICE_S", 0.05)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 3.0)
+    await _select_command(pc, "loop")
+    await pc.toggle()
+    await asyncio.sleep(0.03)
+    await pc.toggle()  # second notice restarts the timer
+    await asyncio.sleep(0.03)
+
+    assert pc.menu.notice == "Loop disattivato"
+
+
+@pytest.mark.asyncio
+async def test_notice_clear_after_menu_closed_is_harmless(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NOTICE_S", 0.01)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 3.0)
+    await _select_command(pc, "loop")
+    await pc.toggle()
+    await pc.stop()
+    drain(q)
+
+    await asyncio.sleep(0.05)
+
+    assert menus(drain(q)) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_needs_two_oks_and_targets_paused_video():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "b", 30.0)
+    await _select_command(pc, "delete")  # highlight passes over "c" on the way
+
+    await pc.toggle()
+    assert pc.menu.confirming_delete and library.cursor_video_id == "b"
+    assert menus(drain(q))[-1]["view"]["confirm"] == "Confermi? OK sì"
+    assert [i.video_id for i in library.items] == ["a", "b", "c"]
+
+    await pc.toggle()
+
+    assert [i.video_id for i in library.items] == ["a", "c"]
+    assert pc.state == "idle" and pc.menu is None
+
+
+@pytest.mark.asyncio
+async def test_delete_confirm_cancelled_by_other_key():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 30.0)
+    await _select_command(pc, "delete")
+    await pc.toggle()
+
+    await pc.prev()
+
+    assert not pc.menu.confirming_delete
+    assert "b" in [i.video_id for i in library.items]
+
+
+@pytest.mark.asyncio
+async def test_loop_command_toggles_and_keeps_menu_open():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 3.0)
+    await _select_command(pc, "loop")
+    drain(q)
+
+    await pc.toggle()
+
+    assert library.loop_mode is True and pc.state == "paused"
+    assert menus(drain(q))[-1]["view"]["notice"] == "Loop attivo"
+    await pc.toggle()
+    assert library.loop_mode is False
+    assert menus(drain(q))[-1]["view"]["notice"] == "Loop disattivato"
+
+
+@pytest.mark.asyncio
+async def test_sync_command_calls_callback():
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 3.0)
+    kick = MagicMock()
+    pc.on_sync_request = kick
+    await _select_command(pc, "sync")
+
+    await pc.toggle()
+
+    kick.assert_called_once()
+    assert menus(drain(q))[-1]["view"]["notice"] == "Sync avviato"
+    assert pc.state == "paused"
+
+
+@pytest.mark.asyncio
+async def test_sync_command_without_callback_says_unavailable():
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 3.0)
+    await _select_command(pc, "sync")
+
+    await pc.toggle()
+
+    assert menus(drain(q))[-1]["view"]["notice"] == "Sync non disponibile"
+
+
+@pytest.mark.asyncio
+async def test_stop_command_blanks():
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 42.0)
+    await _select_command(pc, "stop")
+
+    await pc.toggle()
+
+    assert pc.state == "idle" and {"type": "blank"} in drain(q)
+    assert library.items[0].playback_position == 42.0
+
+
+@pytest.mark.asyncio
+async def test_delete_current_from_paused_state_stops_first():
+    """/control/delete/current (Flipper, no confirm) while paused."""
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 3.0)
+
+    await pc.delete_current()
+
+    assert [i.video_id for i in library.items] == ["b"]
+    assert pc.state == "idle" and pc.menu is None
+    assert {"type": "blank"} in drain(q)

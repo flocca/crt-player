@@ -85,6 +85,7 @@ class PlayerCore:
         self.on_sync_request = on_sync_request
         self._clock = clock
         self.menu: PauseMenu | None = None
+        self._notice_handle: asyncio.TimerHandle | None = None
         # Invoked when an item's encoded file is found missing on disk and the
         # item is re-queued (issue #10). Wired to pipeline.wake_prepare so the
         # prepare loop re-downloads/re-encodes it immediately.
@@ -299,6 +300,8 @@ class PlayerCore:
             self._pause()
             return _DID_ACTION
         if self.state == "paused":
+            if self.menu is not None:
+                return await self._menu_select()
             self._resume()
             return _DID_ACTION
         if not self.library.items:
@@ -331,6 +334,75 @@ class PlayerCore:
             item.video_id if item else None,
             item.playback_position if item else 0.0,
         )
+
+    async def _menu_select(self) -> ActionResult:
+        """OK while the pause menu is open: act on the highlighted entry."""
+        menu = self.menu
+        entry = menu.selected
+        if entry.kind == "video":
+            if entry.key == self.library.cursor_video_id:
+                self._resume()
+                return _DID_ACTION
+            item = next((i for i in self.library.items if i.video_id == entry.key), None)
+            if item is None or not item.cache_file_present():
+                if item is not None and item.filename:
+                    self._requeue_missing_cache(item)
+                self._flash_notice("non ancora pronto")
+                return _NO_PLAYABLE
+            self.library.cursor_video_id = item.video_id
+            if await self._cast_current():
+                return _DID_ACTION
+            return _NO_PLAYABLE
+
+        key = entry.key
+        if key == "stop":
+            return await self.stop()
+        if key == "delete":
+            # Always the paused (cursor) video, never the highlighted row, and
+            # only after a second OK. Any other key clears the confirm.
+            if not menu.confirming_delete:
+                menu.confirming_delete = True
+                self._send_menu()
+                return _DID_ACTION
+            self.menu = None
+            await self.delete_current()
+            return _DID_ACTION
+        if key == "calibrate":
+            await self.calibrate()
+            return _DID_ACTION
+        if key == "loop":
+            self.library.loop_mode = not self.library.loop_mode
+            self._flash_notice("Loop attivo" if self.library.loop_mode else "Loop disattivato")
+            return _DID_ACTION
+        if key == "sync":
+            if self.on_sync_request is None:
+                self._flash_notice("Sync non disponibile")
+                return _DID_ACTION
+            self.on_sync_request()
+            self._flash_notice("Sync avviato")
+            return _DID_ACTION
+        log.warning("Unknown menu command %s", key)
+        return _NO_PLAYABLE
+
+    def _flash_notice(self, text: str) -> None:
+        """Show `text` under the menu commands for NOTICE_S seconds. A newer
+        notice cancels the pending clear of the older one."""
+        if self.menu is None:
+            return
+        if self._notice_handle is not None:
+            self._notice_handle.cancel()
+        menu = self.menu
+        menu.notice = text
+        self._send_menu()
+
+        def _clear() -> None:
+            self._notice_handle = None
+            # The menu may have closed or been replaced in the meantime.
+            if self.menu is menu and menu.notice == text:
+                menu.notice = None
+                self._send_menu()
+
+        self._notice_handle = asyncio.get_running_loop().call_later(NOTICE_S, _clear)
 
     def _resume(self) -> None:
         item = self.library.cursor_item()
@@ -406,8 +478,9 @@ class PlayerCore:
         if item is None:
             log.info("delete_current: no cursor item, skipping")
             return
-        if self.state in ("playing", "casting", "paused"):
+        if self.state in ("playing", "paused", "calibrating"):
             await self.stop()
+        self.menu = None
         await asyncio.to_thread(self._delete_local, item)
         if item.playlist_item_id and self.youtube is not None:
             try:
