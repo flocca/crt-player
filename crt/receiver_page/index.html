@@ -262,8 +262,9 @@
     var token = ++loadToken;
     pending = null;
     // Same file already loaded (e.g. the event stream reconnected): seek in
-    // place instead of reloading, so the screen does not go black.
-    if (currentSrc() === msg.url && main.readyState >= 1) {
+    // place instead of reloading, so the screen does not go black. A failed
+    // element keeps its error until load(), so a retry reloads for real.
+    if (currentSrc() === msg.url && main.readyState >= 1 && !main.error) {
       startAt(msg.position, msg.autoplay);
       return;
     }

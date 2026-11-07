@@ -25,3 +25,9 @@ def test_page_avoids_post_chrome_90_features():
     src = PAGE.read_text()
     for banned in (":has(", "@container", "structuredClone"):
         assert banned not in src
+
+
+def test_same_file_shortcut_skips_a_failed_element():
+    """Retrying after a media error must really reload the file."""
+    src = PAGE.read_text()
+    assert re.search(r"currentSrc\(\) === msg\.url && main\.readyState >= 1 && !main\.error", src)

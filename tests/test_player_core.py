@@ -1992,3 +1992,78 @@ async def test_refresh_menu_without_menu_is_noop():
     pc.refresh_menu()
 
     assert drain(q) == []
+
+
+# ---------------------------------------------------------------------
+# Review round 2
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lost_page_timer_leaves_a_pending_launch_alone(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 0.01)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 120.0)
+    receiver.unsubscribe(q)  # the grace timer starts
+    cc.receiver_app_active = False
+    cc.launch_receiver = MagicMock()  # the page connects later, below
+
+    await pc.toggle()  # OK on the paused video: relaunch
+    await asyncio.sleep(0.05)  # past the grace, launch still waiting
+    page = receiver.subscribe()
+    await _launched(pc)
+
+    assert pc.state == "playing"
+    load = loads(drain(page))[-1]
+    assert load["url"].endswith("/media/b.mp4") and load["position"] == 120.0
+
+
+@pytest.mark.asyncio
+async def test_media_error_under_calibration_is_kept_for_the_menu(fake_clip):
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 70.0)
+    await pc.calibrate()
+    receiver.handle_report({
+        "event": "error", "error": "media error 3", "media": True,
+        "src": "http://10.0.0.5:8765/media/a.mp4",
+    })
+
+    await pc.next()  # ends calibration
+    assert pc.menu.notice == "Errore nel video"
+    drain(q)
+
+    await pc.toggle()  # OK reloads instead of sending play
+
+    msgs = drain(q)
+    assert loads(msgs) and {"type": "play"} not in msgs
+
+
+@pytest.mark.asyncio
+async def test_failed_render_while_playing_opens_the_menu(monkeypatch):
+    gen = AsyncMock(side_effect=RuntimeError("ffmpeg failed"))
+    monkeypatch.setattr("crt.calibration.generate_calibration_clip", gen)
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+
+    with pytest.raises(RuntimeError):
+        await pc.calibrate()
+
+    assert pc.state == "paused" and pc.menu is not None
+    assert pc.menu.notice == "Calibrazione non riuscita"
+
+
+@pytest.mark.asyncio
+async def test_resume_and_pause_again_during_rendering_drops_the_calibration(monkeypatch):
+    gate = _gated_clip(monkeypatch)
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+
+    task = asyncio.create_task(pc.calibrate())
+    await asyncio.sleep(0.01)
+    await pc.toggle()  # resume
+    await pc.toggle()  # pause again: a new menu
+    gate.set()
+    await task
+
+    assert pc.state == "paused" and pc.menu is not None
+    assert not [m for m in drain(q) if m["type"] == "calibration"]

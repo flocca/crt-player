@@ -35,8 +35,10 @@ log = logging.getLogger(__name__)
 RECEIVER_CONNECT_TIMEOUT_S = 20.0
 # Seconds a menu notice stays on screen.
 NOTICE_S = 2.0
-# Notice shown when the page cannot play the loaded file; stays until a key.
+# Notices that stay until a key: the page cannot play the loaded file, or
+# ffmpeg failed to render the calibration pattern.
 MEDIA_ERROR_NOTICE = "Errore nel video"
+CALIBRATION_FAILED_NOTICE = "Calibrazione non riuscita"
 # Seconds the calibration pattern stays without a key press.
 CALIBRATION_TIMEOUT_S = 60.0
 # Seconds after the page's last event-stream subscriber leaves before the
@@ -188,10 +190,11 @@ class PlayerCore:
             (i for i in self.library.items if i.video_id == self._loaded_video_id), None,
         )
 
-    def _send_menu(self) -> None:
+    def _send_menu(self, view: dict | None = None) -> None:
         if self.menu is None:
             return
-        view = self.menu.view(self.library.items, self.library.cursor_video_id)
+        if view is None:
+            view = self.menu.view(self.library.items, self.library.cursor_video_id)
         self._last_menu_view = view
         self.receiver.send({"type": "menu", "view": view})
 
@@ -203,7 +206,7 @@ class PlayerCore:
             return
         view = self.menu.view(self.library.items, self.library.cursor_video_id)
         if view != self._last_menu_view:
-            self._send_menu()
+            self._send_menu(view)
 
     def _video_ids(self) -> list[str]:
         return [i.video_id for i in self.library.items]
@@ -747,8 +750,10 @@ class PlayerCore:
 
         A video that is playing is paused first with its position saved,
         before the clip is rendered (ffmpeg takes a few seconds). A command
-        that changes the player meanwhile (resume, another video, stop) wins
-        and the pattern is not shown. The pattern stays until any key (toggle/next/prev/seek) or for
+        that changes the player meanwhile (resume, another video, stop, a new
+        pause) wins and the pattern is not shown; a pause left without its
+        menu (render failed or dropped) gets the menu back. The pattern stays
+        until any key (toggle/next/prev/seek) or for
         CALIBRATION_TIMEOUT_S, then the player goes back to the paused menu on
         the same video (or to a black screen if nothing was playing). Its end
         never marks a video done and its time never touches a resume position.
@@ -765,15 +770,36 @@ class PlayerCore:
         try:
             if self.state == "playing":
                 self._pause(open_menu=False)
-            before = (self.state, self._loaded_video_id)
+            # A new pause opens a new menu, so its identity catches commands
+            # that leave state and video as they were.
+            before = (self.state, self._loaded_video_id, self.menu)
             out_path = os.path.join(config.TEMP_DIR, "calibration_pattern.mp4")
-            await calibration.generate_calibration_clip(out_path)
-            if (self.state, self._loaded_video_id) != before:
+            try:
+                await calibration.generate_calibration_clip(out_path)
+            except Exception:
+                self._open_menu_if_paused(CALIBRATION_FAILED_NOTICE)
+                raise
+            if (self.state, self._loaded_video_id, self.menu) != before:
                 log.info("Calibration dropped: the player changed while rendering the clip")
                 return
             self._show_calibration(out_path)
         finally:
             self._calibration_pending = False
+            self._open_menu_if_paused()
+
+    def _open_menu_if_paused(self, notice: str | None = None) -> None:
+        """Every pause shows the menu: restore it after calibrate paused
+        without one and did not show the pattern."""
+        if self.state != "paused":
+            return
+        if self.menu is None:
+            item = self._loaded_item()
+            self.menu = PauseMenu(item.video_id if item is not None else "")
+        elif notice is None:
+            return
+        if notice is not None:
+            self.menu.notice = notice
+        self._send_menu()
 
     def _show_calibration(self, out_path: str) -> None:
         self._calibration_return = "paused" if self.state == "paused" else "idle"
@@ -805,6 +831,8 @@ class PlayerCore:
         if self._calibration_return == "paused" and item is not None:
             self.state = "paused"
             self.menu = PauseMenu(item.video_id)
+            if self._load_failed:
+                self.menu.notice = MEDIA_ERROR_NOTICE
             self._send_menu()
         else:
             self._blank()
@@ -865,6 +893,9 @@ class PlayerCore:
         self._lost_task = None
         if self.receiver.connected:
             return
+        if self._launch_task is not None and not self._launch_task.done():
+            # A launch is under way: it decides (a new page, or _drop_page).
+            return
         self._drop_page(f"page lost for {RECEIVER_LOST_GRACE_S:.0f}s")
 
     def _drop_page(self, why: str) -> None:
@@ -890,17 +921,12 @@ class PlayerCore:
     def _on_media_error(self) -> None:
         """The page cannot play the loaded file (corrupt, or gone): pause on
         it with the menu and a notice, so the user can pick another video,
-        stop, or retry with OK (which reloads it)."""
-        if self.state not in ("playing", "paused"):
-            return
+        stop, or retry with OK (which reloads it). Under the calibration
+        pattern the failure is only recorded; the menu shows it on return."""
         self._load_failed = True
         if self.state == "playing":
             self._pause()
-        if self.menu is None:
-            item = self._loaded_item()
-            self.menu = PauseMenu(item.video_id if item is not None else "")
-        self.menu.notice = MEDIA_ERROR_NOTICE
-        self._send_menu()
+        self._open_menu_if_paused(MEDIA_ERROR_NOTICE)
 
     async def watch_idle(self, close_after_s: float, poll_s: float = 30.0) -> None:
         """Background loop: after `close_after_s` without playback (idle or
