@@ -53,7 +53,6 @@ def real_chromecast(integration_config):
             f"Chromecast '{integration_config['chromecast_name']}' not found on network"
         )
     yield cc
-    cc.set_status_callback(None)
     cc.set_connection_callback(None)
     cc.shutdown()
 
@@ -65,23 +64,15 @@ def real_chromecast_per_test(real_chromecast):
     real_chromecast is session-scoped (expensive to discover) but asyncio.Event
     objects must be re-created per test to bind to the current event loop.
 
-    Teardown stops any ongoing Chromecast playback so the next test starts from
-    a clean state. Without this, _poll_playback in the next test repeatedly calls
-    poll_status() (a blocking pychromecast call) on an actively-playing device,
-    which saturates the asyncio thread pool and starves fetch_title() from getting
-    a worker thread — leaving the queue item stuck in "queued" indefinitely.
+    Teardown closes the receiver app so the next test starts from a clean
+    Chromecast (and relaunches the page itself).
     """
     import asyncio
     real_chromecast._connected_event = asyncio.Event()
-    real_chromecast._playback_ended_event = asyncio.Event()
     if real_chromecast.connected:
         real_chromecast._connected_event.set()
     yield real_chromecast
-    # Teardown: stop playback so the next test sees an idle Chromecast.
-    try:
-        real_chromecast.stop()
-    except Exception:
-        pass
+    real_chromecast.quit_app()
 
 
 @pytest.fixture
@@ -109,7 +100,7 @@ def integration_daemon(integration_config, real_chromecast_per_test, tmp_path_fa
 
     library = LibraryStore()
     cc = real_chromecast_per_test
-    pipeline = PipelineWorker(library, cc)
+    pipeline = PipelineWorker(library)
     receiver = ReceiverChannel({
         "top": cfg.MARGIN_TOP, "bottom": cfg.MARGIN_BOTTOM,
         "left": cfg.MARGIN_LEFT, "right": cfg.MARGIN_RIGHT,
@@ -146,5 +137,4 @@ def integration_daemon(integration_config, real_chromecast_per_test, tmp_path_fa
     }
 
     server.should_exit = True
-    cc.set_status_callback(None)
     cc.set_connection_callback(None)

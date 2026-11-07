@@ -3,26 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import socket
 import time
 from typing import Callable
 
 import yt_dlp
 
 from crt import config
-from crt.chromecast_mgr import ChromecastManager
 from crt.library_store import QueueItem, LibraryStore
 
 log = logging.getLogger(__name__)
-
-
-def get_local_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    finally:
-        s.close()
 
 
 async def fetch_title(url: str) -> tuple[str, str]:
@@ -216,22 +205,16 @@ async def encode_video(
 
 
 class PipelineWorker:
-    def __init__(
-        self, queue: LibraryStore, chromecast: ChromecastManager
-    ) -> None:
+    """Downloads and encodes queued items. Playback is PlayerCore's job."""
+
+    def __init__(self, queue: LibraryStore) -> None:
         self.queue = queue
-        self.chromecast = chromecast
         self._prepare_cancel = asyncio.Event()
-        self._cast_cancel = asyncio.Event()
         self._prepare_wake = asyncio.Event()
-        self._cast_wake = asyncio.Event()
         self._current_proc: asyncio.subprocess.Process | None = None
         self._preparing: QueueItem | None = None  # item inside _prepare_one
         self._on_update: Callable | None = None
-        self.resume_position: float = 0.0
-        self._cast_enabled: bool = False  # True once user explicitly starts playback
         self.loop_mode: bool = config.LOOP_MODE_DEFAULT
-        self._next_item_id: str | None = None  # Specific item to cast next (no reorder)
 
     def set_update_callback(self, callback: Callable) -> None:
         self._on_update = callback
@@ -256,35 +239,20 @@ class PipelineWorker:
             log.info("Cancelling preparation of %s: removed from the library", video_id)
             self.cancel_prepare()
 
-    def cancel_cast(self) -> None:
-        self._cast_cancel.set()
-
     def cancel_current(self) -> None:
         self.cancel_prepare()
-        self.cancel_cast()
 
     def wake(self) -> None:
-        self._cast_enabled = True
         self._prepare_wake.set()
-        self._cast_wake.set()
 
     def wake_prepare(self) -> None:
-        """Wake only the prepare loop, leaving the cast loop idle."""
+        """Wake the prepare loop (new item queued, cache miss)."""
         self._prepare_wake.set()
 
     async def run_prepare(self) -> None:
         while True:
             self._prepare_cancel.clear()
-            # Prioritise an explicitly-requested item (set via _next_item_id)
-            # so it gets prepared even if it sits before the cursor.
-            item = None
-            if self._next_item_id:
-                item = next(
-                    (i for i in self.queue.items if i.id == self._next_item_id and i.status == "queued"),
-                    None,
-                )
-            if item is None:
-                item = self.queue.first_queued_after_cursor()
+            item = self.queue.first_queued_after_cursor()
             # Fallback: after a loop-wrap, the next candidate may be before the
             # cursor (e.g. items[0] after all items are done). first_queued()
             # finds it while first_queued_after_cursor() would not.
@@ -295,40 +263,6 @@ class PipelineWorker:
                 await self._prepare_wake.wait()
                 continue
             await self._prepare_one(item)
-            self._cast_wake.set()
-
-    async def run_cast(self) -> None:
-        while True:
-            self._cast_cancel.clear()
-            item = None
-            if self._cast_enabled:
-                if self._next_item_id:
-                    nid = self._next_item_id
-                    target = next((i for i in self.queue.items if i.id == nid), None)
-                    if target is None or target.status == "error":
-                        # Item was removed or failed to prepare — clear the pending
-                        # selection so normal cursor-based playback can resume.
-                        self._next_item_id = None
-                    elif target.status == "ready":
-                        item = target
-                        self._next_item_id = None
-                # Only advance cursor when no explicit selection is pending.
-                # If _next_item_id is set but item isn't ready yet, we wait
-                # for the prepare loop to finish encoding it.
-                if item is None and not self._next_item_id:
-                    candidate = self.queue.advance_cursor(loop=self.loop_mode)
-                    if candidate is not None:
-                        self.queue.prepare_for_play(candidate)
-                        if candidate.status == "ready":
-                            item = candidate
-                        elif candidate.status == "queued":
-                            # Cache miss: wake prepare loop so it encodes the item.
-                            self.wake_prepare()
-            if item is None:
-                self._cast_wake.clear()
-                await self._cast_wake.wait()
-                continue
-            await self._cast_and_wait(item)
 
     async def _prepare_one(self, item: QueueItem) -> None:
         self._preparing = item
@@ -421,59 +355,3 @@ class PipelineWorker:
             self.notify()
         finally:
             self._preparing = None
-
-    async def _cast_and_wait(self, item: QueueItem) -> None:
-        item.status = "casting"
-        item.progress = 0.0
-        self.notify()
-
-        # Wait for Chromecast to be discovered before casting
-        if not self.chromecast.connected:
-            log.info("Waiting for Chromecast connection before casting...")
-            conn_task = asyncio.create_task(self.chromecast.wait_for_connection())
-            cancel_task = asyncio.create_task(self._cast_cancel.wait())
-            done, pending = await asyncio.wait(
-                {conn_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for t in pending:
-                t.cancel()
-            if self._cast_cancel.is_set():
-                item.status = "done"
-                self.notify()
-                return
-
-        local_ip = get_local_ip()
-        media_url = f"http://{local_ip}:{config.SERVER_PORT}/media/{item.filename}"
-        start_pos = self.resume_position
-        self.resume_position = 0.0
-        try:
-            await asyncio.to_thread(self.chromecast.cast_url, media_url, start_pos)
-        except Exception as e:
-            log.exception("cast_url failed for %s", item.url)
-            item.status = "error"
-            item.error = str(e)
-            self.notify()
-            return
-
-        item.status = "playing"
-        self.notify()
-
-        await self._wait_for_playback_end()
-
-        item.status = "done"
-        if not self._cast_cancel.is_set():
-            self.queue.push_to_history(item)
-        self.notify()
-
-    async def _wait_for_playback_end(self) -> None:
-        self.chromecast.reset_playback_ended()
-        log.info("pipeline: waiting for playback end (event cleared)")
-        cancel_task = asyncio.create_task(self._cast_cancel.wait())
-        playback_task = asyncio.create_task(self.chromecast.wait_for_playback_end())
-        done, pending = await asyncio.wait(
-            {cancel_task, playback_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in pending:
-            task.cancel()
-        reason = "cancel" if cancel_task in done else "playback_end"
-        log.info("pipeline: _wait_for_playback_end returned (reason=%s)", reason)

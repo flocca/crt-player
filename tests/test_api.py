@@ -64,7 +64,6 @@ def test_get_status_includes_youtube_pipeline_player():
 
     chromecast = MagicMock()
     chromecast.connected = True
-    chromecast.live_current_time = 0.0
     chromecast.duration = 0.0
 
     app = create_app(library, player=player, sync_engine=sync_engine, pipeline=pipeline)

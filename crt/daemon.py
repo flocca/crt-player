@@ -98,7 +98,7 @@ async def main_async() -> None:
     # After load_state: the TTL must know which files the library still uses.
     cleanup_temp_files(library)
     chromecast = ChromecastManager()
-    pipeline = PipelineWorker(library, chromecast)
+    pipeline = PipelineWorker(library)
 
     yt_client = None
     if config.YT_PLAYLIST_ID:
@@ -205,7 +205,6 @@ async def main_async() -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
 
     library.save_state(config.STATE_FILE, playback_position=player.live_position())
-    chromecast.set_status_callback(None)
     chromecast.set_connection_callback(None)
     pipeline.cancel_current()
     chromecast.quit_app()
