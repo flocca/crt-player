@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crt receiver</title>
+<style>
+  /* Target: Chromecast Ultra, Chrome 90, viewport 1280x720 CSS px.
+     The TV squeezes 16:9 into 4:3, so everything drawn over the video sits
+     in a 75%-wide box stretched by 4/3 horizontally (.stretch). */
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+    font-family: "Roboto", "Helvetica Neue", Arial, sans-serif;
+    color: #f0f0f0;
+  }
+  video {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    object-fit: fill; background: #000;
+  }
+  #cal { z-index: 2; }
+  .hidden { display: none !important; }
+  #menu {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 3;
+    box-sizing: border-box;
+    padding: 5% 8%;
+    background: rgba(16, 16, 16, .85);
+  }
+  #menu .box { position: relative; width: 100%; height: 100%; }
+  #menu .stretch {
+    width: 75%;
+    transform: scaleX(1.3333); transform-origin: left top;
+  }
+  .line {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #title { font-size: 44px; font-weight: bold; line-height: 1.25; }
+  #time { font-size: 34px; line-height: 1.3; }
+  #bar {
+    height: 12px; margin: 6px 0 10px 0; background: #444; position: relative;
+  }
+  #bar-fill { position: absolute; top: 0; left: 0; bottom: 0; width: 0; background: #f0f0f0; }
+  #rows .row {
+    font-size: 36px; font-weight: bold; line-height: 1.25;
+    padding: 0 10px;
+  }
+  .row.selected, .cmd.selected, #confirm {
+    background: #f0f0f0; color: #101010;
+  }
+  .row.dim { opacity: .6; }
+  #sep { height: 3px; background: #888; margin: 8px 0; }
+  #commands { font-size: 30px; font-weight: bold; line-height: 1.4; white-space: nowrap; }
+  .cmd { padding: 0 6px; }
+  .dot { padding: 0 4px; }
+  #confirm, #notice {
+    font-size: 30px; font-weight: bold; line-height: 1.4; margin-top: 6px;
+    padding: 0 6px; display: inline-block;
+  }
+</style>
+</head>
+<body>
+<video id="main" playsinline></video>
+<video id="cal" class="hidden" loop muted playsinline></video>
+<div id="menu" class="hidden">
+  <div class="box">
+    <div class="stretch">
+      <div id="title" class="line"></div>
+      <div id="time" class="line"></div>
+      <div id="bar"><div id="bar-fill"></div></div>
+      <div id="rows"></div>
+      <div id="sep"></div>
+      <div id="commands"></div>
+      <div><span id="confirm" class="hidden"></span></div>
+      <div><span id="notice" class="hidden"></span></div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  "use strict";
+  var main = document.getElementById("main");
+  var cal = document.getElementById("cal");
+  var menu = document.getElementById("menu");
+  var els = {
+    title: document.getElementById("title"),
+    time: document.getElementById("time"),
+    barFill: document.getElementById("bar-fill"),
+    rows: document.getElementById("rows"),
+    commands: document.getElementById("commands"),
+    confirm: document.getElementById("confirm"),
+    notice: document.getElementById("notice")
+  };
+  var COMMANDS_FONT_PX = 30;
+  var loadToken = 0;
+
+  // ─── Reports to the daemon ─────────────────────────────────────
+
+  function currentSrc() {
+    return main.getAttribute("src") || null;
+  }
+
+  function report(event, extra) {
+    var body = {
+      event: event,
+      position: main.currentTime || 0,
+      duration: isFinite(main.duration) ? main.duration : 0,
+      paused: main.paused,
+      src: currentSrc(),
+      error: null
+    };
+    if (extra) { for (var k in extra) { body[k] = extra[k]; } }
+    try {
+      fetch("/receiver/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).catch(function () {});
+    } catch (e) { /* never let a report break the page */ }
+  }
+
+  ["playing", "pause", "seeked", "loadedmetadata"].forEach(function (ev) {
+    main.addEventListener(ev, function () { report("status"); });
+  });
+  main.addEventListener("ended", function () { report("ended"); });
+  main.addEventListener("error", function () {
+    var err = main.error ? ("media error " + main.error.code) : "media error";
+    // media: true marks a file the element cannot play (the daemon pauses
+    // with a notice); script and play() errors are only logged.
+    if (currentSrc()) { report("error", { error: err, media: true }); }
+  });
+  window.onerror = function (message) {
+    report("error", { error: String(message) });
+  };
+  setInterval(function () {
+    if (currentSrc() && !main.paused) { report("status"); }
+  }, 1000);
+
+  // ─── Menu rendering ────────────────────────────────────────────
+
+  function fmt(t) {
+    if (!isFinite(t) || t < 0) { t = 0; }
+    t = Math.floor(t);
+    var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    var ss = (s < 10 ? "0" : "") + s;
+    if (h > 0) { return h + ":" + (m < 10 ? "0" : "") + m + ":" + ss; }
+    return (m < 10 ? "0" : "") + m + ":" + ss;
+  }
+
+  function updateTime() {
+    var d = isFinite(main.duration) ? main.duration : 0;
+    els.time.textContent = fmt(main.currentTime) + " / " + fmt(d);
+    var pct = d > 0 ? Math.min(100, (main.currentTime / d) * 100) : 0;
+    els.barFill.style.width = pct + "%";
+  }
+  main.addEventListener("timeupdate", updateTime);
+  main.addEventListener("seeked", updateTime);
+  main.addEventListener("loadedmetadata", updateTime);
+
+  function clear(node) {
+    while (node.firstChild) { node.removeChild(node.firstChild); }
+  }
+
+  // Keep the commands on one line: shrink the font until it fits.
+  function fitCommands() {
+    var size = COMMANDS_FONT_PX;
+    els.commands.style.fontSize = size + "px";
+    while (size > 16 && els.commands.scrollWidth > els.commands.clientWidth) {
+      size -= 1;
+      els.commands.style.fontSize = size + "px";
+    }
+  }
+
+  function setOptionalLine(node, text) {
+    if (text === null || text === undefined || text === "") {
+      node.classList.add("hidden");
+      node.textContent = "";
+    } else {
+      node.textContent = text;
+      node.classList.remove("hidden");
+    }
+  }
+
+  function renderMenu(view) {
+    if (view === null || view === undefined) {
+      menu.classList.add("hidden");
+      return;
+    }
+    els.title.textContent = "▶ " + (view.title || "");
+    updateTime();
+
+    clear(els.rows);
+    (view.rows || []).forEach(function (r) {
+      var div = document.createElement("div");
+      div.className = "row line" + (r.selected ? " selected" : "") + (r.dim ? " dim" : "");
+      div.textContent = r.symbol + " " + r.title;
+      els.rows.appendChild(div);
+    });
+
+    clear(els.commands);
+    (view.commands || []).forEach(function (c, i) {
+      if (i > 0) {
+        var dot = document.createElement("span");
+        dot.className = "dot";
+        dot.textContent = "·";
+        els.commands.appendChild(dot);
+      }
+      var span = document.createElement("span");
+      span.className = "cmd" + (c.selected ? " selected" : "");
+      span.textContent = c.label;
+      els.commands.appendChild(span);
+    });
+
+    setOptionalLine(els.confirm, view.confirm);
+    setOptionalLine(els.notice, view.notice);
+    menu.classList.remove("hidden");
+    fitCommands();
+    fitHeight();
+  }
+
+  // Large overscan margins can leave less room than the menu needs: squash
+  // it vertically rather than let the bottom lines fall off the screen.
+  var stretch = document.querySelector("#menu .stretch");
+  var box = document.querySelector("#menu .box");
+  function fitHeight() {
+    stretch.style.transform = "";
+    var k = Math.min(1, box.clientHeight / stretch.scrollHeight);
+    if (k < 1) {
+      stretch.style.transform = "scaleX(1.3333) scaleY(" + k.toFixed(3) + ")";
+    }
+  }
+
+  // ─── Playback commands ─────────────────────────────────────────
+
+  function applyMargins(m) {
+    m = m || {};
+    var top = (m.top || 0) * 1.25, bottom = (m.bottom || 0) * 1.25;
+    var left = (m.left || 0) * 1.6667, right = (m.right || 0) * 1.6667;
+    menu.style.padding =
+      "calc(5% + " + top + "px) calc(8% + " + right + "px) " +
+      "calc(5% + " + bottom + "px) calc(8% + " + left + "px)";
+  }
+
+  function startAt(position, autoplay) {
+    try { main.currentTime = position || 0; } catch (e) { /* not seekable yet */ }
+    if (autoplay) {
+      var p = main.play();
+      if (p && p.catch) {
+        p.catch(function (e) { report("error", { error: "play() failed: " + e }); });
+      }
+    } else {
+      main.pause();
+      report("status");
+    }
+  }
+
+  // While a load waits for its metadata, later play/pause/seek commands
+  // update what it will do once the metadata arrives (a pause sent right
+  // after a load must win over the load's own autoplay).
+  var pending = null;
+
+  function load(msg) {
+    var token = ++loadToken;
+    pending = null;
+    // Same file already loaded (e.g. the event stream reconnected): seek in
+    // place instead of reloading, so the screen does not go black. A failed
+    // element keeps its error until load(), so a retry reloads for real.
+    if (currentSrc() === msg.url && main.readyState >= 1 && !main.error) {
+      startAt(msg.position, msg.autoplay);
+      return;
+    }
+    pending = { autoplay: msg.autoplay, position: msg.position };
+    var onMeta = function () {
+      main.removeEventListener("loadedmetadata", onMeta);
+      if (token !== loadToken || pending === null) { return; }
+      var want = pending;
+      pending = null;
+      startAt(want.position, want.autoplay);
+    };
+    main.addEventListener("loadedmetadata", onMeta);
+    main.setAttribute("src", msg.url);
+    main.load();
+  }
+
+  function blank() {
+    loadToken++;
+    pending = null;
+    main.pause();
+    main.removeAttribute("src");
+    main.load();
+    menu.classList.add("hidden");
+    stopCalibration();
+  }
+
+  function stopCalibration() {
+    cal.pause();
+    cal.removeAttribute("src");
+    cal.load();
+    cal.classList.add("hidden");
+  }
+
+  function calibration(url) {
+    if (url === null || url === undefined) {
+      stopCalibration();
+      return;
+    }
+    cal.setAttribute("src", url);
+    cal.classList.remove("hidden");
+    cal.load();
+    var p = cal.play();
+    if (p && p.catch) { p.catch(function () {}); }
+  }
+
+  function dispatch(msg) {
+    switch (msg.type) {
+      case "config": applyMargins(msg.margins); break;
+      case "load": load(msg); break;
+      case "play":
+        if (pending !== null) { pending.autoplay = true; break; }
+        var p = main.play();
+        if (p && p.catch) { p.catch(function (e) { report("error", { error: "play() failed: " + e }); }); }
+        break;
+      case "pause":
+        if (pending !== null) { pending.autoplay = false; }
+        main.pause();
+        break;
+      case "seek":
+        if (pending !== null) { pending.position = msg.position; break; }
+        try { main.currentTime = msg.position; } catch (e) { /* ignore */ }
+        break;
+      case "blank": blank(); break;
+      case "menu": renderMenu(msg.view); break;
+      case "calibration": calibration(msg.url); break;
+      default: break;
+    }
+  }
+
+  // ─── Event stream from the daemon ──────────────────────────────
+
+  var es = null;
+  function connect() {
+    es = new EventSource("/receiver/events");
+    es.onopen = function () { report("hello"); };
+    es.onmessage = function (e) {
+      var msg;
+      try { msg = JSON.parse(e.data); } catch (err) { return; }
+      try { dispatch(msg); } catch (err) { report("error", { error: String(err) }); }
+    };
+    es.onerror = function () {
+      // EventSource retries on its own unless the server answered with an
+      // error status; in that case start over after a short wait.
+      if (es.readyState === EventSource.CLOSED) {
+        setTimeout(connect, 3000);
+      }
+    };
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

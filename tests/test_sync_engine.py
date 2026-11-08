@@ -398,6 +398,29 @@ async def test_poll_loop_runs_sync_at_interval():
 
 
 @pytest.mark.asyncio
+async def test_poll_loop_calls_on_synced_after_each_sync_on_the_loop():
+    library = LibraryStore()
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = []
+    loop = asyncio.get_running_loop()
+    calls = []
+    engine = SyncEngine(
+        library, yt_client, playlist_id="PL",
+        on_synced=lambda: calls.append(asyncio.get_running_loop() is loop),
+    )
+
+    task = asyncio.create_task(engine.run_loop(interval_s=60, initial_delay_s=0))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
 async def test_poll_loop_backs_off_on_error():
     library = LibraryStore()
     yt_client = MagicMock()

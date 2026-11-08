@@ -10,3 +10,6 @@ state.json.*
 .worktrees/
 .env.integration
 *.egg-info/
+
+# Bozze e mockup del brainstorming (superpowers visual companion)
+.superpowers/

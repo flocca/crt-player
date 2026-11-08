@@ -123,6 +123,40 @@ def test_load_fixup_playing_with_file(tmp_path, monkeypatch):
     assert qm.items[0].filename == "vid_pal.mp4"
 
 
+def test_load_fixup_paused_like_playing(tmp_path, monkeypatch):
+    """A daemon stopped while paused (deploy) writes status "paused"; after a
+    restart the player is idle, so the item must come back "ready" with its
+    resume position, or "queued" if its file is gone."""
+    temp_dir = str(tmp_path / "media")
+    os.makedirs(temp_dir)
+    open(os.path.join(temp_dir, "vid_pal.mp4"), "w").close()
+    monkeypatch.setattr("crt.config.TEMP_DIR", temp_dir)
+
+    path = str(tmp_path / "state.json")
+    data = {
+        "version": 2,
+        "cursor_video_id": "a",
+        "loop_mode": False,
+        "items": [
+            {"url": "http://v", "video_id": "a", "id": "1", "title": "Vid",
+             "status": "paused", "progress": 0.0, "filename": "vid_pal.mp4",
+             "playback_position": 321.0},
+            {"url": "http://w", "video_id": "b", "id": "2", "title": "Gone",
+             "status": "paused", "progress": 0.0, "filename": "gone_pal.mp4"},
+        ],
+        "history": [],
+    }
+    with open(path, "w") as f:
+        json.dump(data, f)
+
+    qm = LibraryStore()
+    qm.load_state(path)
+
+    assert qm.items[0].status == "ready"
+    assert qm.items[0].playback_position == 321.0
+    assert qm.items[1].status == "queued" and qm.items[1].filename is None
+
+
 def test_load_fixup_playing_without_file(tmp_path, monkeypatch):
     temp_dir = str(tmp_path / "media")
     os.makedirs(temp_dir)

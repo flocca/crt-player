@@ -29,3 +29,6 @@ crt-tui = "tui_client.main:main"
 [tool.setuptools.packages.find]
 include = ["crt*", "tui_client*"]
 exclude = ["tests*", "docker*"]
+
+[tool.setuptools.package-data]
+crt = ["receiver_page/*.html"]

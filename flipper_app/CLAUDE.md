@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working inside this subproject (
 
 ## What this is
 
-A Flipper Zero FAP (native C app) that acts as a BLE remote for the `crt-player` daemon. It pairs with the `crt-flipper-bridge` running on Lodge (sibling `lodge-tools` repo at `services/crt-flipper-bridge/`); the bridge translates BLE bytes into HTTP POSTs against `crt/api.py`.
+A Flipper Zero FAP (native C app) that acts as a BLE remote for the `crt-player` daemon. It pairs with the `crt-flipper-bridge` running on Lodge (deployed from the sibling `homelab` repo, `services/crt-flipper-bridge/`); the bridge translates BLE bytes into HTTP POSTs against `crt/api.py`.
 
 The FAP is its own build/release lifecycle — it does not share the Python venv, tests, or CI of the parent repo. It is checked into this repo solely for spec co-location with the bridge contract.
 
@@ -80,7 +80,7 @@ The FAP runs in two scenes — `SceneHome` and `SceneExtraMenu` — selected by 
 | Left (short) | `0x08` | `/control/seek/back/15` |
 | Right (short) | `0x09` | `/control/seek/forward/30` |
 | OK (short) | `0x03` | `/control/toggle` |
-| OK (long) | — | enters `SceneExtraMenu` (in-FAP only) |
+| OK (long) | — | enters `SceneExtraMenu` (in-FAP only), with a short vibration (`sequence_single_vibro`, honours Settings → Vibro) |
 | Back (short) | — | exit app |
 
 ### SceneExtraMenu
@@ -96,7 +96,7 @@ Menu entries (hardcoded order): `Stop` (0x04), `Elimina video` (0x0A), `Calibrat
 
 `Stop`/`Loop`/`Sync`/`Calibrate` no longer have dedicated keys — all four moved into the extras menu in v2.
 
-The byte values are duplicated as `CMD_*` `#define`s at the top of [crt_remote_app.c](crt_remote_app.c#L22-L28). The bridge's `COMMAND_TABLE` lives in `../../lodge-tools/services/crt-flipper-bridge/bridge.py`. **When you change/add a mapping here, mirror it in the bridge** — the spec ([../docs/superpowers/specs/2026-05-10-flipper-remote-design.md](../docs/superpowers/specs/2026-05-10-flipper-remote-design.md)) is the contract, but both ends are hand-maintained.
+The byte values are duplicated as `CMD_*` `#define`s at the top of [crt_remote_app.c](crt_remote_app.c#L22-L28). The bridge's `COMMAND_TABLE` lives in `../../homelab/services/crt-flipper-bridge/bridge.py`. **When you change/add a mapping here, mirror it in the bridge** — the spec ([../docs/superpowers/specs/2026-05-10-flipper-remote-design.md](../docs/superpowers/specs/2026-05-10-flipper-remote-design.md)) is the contract, but both ends are hand-maintained.
 
 The set of daemon endpoints lives in `../crt/api.py`. Adding a new control endpoint there means: pick a free byte, add a `CMD_*` define + switch case here, and add the entry to the bridge.
 
@@ -131,7 +131,7 @@ No font with libfreetype-style metrics — keep strings short to avoid clipping.
 - Parent project: [../CLAUDE.md](../CLAUDE.md).
 - Design spec (protocol contract): [../docs/superpowers/specs/2026-05-10-flipper-remote-design.md](../docs/superpowers/specs/2026-05-10-flipper-remote-design.md).
 - Implementation plan: [../docs/superpowers/plans/2026-05-10-flipper-fap.md](../docs/superpowers/plans/2026-05-10-flipper-fap.md).
-- Bridge counterpart (lives in sibling repo): `../../lodge-tools/services/crt-flipper-bridge/` + its own CLAUDE.md.
+- Bridge counterpart (lives in sibling repo): `../../homelab/services/crt-flipper-bridge/` + its own CLAUDE.md.
 - Daemon HTTP control surface targeted by the bridge: `../crt/api.py`.
 
 ## Language

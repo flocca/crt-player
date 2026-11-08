@@ -227,7 +227,7 @@ def test_pipeline_worker_loop_mode_defaults_to_false():
     from crt.pipeline import PipelineWorker
     from unittest.mock import MagicMock
     config_module.LOOP_MODE_DEFAULT = False  # pin so test is not CRT_LOOP-env-dependent
-    worker = PipelineWorker(MagicMock(), MagicMock())
+    worker = PipelineWorker(MagicMock())
     assert worker.loop_mode is False
 
 
@@ -235,7 +235,7 @@ def test_pipeline_worker_loop_mode_reads_from_config(monkeypatch):
     monkeypatch.setattr(config_module, "LOOP_MODE_DEFAULT", True)
     from crt.pipeline import PipelineWorker
     from unittest.mock import MagicMock
-    worker = PipelineWorker(MagicMock(), MagicMock())
+    worker = PipelineWorker(MagicMock())
     assert worker.loop_mode is True
 
 
@@ -247,7 +247,7 @@ def _worker_with_slow_encode(monkeypatch, tmp_path, video_id="A"):
     item = QueueItem(url=f"https://www.youtube.com/watch?v={video_id}", video_id=video_id)
     library = LibraryStore()
     library.items.append(item)
-    worker = pl.PipelineWorker(library, MagicMock())
+    worker = pl.PipelineWorker(library)
     encoding = asyncio.Event()
 
     async def fake_title(url):

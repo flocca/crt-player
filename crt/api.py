@@ -3,10 +3,14 @@ from __future__ import annotations
 import logging
 import os
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+
+from crt.receiver import ReceiverChannel, sse_events
 
 log = logging.getLogger(__name__)
+
+RECEIVER_PAGE = os.path.join(os.path.dirname(__file__), "receiver_page", "index.html")
 
 
 def create_app(
@@ -15,6 +19,7 @@ def create_app(
     sync_engine=None,
     pipeline=None,
     media_dir: str | None = None,
+    receiver: ReceiverChannel | None = None,
 ) -> FastAPI:
     """Build the unified FastAPI app exposing /library, /control, /status and /media."""
     if media_dir is None:
@@ -76,8 +81,10 @@ def create_app(
             "player": {
                 "state": getattr(pc, "state", "idle") if pc else "idle",
                 "current_video_id": library.cursor_video_id,
-                "current_time_s": getattr(cc, "live_current_time", None) if cc else None,
-                "duration_s": getattr(cc, "duration", None) if cc else None,
+                # Position and duration come from the receiver page.
+                "current_time_s": pc.live_position() if pc else None,
+                "duration_s": receiver.duration if receiver is not None else None,
+                "menu_open": getattr(pc, "menu", None) is not None if pc else False,
                 "chromecast": "connected" if (cc and getattr(cc, "connected", False)) else "disconnected",
             },
         }
@@ -180,6 +187,33 @@ def create_app(
             raise HTTPException(404, "no current video")
         await player.delete_current()
         return {"ok": True, "deleted_video_id": video_id}
+
+    # ─── Receiver page (opened on the Chromecast through DashCast) ──
+
+    @app.get("/receiver")
+    def receiver_page():
+        with open(RECEIVER_PAGE, encoding="utf-8") as f:
+            html = f.read()
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+    @app.get("/receiver/events")
+    def receiver_events():
+        if receiver is None:
+            raise HTTPException(503, "receiver unavailable")
+        return StreamingResponse(
+            sse_events(receiver),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    # async on purpose: handle_report touches asyncio primitives and the
+    # player's state, so it must run on the event loop, not in the threadpool.
+    @app.post("/receiver/report")
+    async def receiver_report(report: dict = Body(...)):
+        if receiver is None:
+            raise HTTPException(503, "receiver unavailable")
+        receiver.handle_report(report)
+        return {"ok": True}
 
     # ─── Media file serving ────────────────────────────────────────
 

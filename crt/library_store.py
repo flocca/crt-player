@@ -349,7 +349,9 @@ class LibraryStore:
                 item.status = "queued"
                 item.progress = 0.0
                 item.filename = None
-            elif item.status == "playing":
+            elif item.status in ("playing", "paused"):
+                # The player starts idle: a video saved while playing or paused
+                # (deploy) is ready again, resume position kept.
                 if item.cache_file_present():
                     item.status = "ready"
                     item.progress = 0.0
