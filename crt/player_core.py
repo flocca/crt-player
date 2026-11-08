@@ -69,7 +69,10 @@ class ActionResult:
     while already stopped: nothing to do), "woke" (performed: the key only
     woke the screen from its night phase, its own action was not run), or
     "launching" (performed; the page is opening in the background and will
-    pick it up).
+    pick it up). A closed-page key (toggle on an unready cursor or an empty
+    playlist, next/prev, delete) that opens the page acks "launching" even
+    when its own action did nothing; with the page already open it acks its
+    own outcome.
     """
 
     did_action: bool
@@ -428,6 +431,12 @@ class PlayerCore:
     def _opened_result(self) -> ActionResult:
         return _DID_ACTION if self._page_ready() else _LAUNCHING
 
+    def _closed_result(self, fallback: ActionResult) -> ActionResult:
+        """Ack for a closed-page key whose own action did nothing: when the
+        page is being opened the key still performed something (launching),
+        otherwise `fallback`."""
+        return fallback if self._page_ready() else _LAUNCHING
+
     def live_position(self) -> float:
         """Where playback is now, for /status and the periodic save."""
         if (
@@ -644,7 +653,7 @@ class PlayerCore:
         items = self.library.items
         if not items:
             self._open_closed_page()
-            return _NO_ITEMS
+            return self._closed_result(_NO_ITEMS)
         # The cursor, or the first video when it is not in the playlist (the
         # row the stopped screen would highlight).
         item = self.library.cursor_item() or items[0]
@@ -654,7 +663,7 @@ class PlayerCore:
             self._requeue_missing_cache(item)
         self._show_stopped(highlight=item.video_id, open_page=True)
         self._flash(NOT_READY_NOTICE)
-        return _NO_PLAYABLE
+        return self._closed_result(_NO_PLAYABLE)
 
     def _pause(self, open_menu: bool = True) -> None:
         """Pause the page, save the position on the loaded video, open the
@@ -878,6 +887,39 @@ class PlayerCore:
             # is the resume point.
             item.playback_position = new
         return _DID_ACTION
+
+    async def delete_request(self) -> ActionResult:
+        """/control/delete/current. Playing: delete the video on air at once.
+        Screen shown: ask confirmation on the highlighted row, or cancel the
+        pending one (a second press or a bridge retry never confirms). Closed
+        page: open the stopped screen on the cursor already asking. An
+        explicit command: it wakes the night phase and acts."""
+        if self.state == "calibrating":
+            await self._end_calibration()
+        if self.state == "playing":
+            await self.delete_current()
+            return _DID_ACTION
+        items = self.library.items
+        if self._screen_shown():
+            woke = self._wake_if_night()
+            if self._cancel_confirm():
+                return _DID_ACTION
+            if not woke:
+                self._touch()
+            self.screen.fix_selection(items, self.library.cursor_video_id)
+            video_id = self.screen.selected_video_id
+            if video_id is None:
+                return _NO_ITEMS
+            self.screen.confirm_video_id = video_id
+            self._send_screen()
+            return _DID_ACTION
+        if not items:
+            return _NO_ITEMS
+        item = self.library.cursor_item() or items[0]
+        self._show_stopped(highlight=item.video_id, open_page=True)
+        self.screen.confirm_video_id = item.video_id
+        self._send_screen()
+        return self._opened_result()
 
     async def delete_current(self) -> None:
         """Delete the cursor video at once (/control/delete/current while

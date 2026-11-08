@@ -2537,7 +2537,8 @@ async def test_closed_page_ok_on_unready_cursor_shows_not_ready():
 
     r = await pc.toggle()
 
-    assert r.did_action is False and r.reason == "no_playable_item"
+    # The page is being opened: a performed action, not a no-op.
+    assert r.did_action and r.reason == "launching"
     assert pc.state == "idle" and library.cursor_video_id == "b"
     assert pc.screen.selected_video_id == "b"
     assert pc.screen.flash == "Non ancora pronto"
@@ -2857,3 +2858,113 @@ async def test_sync_removal_of_paused_video_during_night_stays_night(monkeypatch
     assert view["status"] == "Video rimosso dalla playlist"
     assert pc.screen.night is True and pc._inactive_since == inactive_since
     assert pc._night_handle is None
+
+
+# ---------------------------------------------------------------------
+# delete_request (/control/delete/current)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_request_while_playing_is_immediate():
+    library = _make_library(["a", "b"])
+    library.cursor_video_id = "a"
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+    drain(q)
+
+    r = await pc.delete_request()
+
+    assert r.did_action and r.reason is None
+    assert [i.video_id for i in library.items] == ["b"]
+    assert pc.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_delete_request_on_screen_asks_confirmation_on_highlighted_row():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "a", 3.0)
+    await pc.next()  # highlight b
+    drain(q)
+
+    r = await pc.delete_request()
+
+    assert r.did_action
+    assert pc.screen.confirm_video_id == "b"
+    assert [i.video_id for i in library.items] == ["a", "b", "c"]
+    view = screens(drain(q))[-1]["view"]
+    assert view["flash_kind"] == "confirm"
+    assert next(row for row in view["rows"] if row["confirm"])["text"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_second_delete_request_cancels():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 3.0)
+    await pc.delete_request()
+
+    r = await pc.delete_request()
+
+    assert r.did_action
+    assert pc.screen.confirm_video_id is None
+    assert [i.video_id for i in library.items] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_delete_request_wakes_night_and_acts():
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 3.0)
+    pc._enter_night()
+    assert pc.screen.night
+
+    r = await pc.delete_request()
+
+    assert r.did_action and r.reason is None
+    assert pc.screen.night is False and pc.screen.confirm_video_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_delete_request_with_closed_page_opens_screen_confirming_cursor():
+    library = _make_library(["a", "b", "c"])
+    library.cursor_video_id = "b"
+    pc, receiver, pages, cc = _player_without_page(library)
+
+    r = await pc.delete_request()
+
+    assert r.did_action and r.reason == "launching"
+    assert pc.state == "idle" and pc.screen_state == "stopped"
+    assert pc.screen.selected_video_id == "b" and pc.screen.confirm_video_id == "b"
+    assert [i.video_id for i in library.items] == ["a", "b", "c"]
+    await _launched(pc)
+    cc.launch_receiver.assert_called_once()
+    view = screens(drain(pages[0]))[-1]["view"]
+    assert view["flash_kind"] == "confirm"
+
+
+@pytest.mark.asyncio
+async def test_delete_request_on_empty_library_is_no_items():
+    library = _make_library([])
+    pc, receiver, q, cc = _make_player(library)
+
+    r = await pc.delete_request()
+
+    assert r.did_action is False and r.reason == "no_items"
+    assert pc.screen is None
+
+
+@pytest.mark.asyncio
+async def test_delete_request_during_calibration_ends_it_then_asks(fake_clip):
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 3.0)
+    await pc.calibrate()
+    assert pc.state == "calibrating"
+
+    r = await pc.delete_request()
+
+    assert r.did_action
+    assert pc.state == "paused" and pc.screen.confirm_video_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_screen_state_is_none_while_calibrating(fake_clip):
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 3.0)
+    await pc.calibrate()
+
+    assert pc.screen is not None and pc.screen_state == "none"
+    assert pc.selected_video_id is None

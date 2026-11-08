@@ -87,7 +87,8 @@ def test_status_reports_player_position_duration_and_menu():
     player = MagicMock()
     player.state = "paused"
     player.live_position = MagicMock(return_value=61.5)
-    player.screen = object()
+    player.screen_state = "paused"
+    player.selected_video_id = "B"
     receiver = MagicMock()
     receiver.duration = 600.0
     chromecast = MagicMock()
@@ -100,6 +101,23 @@ def test_status_reports_player_position_duration_and_menu():
     assert p["state"] == "paused" and p["current_time_s"] == 61.5
     assert p["duration_s"] == 600.0 and p["menu_open"] is True
     assert p["current_video_id"] == "A" and p["chromecast"] == "connected"
+
+
+def test_status_exposes_screen_and_selected_video():
+    player = MagicMock()
+    player.state = "idle"
+    player.live_position = MagicMock(return_value=0.0)
+    player.screen_state = "stopped"
+    player.selected_video_id = "B"
+    p = TestClient(create_app(LibraryStore(), player=player)).get("/status").json()["player"]
+    assert p["screen"] == "stopped" and p["selected_video_id"] == "B"
+    assert p["menu_open"] is True
+
+    player.screen_state = "none"
+    player.selected_video_id = None
+    p = TestClient(create_app(LibraryStore(), player=player)).get("/status").json()["player"]
+    assert p["screen"] == "none" and p["selected_video_id"] is None
+    assert p["menu_open"] is False
 
 
 def test_status_without_player_or_receiver():
@@ -278,6 +296,31 @@ def test_post_control_loop_toggle_inverts():
     assert resp2.json()["loop_mode"] is False
 
 
+def test_loop_toggle_goes_through_player():
+    library = LibraryStore()
+    player = MagicMock()
+
+    def _toggle():
+        library.loop_mode = True
+    player.toggle_loop = MagicMock(side_effect=_toggle)
+
+    resp = TestClient(_make_app(library, player=player)).post("/control/loop/toggle")
+
+    player.toggle_loop.assert_called_once()
+    assert resp.json() == {"ok": True, "loop_mode": True}
+
+
+def test_sync_goes_through_player():
+    player = MagicMock()
+    sync_engine = MagicMock()
+
+    resp = TestClient(_make_app(LibraryStore(), player=player, sync_engine=sync_engine)).post("/control/sync")
+
+    assert resp.status_code == 202
+    player.request_sync.assert_called_once()
+    sync_engine.kick.assert_not_called()
+
+
 def test_post_control_sync_kicks_engine():
     library = LibraryStore()
     sync_engine = MagicMock()
@@ -398,31 +441,35 @@ def test_seek_back_503_when_no_player():
 
 # ─── /control/delete/current ──────────────────────────────────────
 
-def test_delete_current_success():
+def test_delete_current_returns_ack_from_delete_request():
     library = LibraryStore()
     library.items.append(QueueItem(url="u/A", video_id="A", title="A"))
     library.cursor_video_id = "A"
     player = MagicMock()
-    player.delete_current = AsyncMock()
+    player.state = "idle"
+    player.delete_request = AsyncMock(return_value=ActionResult(True, "launching"))
     client = TestClient(_make_app(library, player=player))
 
     resp = client.post("/control/delete/current")
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "deleted_video_id": "A"}
-    player.delete_current.assert_awaited_once()
+    assert resp.json() == {
+        "ok": True, "did_action": True, "reason": "launching",
+        "cursor_video_id": "A", "state": "idle",
+    }
+    player.delete_request.assert_awaited_once()
 
 
-def test_delete_current_404_when_no_cursor():
-    library = LibraryStore()  # cursor unset
+def test_delete_current_without_cursor_is_a_no_items_ack():
     player = MagicMock()
-    player.delete_current = AsyncMock()
-    client = TestClient(_make_app(library, player=player))
+    player.state = "idle"
+    player.delete_request = AsyncMock(return_value=ActionResult(False, "no_items"))
+    client = TestClient(_make_app(LibraryStore(), player=player))
 
     resp = client.post("/control/delete/current")
 
-    assert resp.status_code == 404
-    player.delete_current.assert_not_awaited()
+    assert resp.status_code == 200
+    assert resp.json()["did_action"] is False and resp.json()["reason"] == "no_items"
 
 
 def test_delete_current_503_when_no_player():
