@@ -837,6 +837,20 @@ async def test_delete_current_full_path(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_delete_local_removes_preview_copy(tmp_path):
+    library = _make_library(["A", "B"])
+    library.items[0].filename = "A_pal_crop.mp4"
+    (tmp_path / "A_pal_crop.mp4").write_text("dummy")
+    preview = tmp_path / "A_pal_crop_noaudio.mp4"
+    preview.write_text("dummy")
+    pc, receiver, q, cc = _make_player(library)
+
+    pc._delete_local(library.items[0])
+
+    assert not preview.exists()
+
+
+@pytest.mark.asyncio
 async def test_delete_current_missing_playlist_item_id_skips_remote():
     library = _make_library(["A"])
     library.cursor_video_id = "A"

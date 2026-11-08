@@ -604,12 +604,14 @@ class PlayerCore:
 
     def _delete_local(self, item) -> None:
         self.library.remove(item.id)
-        cache_path = os.path.join(config.TEMP_DIR, config.cached_encoded_filename(item.video_id))
-        if os.path.isfile(cache_path):
-            try:
-                os.unlink(cache_path)
-            except OSError as e:
-                log.warning("Failed to unlink cache %s: %s", cache_path, e)
+        encoded = config.cached_encoded_filename(item.video_id)
+        for name in (encoded, config.preview_filename(encoded)):
+            cache_path = os.path.join(config.TEMP_DIR, name)
+            if os.path.isfile(cache_path):
+                try:
+                    os.unlink(cache_path)
+                except OSError as e:
+                    log.warning("Failed to unlink cache %s: %s", cache_path, e)
 
     async def on_playback_finished(self) -> None:
         """Called when the Chromecast reports natural end of the current item.

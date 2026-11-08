@@ -102,3 +102,8 @@ def test_youtube_env_vars_have_defaults(monkeypatch):
     assert cfg.LOG_LEVEL == "INFO"
     assert "client_secrets.json" in cfg.YT_CLIENT_SECRETS
     assert "oauth_token.json" in cfg.YT_TOKEN_FILE
+
+
+def test_preview_filename_derives_from_encoded_name():
+    from crt import config
+    assert config.preview_filename("abc_pal_crop_m35-30-25-35.mp4") == "abc_pal_crop_m35-30-25-35_noaudio.mp4"

@@ -55,6 +55,15 @@ class QueueItem:
             os.path.join(config.TEMP_DIR, self.filename)
         )
 
+    def preview_filename(self) -> str | None:
+        """Name of the audio-less preview copy, None without an encoded file."""
+        return config.preview_filename(self.filename) if self.filename else None
+
+    def preview_present(self) -> bool:
+        """True if the audio-less preview copy exists on disk."""
+        name = self.preview_filename()
+        return bool(name) and os.path.isfile(os.path.join(config.TEMP_DIR, name))
+
     def requeue(self) -> None:
         """Reset this item to a fresh 'queued' state so the pipeline rebuilds it.
 

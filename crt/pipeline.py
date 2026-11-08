@@ -125,6 +125,39 @@ async def _get_duration(path: str) -> float:
         return 0.0
 
 
+async def make_preview(encoded_path: str) -> str | None:
+    """Remux the encoded file without audio, for muted previews.
+
+    Writes to a temp name and renames, so a half-written copy is never taken
+    as present. Returns the final path, or None on failure (never raises).
+    """
+    final = os.path.join(
+        os.path.dirname(encoded_path),
+        config.preview_filename(os.path.basename(encoded_path)),
+    )
+    tmp = os.path.splitext(final)[0] + ".part.mp4"
+    cmd = [
+        "ffmpeg", "-v", "error", "-y", "-i", encoded_path,
+        "-map", "0:v", "-c", "copy", "-an", "-movflags", "+faststart", tmp,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
+        if proc.returncode == 0:
+            os.replace(tmp, final)
+            return final
+        log.warning("Preview remux failed for %s (ffmpeg exit %s)", encoded_path, proc.returncode)
+    except Exception as e:
+        log.warning("Preview remux failed for %s: %s", encoded_path, e)
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    return None
+
+
 async def _detect_crop(input_path: str) -> str | None:
     """Run a quick cropdetect pass and return the most common crop value."""
     if not config.AUTO_CROP:
@@ -264,6 +297,19 @@ class PipelineWorker:
                 continue
             await self._prepare_one(item)
 
+    async def _ensure_preview(self, item: QueueItem) -> None:
+        """Make the audio-less copy if missing; a failure never touches the status."""
+        if item.preview_present():
+            return
+        await make_preview(os.path.join(config.TEMP_DIR, item.filename))
+        self.notify()
+
+    async def backfill_previews(self) -> None:
+        """One-shot: make the preview copy of ready items encoded before it existed."""
+        for item in list(self.queue.items):
+            if item.cache_file_present() and not item.preview_present():
+                await self._ensure_preview(item)
+
     async def _prepare_one(self, item: QueueItem) -> None:
         self._preparing = item
         try:
@@ -279,6 +325,7 @@ class PipelineWorker:
                 item.filename = os.path.basename(cached_encoded)
                 item.status = "ready"
                 self.notify()
+                await self._ensure_preview(item)
                 return
 
             # Skip download if file already exists from a previous interrupted session
@@ -347,6 +394,7 @@ class PipelineWorker:
             item.status = "ready"
             self.notify()
             log.info("Ready: %s (encoded in %.1fs)", item.title, time.monotonic() - t0)
+            await self._ensure_preview(item)
 
         except Exception as e:
             log.exception("Pipeline prepare error for %s", item.url)

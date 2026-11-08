@@ -314,3 +314,121 @@ async def test_cancelled_encode_leaves_no_partial_file(monkeypatch, tmp_path):
     await asyncio.wait_for(task, 2)
 
     assert not (tmp_path / cached_encoded_filename("A")).exists()
+
+
+def _fake_ffmpeg(returncode, calls):
+    """Stand-in for create_subprocess_exec: writes the output file (args[-1])."""
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        with open(args[-1], "w") as f:
+            f.write("preview")
+        proc = MagicMock()
+        proc.returncode = returncode
+        proc.wait = AsyncMock(return_value=returncode)
+        return proc
+    return fake_exec
+
+
+@pytest.mark.asyncio
+async def test_make_preview_remuxes_video_only(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    calls = []
+    monkeypatch.setattr(pl.asyncio, "create_subprocess_exec", _fake_ffmpeg(0, calls))
+    encoded = tmp_path / "X.mp4"
+    encoded.write_text("enc")
+
+    result = await pl.make_preview(str(encoded))
+
+    args = calls[0]
+    assert "-map" in args and args[args.index("-map") + 1] == "0:v"
+    assert args[args.index("-c") + 1] == "copy" and "-an" in args
+    assert result == str(tmp_path / "X_noaudio.mp4")
+    assert args[-1] != result
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["X.mp4", "X_noaudio.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_make_preview_failure_leaves_no_file(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    monkeypatch.setattr(pl.asyncio, "create_subprocess_exec", _fake_ffmpeg(1, []))
+    encoded = tmp_path / "X.mp4"
+    encoded.write_text("enc")
+
+    assert await pl.make_preview(str(encoded)) is None
+    assert [p.name for p in tmp_path.iterdir()] == ["X.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_makes_preview_after_ready(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+
+    async def quick_encode(input_path, output_path, duration, on_progress, worker=None):
+        with open(output_path, "w") as f:
+            f.write("encoded")
+        return output_path
+
+    preview = AsyncMock(return_value=None)
+    monkeypatch.setattr(pl, "encode_video", quick_encode)
+    monkeypatch.setattr(pl, "make_preview", preview)
+
+    await worker._prepare_one(item)
+
+    assert item.status == "ready"
+    preview.assert_awaited_once_with(str(tmp_path / cached_encoded_filename("A")))
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_preview_failure_keeps_ready(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+
+    async def quick_encode(input_path, output_path, duration, on_progress, worker=None):
+        with open(output_path, "w") as f:
+            f.write("encoded")
+        return output_path
+
+    monkeypatch.setattr(pl, "encode_video", quick_encode)
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    assert item.status == "ready" and item.error is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_cache_hit_makes_missing_preview(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+    encoded = tmp_path / cached_encoded_filename("A")
+    encoded.write_text("encoded")
+    preview = AsyncMock(return_value=None)
+    monkeypatch.setattr(pl, "make_preview", preview)
+
+    await worker._prepare_one(item)
+
+    assert item.status == "ready"
+    preview.assert_awaited_once_with(str(encoded))
+
+
+@pytest.mark.asyncio
+async def test_backfill_previews_only_for_ready_items_without_copy(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    from crt.library_store import LibraryStore
+    monkeypatch.setattr(config_module, "TEMP_DIR", str(tmp_path))
+    (tmp_path / "A.mp4").write_text("x")
+    (tmp_path / "B.mp4").write_text("x")
+    (tmp_path / "B_noaudio.mp4").write_text("x")
+    library = LibraryStore()
+    library.items += [
+        QueueItem(url="u", video_id="A", status="ready", filename="A.mp4"),
+        QueueItem(url="u", video_id="B", status="ready", filename="B.mp4"),
+        QueueItem(url="u", video_id="C", status="queued"),
+    ]
+    worker = pl.PipelineWorker(library)
+    preview = AsyncMock(return_value=None)
+    monkeypatch.setattr(pl, "make_preview", preview)
+
+    await worker.backfill_previews()
+
+    preview.assert_awaited_once_with(str(tmp_path / "A.mp4"))

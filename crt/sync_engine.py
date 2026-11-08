@@ -223,13 +223,14 @@ class SyncEngine:
 
     def _delete_cache_files(self, item: QueueItem) -> None:
         if item.filename:
-            encoded = os.path.join(config.TEMP_DIR, item.filename)
-            if os.path.isfile(encoded):
-                try:
-                    os.unlink(encoded)
-                    log.debug("Deleted encoded: %s", encoded)
-                except OSError as e:
-                    log.warning("Failed to delete encoded %s: %s", encoded, e)
+            for name in (item.filename, config.preview_filename(item.filename)):
+                encoded = os.path.join(config.TEMP_DIR, name)
+                if os.path.isfile(encoded):
+                    try:
+                        os.unlink(encoded)
+                        log.debug("Deleted encoded: %s", encoded)
+                    except OSError as e:
+                        log.warning("Failed to delete encoded %s: %s", encoded, e)
         if item.downloaded_path and os.path.isfile(item.downloaded_path):
             try:
                 os.unlink(item.downloaded_path)

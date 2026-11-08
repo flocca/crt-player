@@ -48,8 +48,11 @@ def cleanup_temp_files(library: LibraryStore) -> None:
     for item in library.items:
         if item.filename:
             in_use.add(item.filename)
+            in_use.add(config.preview_filename(item.filename))
         if item.video_id:
-            in_use.add(config.cached_encoded_filename(item.video_id))
+            canonical = config.cached_encoded_filename(item.video_id)
+            in_use.add(canonical)
+            in_use.add(config.preview_filename(canonical))
         if item.downloaded_path:
             in_use.add(os.path.basename(item.downloaded_path))
     cutoff = time.time() - config.FILE_TTL_HOURS * 3600
@@ -177,6 +180,8 @@ async def main_async() -> None:
         # One-shot: calibrate() never waits for ffmpeg (CRT_MARGIN_* only
         # change with a restart, so one render serves the whole run).
         asyncio.create_task(player.prepare_calibration(), name="calibration_clip"),
+        # One-shot: previews of items encoded before the copy existed.
+        asyncio.create_task(pipeline.backfill_previews(), name="preview_backfill"),
         asyncio.create_task(
             player.watch_idle(config.RECEIVER_IDLE_CLOSE_S), name="player_idle_close",
         ),
