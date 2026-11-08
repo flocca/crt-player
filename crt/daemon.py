@@ -128,9 +128,9 @@ async def main_async() -> None:
     main_loop = asyncio.get_running_loop()
 
     # Pipeline updates (progress, a finished encode) come from worker threads
-    # too: redraw an open pause menu on the loop.
+    # too: redraw the screen on the loop.
     pipeline.set_update_callback(
-        lambda: main_loop.call_soon_threadsafe(player.refresh_menu),
+        lambda: main_loop.call_soon_threadsafe(player.refresh_screen),
     )
 
     sync_engine = None
@@ -151,11 +151,12 @@ async def main_async() -> None:
             library, yt_client, config.YT_PLAYLIST_ID,
             on_remove=_on_yt_remove,
             on_add=_on_yt_add,
-            on_synced=player.refresh_menu,
+            on_synced=player.refresh_screen,
         )
         log.info("SyncEngine ready (playlist=%s)", config.YT_PLAYLIST_ID)
-        # Menu command "Sync now".
+        # Screen command "Sync", and its time / error on the bottom line.
         player.on_sync_request = sync_engine.kick
+        player.sync_info = lambda: (sync_engine.last_sync_at, sync_engine.state == "degraded")
 
     app = create_app(
         library=library,

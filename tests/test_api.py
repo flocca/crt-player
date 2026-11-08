@@ -87,7 +87,7 @@ def test_status_reports_player_position_duration_and_menu():
     player = MagicMock()
     player.state = "paused"
     player.live_position = MagicMock(return_value=61.5)
-    player.menu = object()
+    player.screen = object()
     receiver = MagicMock()
     receiver.duration = 600.0
     chromecast = MagicMock()

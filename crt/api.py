@@ -84,7 +84,7 @@ def create_app(
                 # Position and duration come from the receiver page.
                 "current_time_s": pc.live_position() if pc else None,
                 "duration_s": receiver.duration if receiver is not None else None,
-                "menu_open": getattr(pc, "menu", None) is not None if pc else False,
+                "menu_open": getattr(pc, "screen", None) is not None if pc else False,
                 "chromecast": "connected" if (cc and getattr(cc, "connected", False)) else "disconnected",
             },
         }

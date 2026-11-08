@@ -45,7 +45,7 @@ class SyncEngine:
         instead of waiting for an external signal.
 
         on_synced: callback() invoked on the event loop after every sync
-        attempt (the pause menu redraws its rows)."""
+        attempt (the teletext screen redraws its rows)."""
         self.library = library
         self.yt = yt_client
         self.playlist_id = playlist_id
