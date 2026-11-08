@@ -196,6 +196,8 @@ def create_app(
             result,
             cursor_video_id=library.cursor_video_id,
             state=player.state,
+            # The video deleted at once (while playing), else None.
+            deleted_video_id=getattr(result, "deleted_video_id", None),
         )
 
     # ─── Receiver page (opened on the Chromecast through DashCast) ──

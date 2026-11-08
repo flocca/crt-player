@@ -864,6 +864,7 @@ async def test_delete_current_full_path(tmp_path):
     drain(q)
 
     await pc.delete_current()
+    await _deletions_done(pc)
 
     # local removal
     assert all(i.video_id != "A" for i in library.items)
@@ -876,7 +877,7 @@ async def test_delete_current_full_path(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_delete_local_removes_preview_copy(tmp_path):
+async def test_unlink_cache_removes_preview_copy(tmp_path):
     library = _make_library(["A", "B"])
     library.items[0].filename = "A_pal_crop.mp4"
     (tmp_path / "A_pal_crop.mp4").write_text("dummy")
@@ -884,7 +885,7 @@ async def test_delete_local_removes_preview_copy(tmp_path):
     preview.write_text("dummy")
     pc, receiver, q, cc = _make_player(library)
 
-    pc._delete_local(library.items[0])
+    pc._unlink_cache("A")
 
     assert not preview.exists()
 
@@ -898,6 +899,7 @@ async def test_delete_current_missing_playlist_item_id_skips_remote():
     pc, *_ = _make_player(library, youtube_client=yt)
 
     await pc.delete_current()
+    await _deletions_done(pc)
 
     assert all(i.video_id != "A" for i in library.items)
     yt.delete_playlist_item.assert_not_called()
@@ -914,6 +916,7 @@ async def test_delete_current_youtube_failure_keeps_local_removal():
 
     # Should NOT raise
     await pc.delete_current()
+    await _deletions_done(pc)
 
     assert all(i.video_id != "A" for i in library.items)
 
@@ -1237,6 +1240,7 @@ async def test_delete_confirm_then_ok_deletes_highlighted_other_video():
     assert [i.video_id for i in library.items] == ["a", "b", "c"]
 
     r = await pc.toggle()
+    await _deletions_done(pc)
 
     assert r.did_action
     assert [i.video_id for i in library.items] == ["a", "b"]
@@ -2984,3 +2988,171 @@ async def test_second_delete_request_after_immediate_delete_deletes_nothing_more
 
     assert [i.video_id for i in library.items] == ["b"]
     assert r.did_action and pc.screen.confirm_video_id == "b"
+
+
+# ---------------------------------------------------------------------
+# Final whole-branch review: background deletion, clean power off,
+# unready pick from the TUI
+# ---------------------------------------------------------------------
+
+
+def _finishes_without_suspending(coro):
+    """Run `coro` one step: it must return without reaching a suspension
+    point (a command that suspends can be run twice by a bridge retry)."""
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    coro.close()
+    raise AssertionError("the command suspended")
+
+
+async def _deletions_done(pc):
+    """Wait for the background part of every deletion (unlinks, YouTube)."""
+    await asyncio.gather(*list(pc._delete_tasks))
+
+
+def _slow_youtube():
+    """A YouTube client whose delete blocks until `release` is set."""
+    import threading
+    release = threading.Event()
+    started = threading.Event()
+    yt = MagicMock()
+
+    def _delete(_item_id):
+        started.set()
+        release.wait(5)
+
+    yt.delete_playlist_item.side_effect = _delete
+    return yt, started, release
+
+
+@pytest.mark.asyncio
+async def test_confirmed_delete_of_paused_video_acks_before_youtube_and_casts_nothing():
+    """A slow YouTube delete used to hold the confirm's toggle past the
+    bridge's 5 s timeout; its retry then resumed the highlighted successor."""
+    yt, started, release = _slow_youtube()
+    pc, receiver, q, cc, library = await _paused_on(
+        ["a", "b", "c"], "b", 30.0, youtube_client=yt,
+    )
+    library.items[1].playlist_item_id = "PLI_b"
+    await _select_command(pc, "delete")
+    await pc.toggle()  # armed on "b"
+    drain(q)
+
+    r = _finishes_without_suspending(pc.toggle())  # confirm
+
+    assert r.did_action
+    assert [i.video_id for i in library.items] == ["a", "c"]
+    assert pc.state == "idle" and pc.screen_state == "stopped"
+    await asyncio.to_thread(started.wait, 2)  # YouTube delete under way
+    msgs = drain(q)
+    assert not loads(msgs)
+    assert screens(msgs)[-1]["view"]["count"] == 2
+    release.set()
+    await _deletions_done(pc)
+    yt.delete_playlist_item.assert_called_once_with("PLI_b")
+    assert pc.state == "idle" and not loads(drain(q))
+
+
+@pytest.mark.asyncio
+async def test_delete_current_acks_before_youtube_and_still_deletes_remotely(tmp_path):
+    yt, started, release = _slow_youtube()
+    library = _make_library(["a", "b"])
+    library.items[0].playlist_item_id = "PLI_a"
+    library.items[0].filename = "a_pal_crop.mp4"
+    cache_file = tmp_path / "a_pal_crop.mp4"
+    cache_file.write_text("dummy")
+    pc, receiver, q, cc = _make_player(library, youtube_client=yt)
+    cancelled = MagicMock()
+    pc.on_delete = cancelled
+    await pc.play("a")
+    drain(q)
+
+    r = _finishes_without_suspending(pc.delete_request())
+
+    assert r.did_action
+    cancelled.assert_called_once_with("a")  # synchronous
+    assert [i.video_id for i in library.items] == ["b"]
+    assert library.cursor_video_id == "b"
+    await asyncio.to_thread(started.wait, 2)
+    release.set()
+    await _deletions_done(pc)
+    yt.delete_playlist_item.assert_called_once_with("PLI_a")
+    assert not cache_file.exists()
+    assert not pc._delete_tasks
+
+
+@pytest.mark.asyncio
+async def test_background_delete_failure_is_logged(caplog):
+    library = _make_library(["a", "b"])
+    library.items[0].playlist_item_id = "PLI_a"
+    yt = MagicMock()
+    yt.delete_playlist_item.side_effect = RuntimeError("boom")
+    pc, receiver, q, cc = _make_player(library, youtube_client=yt)
+    await pc.play("a")
+
+    await pc.delete_current()
+    await _deletions_done(pc)
+
+    assert [i.video_id for i in library.items] == ["b"]
+    assert "boom" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_immediate_delete_reports_the_deleted_video_id():
+    library = _make_library(["a", "b"])
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+
+    r = await pc.delete_request()
+
+    assert r.did_action and r.deleted_video_id == "a"
+    r = await pc.delete_request()  # stopped screen: only asks
+    assert r.deleted_video_id is None
+
+
+@pytest.mark.asyncio
+async def test_power_off_blanks_the_page_before_quitting():
+    """quit_app swallows timeouts: if DashCast stays open the page must not
+    keep an awake screen the daemon no longer knows about."""
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 30.0)
+    await _select_command(pc, "power")
+    drain(q)
+    sent_at_quit = []
+    cc.quit_app.side_effect = lambda: sent_at_quit.extend(drain(q))
+
+    await pc.toggle()
+    await pc._quit_task
+
+    assert sent_at_quit[-2:] == [{"type": "blank"}, {"type": "screen", "view": None}]
+
+
+@pytest.mark.asyncio
+async def test_idle_close_blanks_the_page_before_quitting():
+    clock = Clock()
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 30.0, clock=clock)
+    drain(q)
+    sent_at_quit = []
+    cc.quit_app.side_effect = lambda: sent_at_quit.extend(drain(q))
+    clock.t += 1800
+
+    await pc._close_if_idle(1800)
+
+    cc.quit_app.assert_called_once()
+    assert sent_at_quit[-2:] == [{"type": "blank"}, {"type": "screen", "view": None}]
+
+
+@pytest.mark.asyncio
+async def test_tui_play_of_unready_row_flashes_not_ready_on_the_screen():
+    library = _make_mixed_library([("a", True), ("b", False)])
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    await pc.play("a")
+    await pc.toggle()  # paused, screen shown
+    drain(q)
+
+    r = await pc.play("b")
+
+    assert r.did_action is False and r.reason == "no_playable_item"
+    assert pc.state == "paused"
+    assert screens(drain(q))[-1]["view"]["flash"] == "Non ancora pronto"

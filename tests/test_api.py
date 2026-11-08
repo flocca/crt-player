@@ -455,7 +455,7 @@ def test_delete_current_returns_ack_from_delete_request():
     assert resp.status_code == 200
     assert resp.json() == {
         "ok": True, "did_action": True, "reason": "launching",
-        "cursor_video_id": "A", "state": "idle",
+        "cursor_video_id": "A", "state": "idle", "deleted_video_id": None,
     }
     player.delete_request.assert_awaited_once()
 
@@ -563,3 +563,19 @@ async def test_loop_toggle_and_sync_flash_on_screen_with_a_real_player(tmp_path,
         assert r2.status_code == 202
         assert player.screen.flash == "Sync avviato"
     assert kicked == [1]
+
+
+def test_delete_current_reports_deleted_video_id():
+    library = LibraryStore()
+    library.items.append(QueueItem(url="u/B", video_id="B", title="B"))
+    library.cursor_video_id = "B"
+    player = MagicMock()
+    player.state = "idle"
+    player.delete_request = AsyncMock(
+        return_value=ActionResult(True, deleted_video_id="A"),
+    )
+    client = TestClient(_make_app(library, player=player))
+
+    resp = client.post("/control/delete/current")
+
+    assert resp.json()["deleted_video_id"] == "A"

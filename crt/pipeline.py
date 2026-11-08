@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from typing import Callable
 
 import yt_dlp
@@ -135,7 +136,9 @@ async def make_preview(encoded_path: str) -> str | None:
         os.path.dirname(encoded_path),
         config.preview_filename(os.path.basename(encoded_path)),
     )
-    tmp = os.path.splitext(final)[0] + ".part.mp4"
+    # Unique per call: backfill_previews and _prepare_one can remux the same
+    # video at once, and a shared temp file would mix the two outputs.
+    tmp = f"{os.path.splitext(final)[0]}.{uuid.uuid4().hex[:12]}.part.mp4"
     cmd = [
         "ffmpeg", "-v", "error", "-y", "-i", encoded_path,
         "-map", "0:v", "-c", "copy", "-an", "-movflags", "+faststart", tmp,
@@ -307,6 +310,8 @@ class PipelineWorker:
     async def backfill_previews(self) -> None:
         """One-shot: make the preview copy of ready items encoded before it existed."""
         for item in list(self.queue.items):
+            if self._preparing is not None and self._preparing.video_id == item.video_id:
+                continue  # _prepare_one makes its copy
             if item.cache_file_present() and not item.preview_present():
                 await self._ensure_preview(item)
 

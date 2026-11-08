@@ -432,3 +432,43 @@ async def test_backfill_previews_only_for_ready_items_without_copy(monkeypatch, 
     await worker.backfill_previews()
 
     preview.assert_awaited_once_with(str(tmp_path / "A.mp4"))
+
+
+@pytest.mark.asyncio
+async def test_concurrent_make_preview_calls_use_distinct_temp_files(monkeypatch, tmp_path):
+    """backfill_previews and _prepare_one can remux the same video at once:
+    a shared temp name would let one ffmpeg overwrite the other's output."""
+    from crt import pipeline as pl
+    calls = []
+    monkeypatch.setattr(pl.asyncio, "create_subprocess_exec", _fake_ffmpeg(0, calls))
+    encoded = tmp_path / "X.mp4"
+    encoded.write_text("enc")
+
+    await asyncio.gather(pl.make_preview(str(encoded)), pl.make_preview(str(encoded)))
+
+    tmps = [args[-1] for args in calls]
+    assert len(set(tmps)) == 2
+    assert all(t.endswith(".part.mp4") for t in tmps)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["X.mp4", "X_noaudio.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_previews_skips_the_item_being_prepared(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    from crt.library_store import LibraryStore
+    monkeypatch.setattr(config_module, "TEMP_DIR", str(tmp_path))
+    (tmp_path / "A.mp4").write_text("x")
+    (tmp_path / "B.mp4").write_text("x")
+    library = LibraryStore()
+    library.items += [
+        QueueItem(url="u", video_id="A", status="ready", filename="A.mp4"),
+        QueueItem(url="u", video_id="B", status="ready", filename="B.mp4"),
+    ]
+    worker = pl.PipelineWorker(library)
+    worker._preparing = library.items[0]  # the worker makes A's copy itself
+    preview = AsyncMock(return_value=None)
+    monkeypatch.setattr(pl, "make_preview", preview)
+
+    await worker.backfill_previews()
+
+    preview.assert_awaited_once_with(str(tmp_path / "B.mp4"))

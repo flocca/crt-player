@@ -77,6 +77,8 @@ class ActionResult:
 
     did_action: bool
     reason: str | None = None
+    # The video deleted at once by /control/delete/current while playing.
+    deleted_video_id: str | None = None
 
 
 # Convenience singletons for the common no-op outcomes.
@@ -136,6 +138,9 @@ class PlayerCore:
         self._pending_clears: dict[str, tuple[float, Callable[[], None]]] = {}
         self._night_handle: asyncio.TimerHandle | None = None
         self._quit_task: asyncio.Task | None = None
+        # Background part of each deletion (cache unlinks, YouTube delete),
+        # kept referenced until done so it is not garbage-collected.
+        self._delete_tasks: set[asyncio.Task] = set()
         # Invoked when an item's encoded file is found missing on disk and the
         # item is re-queued (issue #10). Wired to pipeline.wake_prepare so the
         # prepare loop re-downloads/re-encodes it immediately.
@@ -597,13 +602,18 @@ class PlayerCore:
     async def play(self, video_id: str) -> ActionResult:
         """Jump cursor to a specific video_id and cast.
 
-        Raises KeyError if video_id is not in the library.
+        Raises KeyError if video_id is not in the library. An unready video
+        casts nothing; with the screen shown it flashes "Non ancora pronto".
         """
         idx = self._index_of(video_id)
         if idx is None:
             raise KeyError(f"video_id not in library: {video_id}")
         self._explicit_command()
-        return self._cast(self.library.items[idx])
+        result = self._cast(self.library.items[idx])
+        if not result.did_action and self._screen_shown():
+            # As the screen's own Riproduci on an unready row.
+            self._flash(NOT_READY_NOTICE)
+        return result
 
     def _cancel_confirm(self) -> bool:
         """A key other than OK while a delete waits for confirmation only
@@ -762,6 +772,7 @@ class PlayerCore:
             self._snapshot_position(item)
             item.status = "ready"
         self._cancel_night_timer()
+        self._blank_page()
         self.screen = None
         self._loaded_video_id = None
         self.state = "idle"
@@ -771,6 +782,13 @@ class PlayerCore:
             asyncio.to_thread(self.chromecast.quit_app),
         )
         return _DID_ACTION
+
+    def _blank_page(self) -> None:
+        """Empty the page before quitting DashCast: quit_app swallows its
+        timeouts, and a page left open must not keep an awake screen (no
+        night, no idle close) that the daemon no longer tracks."""
+        self.receiver.send({"type": "blank"})
+        self._hide_screen()
 
     def _flash(self, text: str, kind: str = "info") -> None:
         """Show `text` on the screen's bottom line: NOTICE_S seconds for an
@@ -897,8 +915,7 @@ class PlayerCore:
         if self.state == "calibrating":
             await self._end_calibration()
         if self.state == "playing":
-            await self.delete_current()
-            return _DID_ACTION
+            return ActionResult(True, deleted_video_id=await self.delete_current())
         items = self.library.items
         if self._screen_shown():
             woke = self._wake_if_night()
@@ -921,37 +938,35 @@ class PlayerCore:
         self._send_screen()
         return self._opened_result()
 
-    async def delete_current(self) -> None:
+    async def delete_current(self) -> str | None:
         """Delete the cursor video at once (/control/delete/current while
-        playing): stop whatever is on the page first."""
+        playing): stop whatever is on the page first. Returns the deleted
+        video_id (None if there was no cursor video). Never suspends: the
+        cache unlinks and the YouTube delete finish in the background."""
         item = self.library.cursor_item()
         if item is None:
             log.info("delete_current: no cursor item, skipping")
-            return
+            return None
         if self.state in ("playing", "paused", "calibrating"):
             await self.stop()
-        await self._remove_local(item)
-        if self._screen_shown():
-            self._send_screen()
-        await self._remove_remote(item)
+        self._remove(item)
+        return item.video_id
 
     async def _delete_video(self, video_id: str) -> None:
         """Delete `video_id` after the screen's confirmation. The loaded video
-        is stopped first; any other video leaves the pause alone."""
+        is stopped first; any other video leaves the pause alone. Never
+        suspends: a bridge retry of a slow OK would run on the new screen."""
         item = next((i for i in self.library.items if i.video_id == video_id), None)
         if item is None:
             return
         if video_id == self._loaded_video_id and self.state in ("playing", "paused", "calibrating"):
             await self.stop()
-        await self._remove_local(item)
-        # Redraw before the slow YouTube call: the row is gone already.
-        if self._screen_shown():
-            self._send_screen()
-        await self._remove_remote(item)
+        self._remove(item)
 
-    async def _remove_local(self, item: QueueItem) -> None:
-        """Remove `item` from the library and its cache files. The cursor
-        moves to its successor, as when the sync removes it
+    def _remove(self, item: QueueItem) -> None:
+        """Remove `item` from the library now and redraw the screen; its cache
+        files and its YouTube playlist entry go in a background task. The
+        cursor moves to its successor, as when the sync removes it
         (SyncEngine._remove_item)."""
         idx = self._index_of(item.video_id)
         cursor_was_here = self.library.cursor_video_id == item.video_id
@@ -960,13 +975,30 @@ class PlayerCore:
                 self.on_delete(item.video_id)
             except Exception:
                 log.exception("on_delete callback failed for %s", item.video_id)
-        await asyncio.to_thread(self._delete_local, item)
+        self.library.remove(item.id)
         if cursor_was_here and idx is not None:
             if not self.library.items:
                 self.library.cursor_video_id = None
             else:
                 new_idx = min(idx, len(self.library.items) - 1)
                 self.library.cursor_video_id = self.library.items[new_idx].video_id
+        if self._screen_shown():
+            self._send_screen()
+        task = asyncio.get_running_loop().create_task(self._finish_delete(item))
+        self._delete_tasks.add(task)
+        task.add_done_callback(self._delete_tasks.discard)
+
+    async def _finish_delete(self, item: QueueItem) -> None:
+        """Background part of a deletion: cache files, then the YouTube
+        playlist entry. Failures are only logged."""
+        try:
+            await asyncio.to_thread(self._unlink_cache, item.video_id)
+        except Exception:
+            log.exception("Removing the cache files of %s failed", item.video_id)
+        try:
+            await self._remove_remote(item)
+        except Exception:
+            log.exception("YouTube remote delete failed for %s", item.video_id)
 
     async def _remove_remote(self, item: QueueItem) -> None:
         """Remove `item` from the YouTube playlist (failures only logged)."""
@@ -983,9 +1015,8 @@ class PlayerCore:
                 item.video_id,
             )
 
-    def _delete_local(self, item) -> None:
-        self.library.remove(item.id)
-        encoded = config.cached_encoded_filename(item.video_id)
+    def _unlink_cache(self, video_id: str) -> None:
+        encoded = config.cached_encoded_filename(video_id)
         for name in (encoded, config.preview_filename(encoded)):
             cache_path = os.path.join(config.TEMP_DIR, name)
             if os.path.isfile(cache_path):
@@ -1345,6 +1376,7 @@ class PlayerCore:
                 self._snapshot_position(item)
                 item.status = "ready"
         self._cancel_night_timer()
+        self._blank_page()
         self.screen = None
         self._loaded_video_id = None
         self.state = "idle"
