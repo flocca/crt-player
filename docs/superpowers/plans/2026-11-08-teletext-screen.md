@@ -361,13 +361,13 @@ git commit -m "feat: endpoint di elimina, loop e sync passano dalla schermata; /
 
 **Files:**
 - Modify: `crt/receiver_page/index.html`
-- Create: `crt/receiver_page/bedstead.otf` (copy of `/private/tmp/claude-501/-Users-flocca-src-crt-player/b8a6f1ae-49dd-45b3-8429-5edf2f139e01/scratchpad/dl-font/bedstead.otf`, or download `https://bjh21.me.uk/bedstead/bedstead.otf`), `crt/receiver_page/BEDSTEAD-LICENSE.md` (author, URL, CC0 statement)
+- Create: `crt/receiver_page/bedstead.otf` (copy of `/Users/flocca/.claude/state/handoff/crt-player/2026-11-08-pause-menu-v2/tvlab/font/bedstead.otf`, or download `https://bjh21.me.uk/bedstead/bedstead.otf`), `crt/receiver_page/BEDSTEAD-LICENSE.md` (author, URL, CC0 statement)
 - Modify: `crt/api.py` (route `GET /receiver/bedstead.otf`, `Cache-Control: max-age=86400`)
 - Test: `tests/test_receiver_page.py`, `tests/test_api.py`
 
 **Interfaces:**
 - Consumes: the `screen{view}` message (Task 2 view keys), `blank{}` new meaning (Task 3).
-- Reference for what Giacomo approved on the TV (not product code): `/private/tmp/claude-501/-Users-flocca-src-crt-player/b8a6f1ae-49dd-45b3-8429-5edf2f139e01/scratchpad/tvlab/page.html`, scenes `ttxmixp`/`ttxp`: fit algorithm (`fitTtx`), padding, snow, preview window loop, `previewOff` unload.
+- Reference for what Giacomo approved on the TV (not product code): `/Users/flocca/.claude/state/handoff/crt-player/2026-11-08-pause-menu-v2/tvlab/page.html`, scenes `ttxmixp`/`ttxp`: fit algorithm (`fitTtx`), padding, snow, preview window loop, `previewOff` unload.
 
 - [ ] **Step 1: Update the static tests**
 

@@ -26,7 +26,7 @@ Pagina usa e getta servita dal Mac, aperta con DashCast sul Chromecast Ultra "TV
 - **Effetti al cambio di riga rifiutati**: sia uno sfarfallio di 150 ms (impercettibile) sia neve piena + rotolamento verticale di 500 ms (non piaciuto). Il cambio è secco.
 - **Impaginazione approvata**: solo i margini di calibrazione `CRT_MARGIN_*`, senza il margine di sicurezza 5%/8% del menu di oggi, più l'1,5% di margine a sinistra; 18 righe che riempiono l'altezza (font Bedstead a circa 35,5 px CSS); 40 colonne che riempiono la larghezza con un `letter-spacing` calcolato. Velo dietro il televideo: **70%** (30% e 55% illeggibili). Rosso e blu sul tubo: "vanno bene per ora".
 
-Il codice della prova resta come riferimento di ciò che Giacomo ha visto (non è codice di prodotto): `/private/tmp/claude-501/-Users-flocca-src-crt-player/b8a6f1ae-49dd-45b3-8429-5edf2f139e01/scratchpad/tvlab/page.html`, scene `ttxmixp` (pausa) e `ttxp` (fermo).
+Il codice della prova resta come riferimento di ciò che Giacomo ha visto (non è codice di prodotto): `/Users/flocca/.claude/state/handoff/crt-player/2026-11-08-pause-menu-v2/tvlab/page.html`, scene `ttxmixp` (pausa) e `ttxp` (fermo).
 
 ## Cosa si costruisce
 
