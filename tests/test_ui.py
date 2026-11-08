@@ -77,3 +77,94 @@ async def test_initial_fetch_populates_library(tui_app, mock_daemon_client):
         await pilot.pause()
     # After mount, the client should have been called
     assert mock_daemon_client.fetch_library.call_count >= 1
+
+
+def _two_items_library():
+    return {
+        "cursor_video_id": "A",
+        "loop_mode": False,
+        "items": [
+            {"video_id": "A", "id": "a", "title": "Alpha", "status": "ready", "progress": 100, "error": None, "is_cursor": True},
+            {"video_id": "B", "id": "b", "title": "Beta", "status": "ready", "progress": 100, "error": None, "is_cursor": False},
+        ],
+    }
+
+
+def _status_with(mock_daemon_client, screen, selected):
+    status = mock_daemon_client.fetch_status.return_value
+    status["player"] = {**status["player"], "screen": screen, "selected_video_id": selected}
+
+
+def _row_texts(app):
+    from textual.widgets import Label, ListView
+    lv = app.query_one("#items_list", ListView)
+    return [str(item.query_one(Label).render()) for item in lv.children]
+
+
+@pytest.mark.asyncio
+async def test_list_marks_tv_highlight(tui_app, mock_daemon_client):
+    mock_daemon_client.fetch_library.return_value = _two_items_library()
+    _status_with(mock_daemon_client, "paused", "B")
+    async with tui_app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        rows = _row_texts(tui_app)
+    assert rows[0].startswith(">> ")
+    assert rows[1].startswith("  *")
+
+
+@pytest.mark.asyncio
+async def test_enter_on_row_plays_that_video(tui_app, mock_daemon_client):
+    from textual.widgets import ListView
+    mock_daemon_client.fetch_library.return_value = _two_items_library()
+    async with tui_app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        lv = tui_app.query_one("#items_list", ListView)
+        lv.focus()
+        lv.index = 1
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+    mock_daemon_client.play.assert_called_with("B")
+
+
+@pytest.mark.asyncio
+async def test_list_keeps_index_across_refresh(tui_app, mock_daemon_client):
+    from textual.widgets import ListView
+    mock_daemon_client.fetch_library.return_value = _two_items_library()
+    async with tui_app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        lv = tui_app.query_one("#items_list", ListView)
+        lv.index = 1
+        await pilot.pause()
+        tui_app.library_state = _two_items_library()
+        await pilot.pause()
+        await pilot.pause()
+        assert lv.index == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("screen,text", [("stopped", "TV: fermo · evidenziato 02"), ("paused", "TV: in pausa · evidenziato 02")])
+async def test_status_bar_shows_tv_screen(tui_app, mock_daemon_client, screen, text):
+    from textual.widgets import Static
+    mock_daemon_client.fetch_library.return_value = _two_items_library()
+    _status_with(mock_daemon_client, screen, "B")
+    async with tui_app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        bar = str(tui_app.query_one("#status_bar", Static).render())
+    assert text in bar
+
+
+@pytest.mark.asyncio
+async def test_status_bar_hides_tv_segment_when_none(tui_app, mock_daemon_client):
+    from textual.widgets import Static
+    mock_daemon_client.fetch_library.return_value = _two_items_library()
+    _status_with(mock_daemon_client, "none", "B")
+    async with tui_app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        bar = str(tui_app.query_one("#status_bar", Static).render())
+    assert "TV:" not in bar

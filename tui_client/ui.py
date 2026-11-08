@@ -53,6 +53,7 @@ class CRTCastApp(App):
 
     def __init__(self, daemon_url: str):
         super().__init__()
+        self._row_video_ids: list = []
         self.client = DaemonClient(daemon_url)
 
     def compose(self) -> ComposeResult:
@@ -87,16 +88,35 @@ class CRTCastApp(App):
             list_view = self.query_one("#items_list", ListView)
         except Exception:
             return
+        previous_index = list_view.index
+        selected_id = (self.status_state or {}).get("player", {}).get("selected_video_id")
+        items = value.get("items", [])
+        self._row_video_ids = [item.get("video_id") for item in items]
         list_view.clear()
-        for item in value.get("items", []):
-            marker = ">>" if item.get("is_cursor") else "  "
-            label = f"{marker} {item['status']:>10s}  {item['title']}"
+        for item in items:
+            cursor = ">>" if item.get("is_cursor") else "  "
+            tv = "*" if selected_id and item.get("video_id") == selected_id else " "
+            label = f"{cursor}{tv} {item['status']:>10s}  {item['title']}"
             list_view.append(ListItem(Label(label)))
+        if previous_index is not None and items:
+            # clear() resets the highlight: restore the user's row (clamped).
+            list_view.index = min(previous_index, len(items) - 1)
         # loop_mode lives in library_state; refresh the status bar to reflect it.
         self._render_status_bar()
 
     def watch_status_state(self, value: dict) -> None:
-        self._render_status_bar()
+        # The TV highlight marker depends on the status: redraw the rows too.
+        self.watch_library_state(self.library_state or {})
+
+    async def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = event.list_view.index
+        if index is None or index >= len(self._row_video_ids):
+            return
+        video_id = self._row_video_ids[index]
+        try:
+            await asyncio.to_thread(self.client.play, video_id)
+        except Exception as e:
+            log.warning("play failed: %s", e)
 
     def _render_status_bar(self) -> None:
         try:
@@ -108,10 +128,18 @@ class CRTCastApp(App):
         yt = status.get("youtube", {})
         pl = status.get("player", {})
         loop_label = "loop ON" if library.get("loop_mode") else "loop off"
+        tv_label = ""
+        screen = pl.get("screen")
+        if screen in ("paused", "stopped"):
+            ids = [i.get("video_id") for i in library.get("items", [])]
+            selected = pl.get("selected_video_id")
+            number = f"{ids.index(selected) + 1:02d}" if selected in ids else "--"
+            word = "in pausa" if screen == "paused" else "fermo"
+            tv_label = f"  |  TV: {word} \u00b7 evidenziato {number}"
         bar.update(
             f"YT: {yt.get('state', '?')} (last sync: {yt.get('last_sync_at') or 'never'})  |  "
             f"Player: {pl.get('state', '?')}  |  CC: {pl.get('chromecast', '?')}  |  "
-            f"{loop_label}"
+            f"{loop_label}{tv_label}"
         )
 
     async def action_toggle(self) -> None:
