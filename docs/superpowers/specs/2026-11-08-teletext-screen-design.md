@@ -47,7 +47,6 @@ Le due facce differiscono solo in quattro cose: cosa c'è dietro la riga del vid
 ## Non obiettivi
 
 - Pagina 200 "STATO" (messaggi d'errore dei download, coda, Chromecast, prossimo sync): dopo. Nella seconda riga dei comandi resta il posto per un futuro `Stato`.
-- Campo `duration` per video: nelle righe basta la posizione salvata; tempo e durata completi solo per il video in pausa (riga 4), letti dalla pagina.
 - Etichette del menu Comandi della FAP (`flipper_app/crt_remote_app.c:51-55`: "Calibrate", "Toggle loop", "Sync now") e della home (`< -15s`, `> +30s`): restano. Si apre una issue da fare al prossimo riflash (`Calibra`, `Loop`, `Sync`, home con "< > comandi").
 - Zapping a canali (concetto B delle consulenze): messo da parte.
 - Cambiare cosa fanno i tasti durante la riproduzione (Su/Giù passano al video pronto adiacente come oggi, Sinistra/Destra `-15s`/`+30s`, OK mette in pausa).
@@ -96,10 +95,11 @@ Estetica teletext generica (standard ETS 300 706, non un servizio reale): monosp
 
 ### Righe dei video
 
-`simbolo numero titolo destra`: simbolo, numero a due cifre (posizione nella playlist), titolo troncato con `…` per stare nelle colonne disponibili, a destra 7 colonne allineate a destra.
+`simbolo numero titolo destra`: simbolo, numero a due cifre (posizione nella playlist), titolo troncato con `…` per stare nelle colonne disponibili, a destra 8 colonne allineate a destra (erano 7: l'ottava serve a `-1:05:00`, deciso con Giacomo il 2026-11-08 dopo la prova sul TV).
 
 - **Simboli**: ▶ solo sul video caricato (in pausa); ○ pronto; ✓ già visto; … in coda, in download o in codifica; ! errore. Oggi ▶ segue il cursore (`crt/pause_menu.py:36-37`): nella nuova schermata segue solo il video caricato, quindi da fermo nessuna riga lo porta.
-- **Colonna destra**: la posizione salvata (`mm:ss`, o `h:mm:ss` sopra l'ora) se `playback_position > 0`; la percentuale (`43%`) se in download o in codifica; vuota negli altri casi.
+- **Colonna destra** (decisa con Giacomo il 2026-11-08, sentito il consulente), in ordine di precedenza: la percentuale (`43%`) se in download o in codifica; per un video iniziato e non finito (`playback_position > 0`), compreso quello in pausa (▶), il tempo che manca col meno davanti (`-33:00`, `-1:05:00` sopra l'ora; `-00:00` se la posizione supera la durata); negli altri casi la durata (`09:12`, `1:05:30`), anche per i visti (in grigio come la riga), per quelli in coda appena la pipeline l'ha letta e per quelli in errore se un tentativo precedente l'aveva letta; vuota se la durata non è ancora nota. Formato `mm:ss`, `h:mm:ss` sopra l'ora, come la riga 4.
+- **Durata nella libreria** *(scelte di Claude)*: un campo `duration` per video, letto con il titolo prima del download (`fetch_title` ha già le informazioni di yt-dlp) e ricavato con ffprobe all'avvio per i video già in cache; la riga 4 prende la durata da lì invece che dal `<video>`.
 - **Testo di stato per i non pronti**, nel titolo: `In coda · Titolo`, `Download · Titolo` (con `43%` a destra), `Codifica · Titolo`, `Errore nel video · Titolo`.
 - **Colori**: pronto bianco; visto grigio; in coda, download, codifica ciano; errore magenta (il rosso come testo su CRT si legge male); riga evidenziata nero su giallo; riga in attesa di conferma `Elimina` nero su rosso.
 
