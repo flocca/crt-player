@@ -599,6 +599,7 @@
     var at = autoplay ? (position || 0) : primeStart(position);
     try { main.currentTime = at; } catch (e) { /* not seekable yet */ }
     if (autoplay) {
+      main.muted = false;
       var p = main.play();
       if (p && p.catch) {
         p.catch(function (e) { report("error", { error: "play() failed: " + e }); });
@@ -637,6 +638,7 @@
       startAt(want.position, want.autoplay);
     };
     main.addEventListener("loadedmetadata", onMeta);
+    if (!msg.autoplay) { main.muted = true; }
     main.setAttribute("src", msg.url);
     main.load();
   }

@@ -133,3 +133,14 @@ def test_row_4_keeps_the_duration_across_a_reload():
     src = PAGE.read_text()
     line = _between(src, "function playerLine(", "function videoLine(")
     assert "knownDuration()" in line
+
+
+def test_paused_load_is_muted_before_its_pipeline_starts():
+    """Muting just before the priming play is too late on the Chromecast: a
+    reload after a preview played a fraction of audio (TV check, 2026-11-08)."""
+    src = PAGE.read_text()
+    load = _between(src, "function load(", "function blank(")
+    mute = load.index("if (!msg.autoplay) { main.muted = true; }")
+    assert mute < load.index("main.load()")
+    start = _between(src, "function startAt(", "function load(")
+    assert start.index("main.muted = false") < start.index("main.play()")
