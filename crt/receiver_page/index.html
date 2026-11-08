@@ -444,10 +444,11 @@
         setSnow("off");
         break;
       case "preview":
-        if (v.preview) {
+        if (v.preview && priming === null) {
           setSnow("off");
           showPreview(v.preview);
         } else {
+          // No copy yet, or #main is priming (see primeFrame): black for now.
           previewOff();
           setSnow("black");
         }
@@ -495,46 +496,78 @@
     fitGrid();
   }
 
-  function cancelPriming() {
-    if (priming === null) { return; }
-    clearTimeout(priming.timer);
-    main.removeEventListener("playing", priming.onPlaying);
-    priming = null;
-    main.muted = false;
+  // Priming: a video loaded and paused at once may never draw its frame on
+  // the Chromecast, so it plays muted for a moment and pauses again.
+  // - It starts PRIME_LEAD_S before the wanted position, so the pause lands
+  //   about where the video was: reconnects do not push the resume point on.
+  //   No seek after the pause (a seek while paused does not redraw, #20).
+  // - The Chromecast ignores `muted` on a second loaded <video>, so no
+  //   preview is loaded while #main plays; the background comes back after.
+  // - PRIME_TIMEOUT_MS ends it if `playing` never comes.
+  var PRIME_PLAY_MS = 250;
+  var PRIME_LEAD_S = 0.25;
+  var PRIME_TIMEOUT_MS = 3000;
+  var SEEK_END_MARGIN_S = 0.5;  // as in crt/player_core.py
+
+  function primeStart(position) {
+    var start = Math.max(0, (position || 0) - PRIME_LEAD_S);
+    if (isFinite(main.duration) && main.duration > 0) {
+      start = Math.min(start, Math.max(0, main.duration - SEEK_END_MARGIN_S - PRIME_LEAD_S));
+    }
+    return start;
   }
 
-  // A video loaded and paused at once may never draw its frame on the
-  // Chromecast: play it muted for a moment, then pause and unmute.
+  // End priming: `pause` leaves the video paused and unmuted and sends the
+  // one status report; without it (a command took over) only unmute.
+  function endPriming(pause) {
+    if (priming === null) { return; }
+    clearTimeout(priming.timer);
+    clearTimeout(priming.fallback);
+    main.removeEventListener("playing", priming.onPlaying);
+    priming = null;
+    if (pause) {
+      var wasPlaying = !main.paused;
+      main.pause();
+      // A pause of a playing element reports through its "pause" event.
+      if (!wasPlaying) { report("status"); }
+    }
+    main.muted = false;
+    if (view !== null) { applyBackground(view); }
+  }
+
+  function cancelPriming() { endPriming(false); }
+
   function primeFrame() {
-    cancelPriming();
-    var state = { timer: null, onPlaying: null };
+    if (priming !== null) {
+      clearTimeout(priming.timer);
+      clearTimeout(priming.fallback);
+      main.removeEventListener("playing", priming.onPlaying);
+    }
+    var state = { timer: null, fallback: null, onPlaying: null };
     state.onPlaying = function () {
       main.removeEventListener("playing", state.onPlaying);
       state.timer = setTimeout(function () {
-        if (priming !== state) { return; }
-        // The "pause" event of this pause() fires after priming is cleared
-        // and sends the one status report.
-        priming = null;
-        main.pause();
-        main.muted = false;
-      }, 250);
+        if (priming === state) { endPriming(true); }
+      }, PRIME_PLAY_MS);
     };
+    state.fallback = setTimeout(function () {
+      if (priming === state) { endPriming(true); }
+    }, PRIME_TIMEOUT_MS);
     priming = state;
+    previewOff();
     main.muted = true;
     main.addEventListener("playing", state.onPlaying);
     var p = main.play();
     if (p && p.catch) {
       p.catch(function () {
-        if (priming !== state) { return; }
-        cancelPriming();
-        main.pause();
-        report("status");
+        if (priming === state) { endPriming(true); }
       });
     }
   }
 
   function startAt(position, autoplay) {
-    try { main.currentTime = position || 0; } catch (e) { /* not seekable yet */ }
+    var at = autoplay ? (position || 0) : primeStart(position);
+    try { main.currentTime = at; } catch (e) { /* not seekable yet */ }
     if (autoplay) {
       var p = main.play();
       if (p && p.catch) {

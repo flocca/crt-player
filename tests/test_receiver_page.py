@@ -52,3 +52,27 @@ def test_page_has_no_css_animation_or_transition():
 
 def test_page_loads_bedstead_from_receiver_route():
     assert "/receiver/bedstead.otf" in PAGE.read_text()
+
+
+def test_priming_has_a_fallback_timeout():
+    """If `playing` never fires, priming must still end (unmute, report)."""
+    src = PAGE.read_text()
+    m = re.search(r"PRIME_TIMEOUT_MS\s*=\s*(\d+)", src)
+    assert m and 1000 <= int(m.group(1)) <= 5000
+    assert re.search(r"setTimeout\([\s\S]{0,120}PRIME_TIMEOUT_MS\)", src)
+
+
+def test_priming_starts_before_the_saved_position():
+    """The primed pause must land on the saved position, not past it."""
+    src = PAGE.read_text()
+    assert re.search(r"PRIME_LEAD_S\s*=\s*0\.25", src)
+    assert re.search(r"SEEK_END_MARGIN_S\s*=\s*0\.5", src)
+    assert re.search(r"\(position \|\| 0\) - PRIME_LEAD_S", src)
+
+
+def test_no_preview_loaded_while_main_primes():
+    """The Chromecast ignores `muted` on a second loaded <video>."""
+    src = PAGE.read_text()
+    assert re.search(r"v\.preview && priming === null", src)
+    prime = src[src.index("function primeFrame()"):src.index("function startAt(")]
+    assert "previewOff()" in prime
