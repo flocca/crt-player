@@ -76,3 +76,37 @@ def test_no_preview_loaded_while_main_primes():
     assert re.search(r"v\.preview && priming === null", src)
     prime = src[src.index("function primeFrame()"):src.index("function startAt(")]
     assert "previewOff()" in prime
+
+
+# The Chromecast has one hardware video decoder: when #preview or #cal loads
+# a file, #main's pipeline is revoked and becomes a dummy that shows and plays
+# nothing (black, silent) until #main is reloaded (TV check, 2026-11-08).
+
+def _between(src, start, end):
+    return src[src.index(start):src.index(end, src.index(start))]
+
+
+def test_second_video_marks_main_stale():
+    src = PAGE.read_text()
+    assert "markMainStale()" in _between(src, "function showPreview(", 'preview.addEventListener("timeupdate"')
+    assert "markMainStale()" in _between(src, "function calibration(", "function dispatch(")
+
+
+def test_stale_main_is_reloaded_where_it_shows_or_plays():
+    src = PAGE.read_text()
+    background = _between(src, "function applyBackground(", "function showScreen(")
+    assert background.count("reloadMain(false)") == 2  # the paused frame, and the night
+    assert "reloadMain(true)" in _between(src, 'case "play":', 'case "pause":')
+
+
+def test_same_file_load_reloads_a_stale_main():
+    src = PAGE.read_text()
+    load = _between(src, "function load(", "function blank(")
+    assert re.search(r"!reload && currentSrc\(\) === msg\.url", load)
+    # Cleared before cancelPriming, whose background redraw would reload again.
+    assert load.index("mainStale = null") < load.index("cancelPriming()")
+
+
+def test_blank_forgets_a_stale_main():
+    src = PAGE.read_text()
+    assert "mainStale = null" in _between(src, "function blank(", "function stopCalibration(")

@@ -104,6 +104,19 @@
   // playing, so they are skipped and one report follows the pause.
   var priming = null;
 
+  // The Chromecast has one hardware video decoder. When #preview or #cal
+  // loads a file, #main's pipeline is revoked and turns into a dummy: it
+  // still reports success, but shows and plays nothing (black, silent) until
+  // #main is reloaded. mainStale keeps where #main was paused; the next
+  // paused frame, play or same-file load reloads it from there.
+  var mainStale = null;  // { position } while #main's decoder is revoked
+
+  function markMainStale() {
+    if (mainStale === null && currentSrc()) {
+      mainStale = { position: main.currentTime || 0 };
+    }
+  }
+
   ["playing", "pause", "seeked", "loadedmetadata"].forEach(function (ev) {
     main.addEventListener(ev, function () {
       if (priming === null) { report("status"); }
@@ -401,6 +414,7 @@
     var sameWindow = previewWindow.start === p.start && previewWindow.end === p.end;
     previewWindow = { start: p.start, end: p.end };
     if (preview.getAttribute("src") !== p.url) {
+      markMainStale();
       muteAll();
       preview.setAttribute("src", p.url);
       var url = p.url;
@@ -436,12 +450,15 @@
     if (v.night) {
       previewOff();
       setSnow("off");
+      // The paused video stays under the night veil.
+      if (mainStale !== null) { reloadMain(false); }
       return;
     }
     switch (v.background) {
       case "frame":
         previewOff();
         setSnow("off");
+        if (mainStale !== null) { reloadMain(false); }
         break;
       case "preview":
         if (v.preview && priming === null) {
@@ -583,14 +600,18 @@
   // after a load must win over the load's own autoplay).
   var pending = null;
 
-  function load(msg) {
+  function load(msg, force) {
     var token = ++loadToken;
+    // A revoked #main must really reload (see mainStale). Cleared before
+    // cancelPriming, whose background redraw would otherwise reload it too.
+    var reload = !!force || mainStale !== null;
+    mainStale = null;
     pending = null;
     cancelPriming();
     // Same file already loaded (e.g. the event stream reconnected): seek in
     // place instead of reloading, so the screen does not go black. A failed
     // element keeps its error until load(), so a retry reloads for real.
-    if (currentSrc() === msg.url && main.readyState >= 1 && !main.error) {
+    if (!reload && currentSrc() === msg.url && main.readyState >= 1 && !main.error) {
       startAt(msg.position, msg.autoplay);
       return;
     }
@@ -607,10 +628,17 @@
     main.load();
   }
 
+  // Reload a revoked #main from the same file where it was paused: a fresh
+  // pipeline takes the decoder back (paused: primed, as at page open).
+  function reloadMain(autoplay) {
+    load({ url: currentSrc(), position: mainStale.position, autoplay: autoplay }, true);
+  }
+
   // Unload the main video and stop the calibration; the screen is left as
   // it is (the stopped screen follows in its own message).
   function blank() {
     loadToken++;
+    mainStale = null;
     pending = null;
     cancelPriming();
     main.pause();
@@ -631,6 +659,7 @@
       stopCalibration();
       return;
     }
+    markMainStale();
     cal.setAttribute("src", url);
     cal.classList.remove("hidden");
     cal.load();
@@ -645,6 +674,7 @@
       case "play":
         cancelPriming();
         if (pending !== null) { pending.autoplay = true; break; }
+        if (mainStale !== null) { reloadMain(true); break; }
         var p = main.play();
         if (p && p.catch) { p.catch(function (e) { report("error", { error: "play() failed: " + e }); }); }
         break;
@@ -655,6 +685,7 @@
         break;
       case "seek":
         if (pending !== null) { pending.position = msg.position; break; }
+        if (mainStale !== null) { mainStale.position = msg.position; break; }
         try { main.currentTime = msg.position; } catch (e) { /* ignore */ }
         break;
       case "blank": blank(); break;
