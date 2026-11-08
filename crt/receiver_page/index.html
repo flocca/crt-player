@@ -113,7 +113,8 @@
 
   function markMainStale() {
     if (mainStale === null && currentSrc()) {
-      mainStale = { position: main.currentTime || 0 };
+      // A load still waiting for its metadata reads currentTime 0.
+      mainStale = { position: pending !== null ? pending.position : (main.currentTime || 0) };
     }
   }
 
@@ -197,9 +198,17 @@
     return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
   }
 
+  // main.duration is NaN again after every reload of the same file (see
+  // reloadMain): row 4 keeps the last duration known for that file.
+  var lastDuration = { src: null, d: 0 };
+  function knownDuration() {
+    if (isFinite(main.duration) && main.duration > 0) { return main.duration; }
+    return lastDuration.src !== null && lastDuration.src === currentSrc() ? lastDuration.d : 0;
+  }
+
   function playerLine(v) {
     if (v.paused_position !== null && v.paused_position !== undefined) {
-      var dur = isFinite(main.duration) && main.duration > 0 ? main.duration : 0;
+      var dur = knownDuration();
       var pos = v.paused_position;
       var filled = dur > 0 ? Math.max(0, Math.min(BAR_COLS, Math.round(BAR_COLS * pos / dur))) : 0;
       return [seg("▌▌ " + fmt(pos) + " / " + (dur > 0 ? fmt(dur) : "--:--") + "  " +
@@ -300,6 +309,9 @@
 
   // Row 4 shows the duration the page learns from the paused video.
   main.addEventListener("durationchange", function () {
+    if (isFinite(main.duration) && main.duration > 0) {
+      lastDuration = { src: currentSrc(), d: main.duration };
+    }
     if (view !== null && view.paused_position !== null && view.paused_position !== undefined) {
       renderGrid();
     }
@@ -518,8 +530,9 @@
   // - It starts PRIME_LEAD_S before the wanted position, so the pause lands
   //   about where the video was: reconnects do not push the resume point on.
   //   No seek after the pause (a seek while paused does not redraw, #20).
-  // - The Chromecast ignores `muted` on a second loaded <video>, so no
-  //   preview is loaded while #main plays; the background comes back after.
+  // - No preview is loaded while #main plays: the Chromecast has one video
+  //   decoder (a preview would revoke #main, see mainStale) and ignores
+  //   `muted` on a second loaded <video>; the background comes back after.
   // - PRIME_TIMEOUT_MS ends it if `playing` never comes.
   var PRIME_PLAY_MS = 250;
   var PRIME_LEAD_S = 0.25;
@@ -673,8 +686,8 @@
       case "load": load(msg); break;
       case "play":
         cancelPriming();
-        if (pending !== null) { pending.autoplay = true; break; }
         if (mainStale !== null) { reloadMain(true); break; }
+        if (pending !== null) { pending.autoplay = true; break; }
         var p = main.play();
         if (p && p.catch) { p.catch(function (e) { report("error", { error: "play() failed: " + e }); }); }
         break;
@@ -684,8 +697,9 @@
         main.pause();
         break;
       case "seek":
-        if (pending !== null) { pending.position = msg.position; break; }
-        if (mainStale !== null) { mainStale.position = msg.position; break; }
+        if (mainStale !== null) { mainStale.position = msg.position; }
+        if (pending !== null) { pending.position = msg.position; }
+        if (mainStale !== null || pending !== null) { break; }
         try { main.currentTime = msg.position; } catch (e) { /* ignore */ }
         break;
       case "blank": blank(); break;

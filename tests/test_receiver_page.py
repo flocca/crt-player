@@ -110,3 +110,26 @@ def test_same_file_load_reloads_a_stale_main():
 def test_blank_forgets_a_stale_main():
     src = PAGE.read_text()
     assert "mainStale = null" in _between(src, "function blank(", "function stopCalibration(")
+
+
+def test_stale_marker_keeps_a_pending_load_position():
+    """While #main waits for its metadata, currentTime is 0: a preview or the
+    calibration landing then must keep the position the load is heading to."""
+    src = PAGE.read_text()
+    mark = _between(src, "function markMainStale(", "\n  }\n")
+    assert re.search(r"pending !== null \? pending\.position", mark)
+
+
+def test_play_and_seek_check_a_stale_main_before_a_pending_load():
+    src = PAGE.read_text()
+    play = _between(src, 'case "play":', 'case "pause":')
+    assert play.index("mainStale !== null") < play.index("pending !== null")
+    seek = _between(src, 'case "seek":', 'case "blank":')
+    assert seek.index("mainStale !== null") < seek.index("pending !== null")
+
+
+def test_row_4_keeps_the_duration_across_a_reload():
+    """A reload resets main.duration to NaN: row 4 must not flash --:--."""
+    src = PAGE.read_text()
+    line = _between(src, "function playerLine(", "function videoLine(")
+    assert "knownDuration()" in line
