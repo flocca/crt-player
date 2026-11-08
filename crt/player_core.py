@@ -105,6 +105,9 @@ class PlayerCore:
         # Wired by the daemon: () -> (last sync time ISO or None, sync in
         # error), shown on the screen's bottom line.
         self.sync_info: Callable[[], tuple[str | None, bool]] | None = None
+        # Wired by the daemon to pipeline.cancel_prepare_for: a deleted video
+        # must not keep its download/encode running (issue #17).
+        self.on_delete: Callable[[str], None] | None = None
         self._clock = clock
         # The teletext screen while paused (kept, hidden, under calibration).
         self.screen: Screen | None = None
@@ -696,6 +699,11 @@ class PlayerCore:
         (SyncEngine._remove_item)."""
         idx = self._index_of(item.video_id)
         cursor_was_here = self.library.cursor_video_id == item.video_id
+        if self.on_delete is not None:
+            try:
+                self.on_delete(item.video_id)
+            except Exception:
+                log.exception("on_delete callback failed for %s", item.video_id)
         await asyncio.to_thread(self._delete_local, item)
         if cursor_was_here and idx is not None:
             if not self.library.items:

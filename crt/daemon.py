@@ -120,6 +120,8 @@ async def main_async() -> None:
         library, chromecast, receiver, youtube_client=yt_client,
         on_cache_miss=pipeline.wake_prepare,
     )
+    # A delete from the screen or the remote stops that video's encode.
+    player.on_delete = pipeline.cancel_prepare_for
 
     # Capture the running loop here so callbacks invoked from worker threads
     # (e.g. SyncEngine.run_sync_once dispatched via asyncio.to_thread) can

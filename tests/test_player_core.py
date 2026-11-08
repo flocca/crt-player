@@ -1223,6 +1223,37 @@ async def test_delete_confirm_on_paused_video_stops_then_deletes():
 
 
 @pytest.mark.asyncio
+async def test_delete_from_screen_cancels_the_preparation_of_that_video():
+    library = _make_mixed_library([("a", True), ("b", False)])
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    cancelled = MagicMock()
+    pc.on_delete = cancelled
+    await pc.play("a")
+    await pc.toggle()
+    await pc.next()  # highlight "b", still encoding
+    await _select_command(pc, "delete")
+    await pc.toggle()
+
+    await pc.toggle()
+
+    assert [i.video_id for i in library.items] == ["a"]
+    cancelled.assert_called_once_with("b")
+
+
+@pytest.mark.asyncio
+async def test_delete_current_cancels_the_preparation_of_that_video():
+    library = _make_library(["a", "b"])
+    pc, receiver, q, cc = _make_player(library)
+    cancelled = MagicMock()
+    pc.on_delete = cancelled
+    await pc.play("a")
+
+    await pc.delete_current()
+
+    cancelled.assert_called_once_with("a")
+
+
+@pytest.mark.asyncio
 async def test_any_key_cancels_confirm_and_does_nothing_else():
     pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "b", 30.0)
     await _select_command(pc, "delete")
