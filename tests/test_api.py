@@ -515,3 +515,42 @@ def test_media_supports_range_requests(tmp_path):
     assert r.status_code == 206
     assert r.headers["content-range"] == "bytes 100-199/1000"
     assert len(r.content) == 100
+
+
+# ─── real PlayerCore on the event loop ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_loop_toggle_and_sync_flash_on_screen_with_a_real_player(tmp_path, monkeypatch):
+    """The handlers must run on the event loop: the player schedules timers
+    and feeds asyncio queues, which a threadpool call cannot do."""
+    import httpx
+    from crt import config
+    from crt.player_core import PlayerCore
+    from crt.receiver import ReceiverChannel
+
+    monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
+    library = LibraryStore()
+    library.items.append(QueueItem(url="u/a", video_id="a", title="a", status="ready", filename="a.mp4"))
+    library.cursor_video_id = "a"
+    (tmp_path / "a.mp4").write_bytes(b"x")
+    cc = MagicMock()
+    cc.connected = True
+    cc.receiver_app_active = True
+    cc.wait_for_connection = AsyncMock()
+    receiver = ReceiverChannel({"top": 0, "bottom": 0, "left": 0, "right": 0})
+    receiver.subscribe()
+    kicked = []
+    player = PlayerCore(library, cc, receiver, on_sync_request=lambda: kicked.append(1))
+    await player.play("a")
+    await player.toggle()  # pause: the screen opens
+    assert player.screen_state == "paused"
+
+    app = create_app(library=library, player=player, sync_engine=MagicMock())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+        r1 = await c.post("/control/loop/toggle")
+        assert r1.status_code == 200 and r1.json()["loop_mode"] is True
+        assert player.screen.flash == "Loop attivo"
+        r2 = await c.post("/control/sync")
+        assert r2.status_code == 202
+        assert player.screen.flash == "Sync avviato"
+    assert kicked == [1]

@@ -148,7 +148,7 @@ def create_app(
         )
 
     @app.post("/control/loop/toggle")
-    def control_loop_toggle():
+    async def control_loop_toggle():
         if player is not None:
             player.toggle_loop()
         else:
@@ -156,7 +156,7 @@ def create_app(
         return {"ok": True, "loop_mode": library.loop_mode}
 
     @app.post("/control/sync", status_code=202)
-    def control_sync():
+    async def control_sync():
         if sync_engine is None:
             raise HTTPException(503, "sync engine unavailable")
         if player is not None:

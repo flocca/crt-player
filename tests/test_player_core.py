@@ -2968,3 +2968,19 @@ async def test_screen_state_is_none_while_calibrating(fake_clip):
 
     assert pc.screen is not None and pc.screen_state == "none"
     assert pc.selected_video_id is None
+
+
+@pytest.mark.asyncio
+async def test_second_delete_request_after_immediate_delete_deletes_nothing_more():
+    """Bridge retry of delete/current while playing: the first deletes the
+    video on air, the retry lands on the stopped screen and only asks."""
+    library = _make_library(["a", "b"])
+    library.cursor_video_id = "a"
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+
+    await pc.delete_request()
+    r = await pc.delete_request()
+
+    assert [i.video_id for i in library.items] == ["b"]
+    assert r.did_action and pc.screen.confirm_video_id == "b"
