@@ -6,9 +6,13 @@ the teletext screen, and autoplay/loop on playback completion. Does not
 download or encode — it consumes items that are already in status='ready'
 with a filename set.
 
-States: idle | playing | paused | calibrating. While paused the TV shows the
-teletext screen (Screen): next/prev move the highlighted row, seek moves the
-command selection and toggle runs the selected command on that row.
+States: idle | playing | paused | calibrating. While paused, and while idle
+with the page open (the stopped screen), the TV shows the teletext screen
+(Screen): next/prev move the highlighted row, seek moves the command
+selection and toggle runs the selected command on that row. Idle without a
+screen is the closed page: a navigation key opens the stopped screen. After
+NIGHT_AFTER_S without keys the screen goes into its night phase; the first
+navigation key only wakes it.
 """
 from __future__ import annotations
 
@@ -26,7 +30,7 @@ from crt import config
 from crt.chromecast_mgr import ChromecastManager
 from crt.library_store import LibraryStore, QueueItem
 from crt.receiver import ReceiverChannel
-from crt.screen import NOT_READY_NOTICE, Screen
+from crt.screen import END_OF_QUEUE_NOTICE, NOT_READY_NOTICE, REMOVED_NOTICE, Screen
 from crt.youtube_client import YouTubeAuthError
 
 log = logging.getLogger(__name__)
@@ -48,6 +52,11 @@ RECEIVER_LOST_GRACE_S = 10.0
 # Seconds before the end where a seek stops: at exactly `duration` the
 # element resumes from 0 instead of ending.
 SEEK_END_MARGIN_S = 0.5
+# Seconds the arrival notice (end of queue, video removed) stays on the
+# stopped screen's status line.
+ARRIVAL_NOTICE_S = 5.0
+# Seconds without keys before the screen goes into its night phase.
+NIGHT_AFTER_S = 300.0
 
 
 @dataclass
@@ -56,8 +65,11 @@ class ActionResult:
     distinguish "action performed" from "silent no-op" (issue #6).
 
     reason is one of: None (action performed), "no_items", "no_playable_item",
-    "cursor_unchanged", "no_chromecast_session", or "launching" (performed;
-    the page is opening in the background and will pick it up).
+    "cursor_unchanged", "no_chromecast_session", "already_stopped" (stop
+    while already stopped: nothing to do), "woke" (performed: the key only
+    woke the screen from its night phase, its own action was not run), or
+    "launching" (performed; the page is opening in the background and will
+    pick it up).
     """
 
     did_action: bool
@@ -71,6 +83,8 @@ _CURSOR_UNCHANGED = ActionResult(False, "cursor_unchanged")
 _NO_CC_SESSION = ActionResult(False, "no_chromecast_session")
 _DID_ACTION = ActionResult(True)
 _LAUNCHING = ActionResult(True, "launching")
+_ALREADY_STOPPED = ActionResult(False, "already_stopped")
+_WOKE = ActionResult(True, "woke")
 
 
 def _get_local_ip() -> str:
@@ -109,16 +123,20 @@ class PlayerCore:
         # must not keep its download/encode running (issue #17).
         self.on_delete: Callable[[str], None] | None = None
         self._clock = clock
-        # The teletext screen while paused (kept, hidden, under calibration).
+        # The teletext screen while paused or stopped (kept, hidden, under
+        # calibration). None while playing and when the page is closed.
         self.screen: Screen | None = None
         self._flash_handle: asyncio.TimerHandle | None = None
+        self._arrival_handle: asyncio.TimerHandle | None = None
+        self._night_handle: asyncio.TimerHandle | None = None
         self._quit_task: asyncio.Task | None = None
         # Invoked when an item's encoded file is found missing on disk and the
         # item is re-queued (issue #10). Wired to pipeline.wake_prepare so the
         # prepare loop re-downloads/re-encodes it immediately.
         self._on_cache_miss = on_cache_miss
-        # When the player last became idle/paused (None while playing or
-        # calibrating, and after the idle close): drives watch_idle.
+        # When the player last became idle/paused, or the last key on the
+        # screen (None while playing or calibrating, and after the idle
+        # close): drives watch_idle.
         self._inactive_since: float | None = clock()
         self._state: str = "idle"
         self._calibration_timer: asyncio.TimerHandle | None = None
@@ -152,6 +170,24 @@ class PlayerCore:
         else:
             self._inactive_since = None
         self._state = value
+
+    @property
+    def screen_state(self) -> str:
+        """"paused" or "stopped" while the screen is on the TV, else "none"."""
+        if self.screen is None:
+            return "none"
+        if self.state == "paused":
+            return "paused"
+        if self.state == "idle":
+            return "stopped"
+        return "none"
+
+    @property
+    def selected_video_id(self) -> str | None:
+        """The video highlighted on the TV screen, None when it is not shown."""
+        if self.screen_state == "none":
+            return None
+        return self.screen.selected_video_id
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -246,6 +282,90 @@ class PlayerCore:
         if view != self._last_screen_view:
             self._send_screen(view)
 
+    def _show_stopped(self, *, highlight: str | None, arrival: str | None = None) -> None:
+        """Unload the page's video and show the stopped screen on `highlight`,
+        with `arrival` on its status line for ARRIVAL_NOTICE_S. Launches the
+        page when it is not open (it gets the screen when it subscribes)."""
+        self._cancel_calibration_timer()
+        self._loaded_video_id = None
+        self.state = "idle"
+        self.receiver.send({"type": "blank"})
+        screen = Screen(highlight, None)
+        screen.arrival = arrival
+        self.screen = screen
+        if self._arrival_handle is not None:
+            self._arrival_handle.cancel()
+            self._arrival_handle = None
+        if arrival is not None:
+            def _clear() -> None:
+                self._arrival_handle = None
+                if self.screen is screen and screen.arrival == arrival:
+                    screen.arrival = None
+                    if self._screen_shown():
+                        self._send_screen()
+
+            self._arrival_handle = asyncio.get_running_loop().call_later(
+                ARRIVAL_NOTICE_S, _clear,
+            )
+        self._touch()
+        self._send_screen()
+        if not self._page_ready():
+            self._start_launch()
+
+    def _touch(self) -> None:
+        """A key on the screen: the idle close counts from now, and the
+        night phase starts NIGHT_AFTER_S from now. Library redraws never
+        call this."""
+        self._cancel_night_timer()
+        if self.state in ("idle", "paused"):
+            self._inactive_since = self._clock()
+        if self._screen_shown():
+            self._night_handle = asyncio.get_running_loop().call_later(
+                NIGHT_AFTER_S, self._enter_night,
+            )
+
+    def _cancel_night_timer(self) -> None:
+        if self._night_handle is not None:
+            self._night_handle.cancel()
+            self._night_handle = None
+
+    def _enter_night(self) -> None:
+        self._night_handle = None
+        if not self._screen_shown() or self.screen.night:
+            return
+        self.screen.night = True
+        self._send_screen()
+        log.info("Screen asleep (night phase)")
+
+    def _wake_if_night(self) -> bool:
+        """Wake the screen from its night phase. True if it was asleep."""
+        if self.screen is None or not self.screen.night:
+            return False
+        self.screen.night = False
+        self._touch()
+        if self._screen_shown():
+            self._send_screen()
+        return True
+
+    def _explicit_command(self) -> None:
+        """A command chosen off the TV (Flipper Commands menu, TUI): it wakes
+        the screen and acts, and drops a pending delete confirmation."""
+        if self.screen is None:
+            return
+        woke = self._wake_if_night()
+        if self.screen.confirm_video_id is not None:
+            self._cancel_confirm()
+        if not woke:
+            self._touch()
+
+    def _open_closed_page(self) -> None:
+        """A navigation key while the page is closed: the stopped screen on
+        the cursor, opening the page."""
+        self._show_stopped(highlight=self.library.cursor_video_id)
+
+    def _opened_result(self) -> ActionResult:
+        return _DID_ACTION if self._page_ready() else _LAUNCHING
+
     def live_position(self) -> float:
         """Where playback is now, for /status and the periodic save."""
         if (
@@ -331,14 +451,21 @@ class PlayerCore:
 
         Skips items still encoding/queued — the remote should never land on
         an item that can't be cast. Returns an ActionResult describing the
-        outcome (issue #6). While paused it moves the screen's highlighted row
-        instead.
+        outcome (issue #6). While the screen is shown it moves the highlighted
+        row instead; with the page closed it opens the stopped screen.
         """
         if self.state == "calibrating":
             await self._end_calibration()
             return _DID_ACTION
-        if self.state == "paused" and self.screen is not None:
+        if self._wake_if_night():
+            return _WOKE
+        self._touch()
+        if self._screen_shown():
             return self._move_row(+1)
+        if self.state == "idle":
+            self._open_closed_page()
+            self._move_row(+1)
+            return self._opened_result()
         if not self.library.items:
             return _NO_ITEMS
         n = len(self.library.items)
@@ -364,13 +491,21 @@ class PlayerCore:
         Skips items still encoding/queued. No wrap. Recovers from a stale /
         phantom cursor (a video_id no longer in the library) by scanning
         backward from the last item — symmetric to next()/toggle() (issue #5).
-        While paused it moves the screen's highlighted row instead.
+        While the screen is shown it moves the highlighted row instead; with
+        the page closed it opens the stopped screen.
         """
         if self.state == "calibrating":
             await self._end_calibration()
             return _DID_ACTION
-        if self.state == "paused" and self.screen is not None:
+        if self._wake_if_night():
+            return _WOKE
+        self._touch()
+        if self._screen_shown():
             return self._move_row(-1)
+        if self.state == "idle":
+            self._open_closed_page()
+            self._move_row(-1)
+            return self._opened_result()
         if not self.library.items:
             return _NO_ITEMS
         idx = self._cursor_index()
@@ -396,6 +531,7 @@ class PlayerCore:
         idx = self._index_of(video_id)
         if idx is None:
             raise KeyError(f"video_id not in library: {video_id}")
+        self._explicit_command()
         return self._cast(self.library.items[idx])
 
     def _cancel_confirm(self) -> bool:
@@ -423,33 +559,40 @@ class PlayerCore:
         return _DID_ACTION
 
     async def toggle(self) -> ActionResult:
-        """playing→pause (the screen opens), paused→run the screen's selected
-        command, idle→start nearest playable item.
+        """playing→pause (the screen opens), screen shown→run its selected
+        command, closed page→play the cursor video.
 
-        From idle, scans forward from the cursor (inclusive) for the first item
-        with a cache file and casts it. If the cursor lands on an unready item
-        (encoding/queued), the remote's toggle skips ahead instead of no-op.
+        With the page closed, a ready cursor video plays from its position;
+        an unready one opens the stopped screen on it with "Non ancora
+        pronto". It never skips ahead to the next ready video.
         """
         if self.state == "calibrating":
             await self._end_calibration()
             return _DID_ACTION
+        if self._wake_if_night():
+            return _WOKE
+        self._touch()
         if self.state == "playing":
             self._pause()
             return _DID_ACTION
+        if self._screen_shown():
+            return await self._screen_select()
         if self.state == "paused":
-            if self.screen is not None:
-                return await self._screen_select()
             return await self._resume()
-        if not self.library.items:
+        items = self.library.items
+        if not items:
+            self._open_closed_page()
             return _NO_ITEMS
-        idx = self._cursor_index()
-        start = 0 if idx is None else idx
-        new_idx = self._find_playable_index(
-            start_idx=start, direction=1, wrap=self.library.loop_mode,
-        )
-        if new_idx is None:
-            return _NO_PLAYABLE
-        return self._cast(self.library.items[new_idx])
+        # The cursor, or the first video when it is not in the playlist (the
+        # row the stopped screen would highlight).
+        item = self.library.cursor_item() or items[0]
+        if item.cache_file_present():
+            return self._cast(item)
+        if item.filename:
+            self._requeue_missing_cache(item)
+        self._show_stopped(highlight=item.video_id)
+        self._flash(NOT_READY_NOTICE)
+        return _NO_PLAYABLE
 
     def _pause(self, open_menu: bool = True) -> None:
         """Pause the page, save the position on the loaded video, open the
@@ -463,6 +606,7 @@ class PlayerCore:
         if open_menu:
             loaded = item.video_id if item is not None else None
             self.screen = Screen(loaded or self.library.cursor_video_id, loaded)
+            self._touch()
             self._send_screen()
         log.info(
             "Paused %s at %.1fs",
@@ -524,11 +668,13 @@ class PlayerCore:
         return _NO_PLAYABLE
 
     def toggle_loop(self) -> ActionResult:
+        self._explicit_command()
         self.library.loop_mode = not self.library.loop_mode
         self._flash("Loop attivo" if self.library.loop_mode else "Loop disattivato")
         return _DID_ACTION
 
     def request_sync(self) -> ActionResult:
+        self._explicit_command()
         if self.on_sync_request is None:
             self._flash("Sync non disponibile")
             return _DID_ACTION
@@ -544,6 +690,7 @@ class PlayerCore:
         if item is not None and item.status in ("playing", "paused"):
             self._snapshot_position(item)
             item.status = "ready"
+        self._cancel_night_timer()
         self.screen = None
         self._loaded_video_id = None
         self.state = "idle"
@@ -597,35 +744,31 @@ class PlayerCore:
         self.receiver.send({"type": "play"})
         if item is not None:
             item.status = "playing"
+        self._cancel_night_timer()
         self.screen = None
         self.state = "playing"
         return _DID_ACTION
 
     async def stop(self) -> ActionResult:
-        """Stop playback and set state to idle. Cursor stays on the current item;
-        its status reverts to 'ready' so a subsequent toggle/play re-casts it
-        from where it left off.
+        """Stop playback and show the stopped screen on the video just
+        stopped. Cursor stays on the current item; its status reverts to
+        'ready' so a subsequent toggle/play re-casts it from where it left
+        off. Already stopped (or the page closed): nothing to do.
 
         The live position is snapshotted onto the item first (issue #13):
         without it, resume relied solely on the 30s periodic save, which can be
-        stale by up to a full interval. The page stays open on a black screen
-        so the next play starts without the DashCast logo.
+        stale by up to a full interval. The page stays open so the next play
+        starts without the DashCast logo.
         """
+        self._explicit_command()
+        if self.state == "idle":
+            return _ALREADY_STOPPED
         item = self._loaded_item() or self.library.cursor_item()
         if item is not None and item.status in ("playing", "paused"):
             self._snapshot_position(item)
             item.status = "ready"
-        self._blank()
-        self.state = "idle"
+        self._show_stopped(highlight=self._loaded_video_id or self.library.cursor_video_id)
         return _DID_ACTION
-
-    def _blank(self) -> None:
-        self._cancel_calibration_timer()
-        self.screen = None
-        self._loaded_video_id = None
-        if self.receiver.connected:
-            self._hide_screen()
-            self.receiver.send({"type": "blank"})
 
     async def stop_and_remove(self, video_id: str) -> None:
         """If video_id is the currently playing/paused item, stop it.
@@ -637,19 +780,26 @@ class PlayerCore:
         # video (this runs later, on the loop): the page still shows it.
         on_screen = video_id in (self._loaded_video_id, self.library.cursor_video_id)
         if on_screen and self.state in ("playing", "paused", "calibrating"):
-            self._blank()
-            self.state = "idle"
+            self._show_stopped(highlight=self.library.cursor_video_id, arrival=REMOVED_NOTICE)
 
     async def seek_relative(self, seconds: int) -> ActionResult:
         """Seek the page by `seconds` from the live position, clamped to
         [0, duration] (no upper clamp while the duration is unknown). While
         the screen is shown it moves the command selection instead (back =
-        left, forward = right): there is no seek in pause."""
+        left, forward = right): there is no seek in pause. With the page
+        closed it opens the stopped screen with the selection moved."""
         if self.state == "calibrating":
             await self._end_calibration()
             return _DID_ACTION
-        if self.state == "paused" and self.screen is not None:
+        if self._wake_if_night():
+            return _WOKE
+        self._touch()
+        if self._screen_shown():
             return self._move_command(-1 if seconds < 0 else +1)
+        if self.state == "idle":
+            self._open_closed_page()
+            self._move_command(-1 if seconds < 0 else +1)
+            return self._opened_result()
         if self.state not in ("playing", "paused"):
             return _NO_CC_SESSION
         item = self._loaded_item()
@@ -675,8 +825,9 @@ class PlayerCore:
             return
         if self.state in ("playing", "paused", "calibrating"):
             await self.stop()
-        self.screen = None
         await self._remove_local(item)
+        if self._screen_shown():
+            self._send_screen()
         await self._remove_remote(item)
 
     async def _delete_video(self, video_id: str) -> None:
@@ -774,9 +925,16 @@ class PlayerCore:
             self._end_of_playlist()
 
     def _end_of_playlist(self) -> None:
-        """Nothing left to play: black screen, like after Stop."""
-        self._blank()
-        self.state = "idle"
+        """Nothing left to play: the stopped screen on the first video not
+        yet watched (the last one if all are), with "Fine della coda"."""
+        items = self.library.items
+        first = next((i for i in items if i.status != "done"), None)
+        if first is None and items:
+            first = items[-1]
+        self._show_stopped(
+            highlight=first.video_id if first is not None else None,
+            arrival=END_OF_QUEUE_NOTICE,
+        )
 
     # ------------------------------------------------------------------
     # Cast helpers
@@ -835,6 +993,7 @@ class PlayerCore:
         self._loaded_video_id = item.video_id
         self.library.cursor_video_id = item.video_id
         self._load_failed = False
+        self._cancel_night_timer()
         self.screen = None
         item.status = "playing"
         self.state = "playing"
@@ -896,13 +1055,15 @@ class PlayerCore:
         Never waits: the clip is rendered at startup (prepare_calibration).
         A video that is playing is paused first with its position saved. The
         pattern stays until any key (toggle/next/prev/seek) or for
-        CALIBRATION_TIMEOUT_S, then the player goes back to the paused screen
-        exactly as it was (or to a black screen if nothing was playing). The
-        screen model is kept, hidden, under the pattern. Its end never marks a
-        video done and its time never touches a resume position.
+        CALIBRATION_TIMEOUT_S, then the player goes back to the screen exactly
+        as it was, paused or stopped (the stopped screen on the cursor when
+        the page was closed). The screen model is kept, hidden, under the
+        pattern. Its end never marks a video done and its time never touches
+        a resume position.
         """
         if self.state == "calibrating":
             return
+        self._explicit_command()
         if self._calibration_clip is None:
             log.warning("Calibration requested but the pattern is not ready")
             self._flash(CALIBRATION_NOT_READY_NOTICE)
@@ -911,6 +1072,7 @@ class PlayerCore:
             self._pause(open_menu=False)
         self._calibration_return = "paused" if self.state == "paused" else "idle"
         self._calibration_url = self._media_url(os.path.basename(self._calibration_clip))
+        self._cancel_night_timer()
         self._hide_screen()
         self.receiver.send({"type": "calibration", "url": self._calibration_url})
         self.state = "calibrating"
@@ -938,13 +1100,17 @@ class PlayerCore:
             self.state = "paused"
             if self.screen is None:
                 self.screen = Screen(item.video_id, item.video_id)
+            self._touch()
             if self._load_failed:
                 self._flash(MEDIA_ERROR_NOTICE, "error")
             else:
                 self._send_screen()
-        else:
-            self._blank()
+        elif self._calibration_return == "idle" and self.screen is not None:
             self.state = "idle"
+            self._touch()
+            self._send_screen()
+        else:
+            self._show_stopped(highlight=self.library.cursor_video_id)
         log.info("Calibration ended (now %s)", self.state)
 
     # ------------------------------------------------------------------
@@ -956,7 +1122,8 @@ class PlayerCore:
         page just launched, or a replacement while the old connection is
         still listed). Every new page starts empty, so it gets the player's
         whole state: the loaded video at its position, paused with the screen
-        or playing, the calibration pattern, or a black screen."""
+        or playing, the calibration pattern, or the stopped screen (with its
+        night phase and pending confirmation, as they are)."""
         if self._lost_task is not None:
             self._lost_task.cancel()
             self._lost_task = None
@@ -987,9 +1154,13 @@ class PlayerCore:
                 self._hide_screen()
             log.info("Receiver page connected: restored %s while %s", item.video_id, self.state)
             return
-        # Idle (a Stop the page could not hear, or nothing played yet).
-        self._hide_screen()
+        # Idle: the stopped screen (kept from before, or on the cursor when
+        # the page opens on its own, e.g. a page left open by a restart).
         self.receiver.send({"type": "blank"})
+        if self.screen is None:
+            self.screen = Screen(self.library.cursor_video_id, None)
+            self._touch()
+        self._send_screen()
 
     def _on_receiver_disconnect(self) -> None:
         if self._lost_task is not None:
@@ -1009,8 +1180,11 @@ class PlayerCore:
 
     def _drop_page(self, why: str) -> None:
         """No page to play on (lost past the grace, or a launch that failed):
-        go idle with the position saved, so the next play resumes there."""
+        go idle with the position saved, so the next play resumes there.
+        The screen goes with the page: the next key finds the page closed."""
+        self._cancel_night_timer()
         if self.state not in ("playing", "paused", "calibrating"):
+            self.screen = None
             return
         item = self._loaded_item()
         if item is not None and item.status in ("playing", "paused"):
@@ -1041,8 +1215,9 @@ class PlayerCore:
 
     async def watch_idle(self, close_after_s: float, poll_s: float = 30.0) -> None:
         """Background loop: after `close_after_s` without playback (idle or
-        paused), save the position and close the DashCast app. The next play
-        reopens it (logo) and resumes from the saved position."""
+        paused) and without keys on the screen, save the position and close
+        the DashCast app. The next play reopens it (logo) and resumes from
+        the saved position."""
         while True:
             await asyncio.sleep(poll_s)
             try:
@@ -1062,6 +1237,7 @@ class PlayerCore:
             if item is not None:
                 self._snapshot_position(item)
                 item.status = "ready"
+        self._cancel_night_timer()
         self.screen = None
         self._loaded_video_id = None
         self.state = "idle"

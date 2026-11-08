@@ -108,6 +108,12 @@ def _page_reports(receiver):
     })
 
 
+def _as_playing(pc):
+    """next/prev from idle open the stopped screen: tests of the cursor walk
+    put the player in "playing" first."""
+    pc.state = "playing"
+
+
 def loads(msgs):
     return [m for m in msgs if m["type"] == "load"]
 
@@ -139,6 +145,7 @@ async def test_next_with_no_cursor_advances_to_first_item():
     library = _make_library(["A", "B", "C"])
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     await pc.next()
 
     assert library.cursor_video_id == "A"
@@ -150,6 +157,7 @@ async def test_next_advances_cursor_by_one():
     library.cursor_video_id = "A"
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     await pc.next()
 
     assert library.cursor_video_id == "B"
@@ -161,6 +169,7 @@ async def test_prev_moves_cursor_back():
     library.cursor_video_id = "B"
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     await pc.prev()
 
     assert library.cursor_video_id == "A"
@@ -172,6 +181,7 @@ async def test_prev_at_first_item_is_no_op():
     library.cursor_video_id = "A"
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     await pc.prev()
 
     assert library.cursor_video_id == "A"
@@ -184,6 +194,7 @@ async def test_next_at_end_no_loop_stops_at_last():
     library.loop_mode = False
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     await pc.next()
 
     assert library.cursor_video_id == "B"
@@ -196,6 +207,7 @@ async def test_next_at_end_with_loop_wraps_to_first():
     library.loop_mode = True
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     await pc.next()
 
     assert library.cursor_video_id == "A"
@@ -310,6 +322,7 @@ async def test_prev_recasts_item_previously_playing():
     library.cursor_video_id = "B"
     pc, receiver, q, cc = _make_player(library)
 
+    _as_playing(pc)
     await pc.prev()
 
     assert library.cursor_video_id == "A"
@@ -441,18 +454,6 @@ async def test_seek_while_playing_sends_seek_from_live_position():
 
 
 @pytest.mark.asyncio
-async def test_seek_when_idle_reports_no_session():
-    library = _make_library(["a"])
-    pc, receiver, q, cc = _make_player(library)
-
-    result = await pc.seek_relative(-15)
-
-    assert result.did_action is False
-    assert result.reason == "no_chromecast_session"
-    assert drain(q) == []
-
-
-@pytest.mark.asyncio
 async def test_live_position_reads_receiver_only_when_active():
     clock = Clock()
     library = _make_library(["a"])
@@ -470,18 +471,47 @@ async def test_live_position_reads_receiver_only_when_active():
 
 
 @pytest.mark.asyncio
-async def test_stop_blanks_page_and_keeps_app_open():
-    library = _make_library(["a"])
-    pc, receiver, q, cc = _make_player(library)
-    await pc.play("a")
+async def test_stop_while_playing_shows_stopped_screen_on_that_video():
+    clock = Clock()
+    library = _make_library(["a", "b"])
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("b")
+    clock.t += 40
+    _page_reports(receiver)
     drain(q)
 
     result = await pc.stop()
 
     msgs = drain(q)
-    assert {"type": "blank"} in msgs and {"type": "screen", "view": None} in msgs
+    blank = msgs.index({"type": "blank"})
+    view = screens(msgs)[-1]["view"]
+    assert blank < msgs.index(screens(msgs)[-1])
+    assert view["state"] == "stopped" and view["status"] is None
+    assert _selected_row(view)["num"] == 2 and _selected_row(view)["symbol"] == "○"
+    assert view["help"] == "OK = Riprendi"
     cc.quit_app.assert_not_called()
-    assert result.did_action and pc.state == "idle" and pc.screen is None
+    cc.launch_receiver.assert_not_called()
+    assert result.did_action and pc.state == "idle"
+    assert pc.screen.selected_video_id == "b" and pc.screen.loaded_video_id is None
+    assert pc._loaded_video_id is None
+
+
+@pytest.mark.asyncio
+async def test_stop_when_stopped_is_already_stopped():
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library)
+
+    first = await pc.stop()  # closed page, nothing loaded
+
+    await pc.play("a")
+    await pc.stop()
+    drain(q)
+    second = await pc.stop()  # on the stopped screen
+
+    for r in (first, second):
+        assert r.did_action is False and r.reason == "already_stopped"
+    assert drain(q) == []
+    assert pc.state == "idle"
 
 
 @pytest.mark.asyncio
@@ -521,7 +551,8 @@ async def test_stop_while_paused_saves_paused_position():
     await pc.stop()
 
     assert library.items[0].playback_position == 120.0
-    assert library.items[0].status == "ready" and pc.screen is None
+    assert library.items[0].status == "ready"
+    assert pc.screen_state == "stopped"
 
 
 @pytest.mark.asyncio
@@ -575,7 +606,7 @@ async def test_stop_and_remove_stops_if_current_is_paused():
     await pc.stop_and_remove("A")
 
     assert {"type": "blank"} in drain(q)
-    assert pc.state == "idle" and pc.screen is None
+    assert pc.state == "idle" and pc.screen_state == "stopped"
 
 
 @pytest.mark.asyncio
@@ -704,6 +735,7 @@ async def test_next_skips_items_without_filename():
     library.cursor_video_id = "A"
     pc, receiver, q, cc = _make_player(library)
 
+    _as_playing(pc)
     await pc.next()
 
     assert library.cursor_video_id == "C"
@@ -716,6 +748,7 @@ async def test_prev_skips_items_without_filename():
     library.cursor_video_id = "C"
     pc, receiver, q, cc = _make_player(library)
 
+    _as_playing(pc)
     await pc.prev()
 
     assert library.cursor_video_id == "A"
@@ -729,6 +762,7 @@ async def test_next_no_playable_forward_is_noop():
     library.loop_mode = False
     pc, receiver, q, cc = _make_player(library)
 
+    _as_playing(pc)
     await pc.next()
 
     assert library.cursor_video_id == "A"
@@ -742,6 +776,7 @@ async def test_next_with_loop_wraps_skipping_unready():
     library.loop_mode = True
     pc, receiver, q, cc = _make_player(library)
 
+    _as_playing(pc)
     await pc.next()
 
     assert library.cursor_video_id == "A"
@@ -777,15 +812,15 @@ async def test_on_playback_finished_no_next_playable_goes_idle():
 
 
 @pytest.mark.asyncio
-async def test_toggle_idle_with_cursor_on_unready_finds_playable_forward():
+async def test_toggle_idle_with_cursor_on_unready_does_not_skip_forward():
     library = _make_mixed_library([("A", True), ("B", False), ("C", True)])
     library.cursor_video_id = "B"
     pc, receiver, q, cc = _make_player(library)
 
     await pc.toggle()
 
-    assert library.cursor_video_id == "C"
-    assert len(loads(drain(q))) == 1
+    assert library.cursor_video_id == "B"
+    assert loads(drain(q)) == []
 
 
 @pytest.mark.asyncio
@@ -907,6 +942,7 @@ async def test_prev_with_phantom_cursor_recovers_to_last_playable():
     library.cursor_video_id = "GHOST"  # not in library
     pc, receiver, q, cc = _make_player(library)
 
+    _as_playing(pc)
     await pc.prev()
 
     assert library.cursor_video_id == "C"
@@ -919,6 +955,7 @@ async def test_prev_with_phantom_cursor_skips_unready():
     library.cursor_video_id = "GHOST"
     pc, receiver, q, cc = _make_player(library)
 
+    _as_playing(pc)
     await pc.prev()
 
     assert library.cursor_video_id == "B"
@@ -936,6 +973,7 @@ async def test_next_returns_did_action_true_on_cast():
     library.cursor_video_id = "A"
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     result = await pc.next()
 
     assert result.did_action is True
@@ -949,6 +987,7 @@ async def test_next_returns_did_action_false_when_no_playable():
     library.loop_mode = False
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     result = await pc.next()
 
     assert result.did_action is False
@@ -959,6 +998,7 @@ async def test_next_returns_did_action_false_when_no_playable():
 async def test_next_returns_no_items_on_empty_library():
     pc, *_ = _make_player(LibraryStore())
 
+    _as_playing(pc)
     result = await pc.next()
 
     assert result.did_action is False
@@ -971,6 +1011,7 @@ async def test_prev_at_first_returns_cursor_unchanged():
     library.cursor_video_id = "A"
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     result = await pc.prev()
 
     assert result.did_action is False
@@ -983,6 +1024,7 @@ async def test_prev_phantom_cursor_returns_did_action_true():
     library.cursor_video_id = "GHOST"
     pc, *_ = _make_player(library)
 
+    _as_playing(pc)
     result = await pc.prev()
 
     assert result.did_action is True
@@ -1029,6 +1071,7 @@ async def test_next_skips_and_requeues_stale_cache_item():
     woke = MagicMock()
     pc, *_ = _make_player(library, on_cache_miss=woke)
 
+    _as_playing(pc)
     await pc.next()
 
     assert library.cursor_video_id == "C"
@@ -1217,9 +1260,14 @@ async def test_delete_confirm_on_paused_video_stops_then_deletes():
 
     assert [i.video_id for i in library.items] == ["a", "c"]
     assert pc.state == "idle"
-    assert {"type": "blank"} in drain(q)
+    msgs = drain(q)
+    assert {"type": "blank"} in msgs
     # The cursor moves to the successor, as when the sync removes it.
     assert library.cursor_video_id == "c"
+    view = screens(msgs)[-1]["view"]
+    assert view["state"] == "stopped" and view["count"] == 2
+    assert _selected_row(view)["text"] == "c"
+    assert view["flash"] is None
 
 
 @pytest.mark.asyncio
@@ -1298,14 +1346,19 @@ async def test_ok_after_confirmed_video_removed_deletes_nothing():
 
 @pytest.mark.asyncio
 async def test_stop_command_goes_to_stopped_screen_same_row():
-    # Task 4 extends this test to the stopped screen (ruling R1).
     pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 42.0)
     await _select_command(pc, "stop")
+    drain(q)
 
     r = await pc.toggle()
 
     assert r.did_action
-    assert pc.state == "idle" and {"type": "blank"} in drain(q)
+    msgs = drain(q)
+    assert pc.state == "idle" and {"type": "blank"} in msgs
+    view = screens(msgs)[-1]["view"]
+    assert view["state"] == "stopped"
+    assert _selected_row(view)["num"] == 2
+    assert view["help"] == "OK = Riprendi" and view["background"] != "frame"
     assert library.items[1].playback_position == 42.0
     assert library.items[1].status == "ready"
 
@@ -1369,8 +1422,11 @@ async def test_delete_current_from_paused_state_stops_first():
     await pc.delete_current()
 
     assert [i.video_id for i in library.items] == ["b"]
-    assert pc.state == "idle" and pc.screen is None
-    assert {"type": "blank"} in drain(q)
+    assert pc.state == "idle" and pc.screen_state == "stopped"
+    msgs = drain(q)
+    assert {"type": "blank"} in msgs
+    view = screens(msgs)[-1]["view"]
+    assert view["count"] == 1 and _selected_row(view)["text"] == "b"
 
 
 # ---------------------------------------------------------------------
@@ -1442,8 +1498,9 @@ async def test_calibrate_from_screen_returns_to_the_same_screen(fake_clip):
 
 
 @pytest.mark.asyncio
-async def test_calibrate_from_idle_returns_to_blank(fake_clip):
-    library = _make_library(["a"])
+async def test_calibrate_from_closed_page_ends_on_stopped_screen(fake_clip):
+    library = _make_library(["a", "b"])
+    library.cursor_video_id = "b"
     pc, receiver, q, cc = _make_player(library)
 
     await pc.calibrate()
@@ -1451,8 +1508,10 @@ async def test_calibrate_from_idle_returns_to_blank(fake_clip):
     await pc.toggle()
 
     msgs = drain(q)
-    assert {"type": "calibration", "url": None} in msgs and {"type": "blank"} in msgs
-    assert pc.state == "idle" and pc.screen is None
+    assert {"type": "calibration", "url": None} in msgs
+    assert pc.state == "idle" and pc.screen_state == "stopped"
+    view = screens(msgs)[-1]["view"]
+    assert view["state"] == "stopped" and _selected_row(view)["text"] == "b"
     assert not loads(msgs)
 
 
@@ -1501,7 +1560,9 @@ async def test_stop_while_calibrating_blanks_and_keeps_position(fake_clip):
 
     await pc.stop()
 
-    assert pc.state == "idle" and {"type": "blank"} in drain(q)
+    msgs = drain(q)
+    assert pc.state == "idle" and {"type": "blank"} in msgs
+    assert screens(msgs)[-1]["view"]["state"] == "stopped"
     assert library.items[0].playback_position == 70.0
     assert library.items[0].status == "ready"
 
@@ -1706,8 +1767,10 @@ async def test_sync_removal_after_cursor_moved_still_stops_the_loaded_video():
 
     await pc.stop_and_remove("b")
 
-    assert pc.state == "idle" and pc.screen is None
-    assert {"type": "blank"} in drain(q)
+    assert pc.state == "idle" and pc.screen_state == "stopped"
+    msgs = drain(q)
+    assert {"type": "blank"} in msgs
+    assert _selected_row(screens(msgs)[-1]["view"])["text"] == "c"
 
 
 @pytest.mark.asyncio
@@ -1931,7 +1994,7 @@ async def test_ended_already_woken_is_dropped_after_a_newer_load():
 
 
 @pytest.mark.asyncio
-async def test_reconnect_after_stop_blanks_the_page(monkeypatch):
+async def test_reconnect_after_stop_shows_the_stopped_screen(monkeypatch):
     monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 5.0)
     pc, receiver, q, cc, library = await _paused_on(["a"], "a", 20.0)
     receiver.unsubscribe(q)
@@ -1940,7 +2003,8 @@ async def test_reconnect_after_stop_blanks_the_page(monkeypatch):
     q2 = receiver.subscribe()
 
     msgs = drain(q2)
-    assert {"type": "blank"} in msgs and {"type": "screen", "view": None} in msgs
+    assert {"type": "blank"} in msgs
+    assert screens(msgs)[-1]["view"]["state"] == "stopped"
     assert not loads(msgs)
 
 
@@ -2246,3 +2310,400 @@ async def test_page_lost_during_a_launch_is_checked_when_the_launch_ends(monkeyp
     await asyncio.sleep(0.01)
 
     assert pc.state == "idle"
+
+
+# ---------------------------------------------------------------------
+# Stopped screen, closed page, night phase
+# ---------------------------------------------------------------------
+
+
+async def _stopped_on(library_ids, video_id, clock=None, **kwargs):
+    """Library with every id ready, `video_id` played then stopped: the
+    stopped screen highlights it. Returns (pc, receiver, q, cc, library)."""
+    library = _make_library(library_ids)
+    pc, receiver, q, cc = _make_player(library, clock=clock or Clock(), **kwargs)
+    await pc.play(video_id)
+    await pc.stop()
+    drain(q)
+    return pc, receiver, q, cc, library
+
+
+@pytest.mark.asyncio
+async def test_end_of_playlist_highlights_first_not_done_with_notice(monkeypatch):
+    monkeypatch.setattr("crt.player_core.ARRIVAL_NOTICE_S", 0.01)
+    library = _make_library(["a", "b", "c"])
+    library.items[0].status = "done"
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    await pc.play("c")
+    drain(q)
+
+    await pc.on_playback_finished()
+
+    msgs = drain(q)
+    assert {"type": "blank"} in msgs
+    view = screens(msgs)[-1]["view"]
+    assert view["state"] == "stopped" and view["status"] == "Fine della coda"
+    assert _selected_row(view)["text"] == "b"
+    assert pc.state == "idle"
+
+    await asyncio.sleep(0.05)
+
+    assert screens(drain(q))[-1]["view"]["status"] is None
+    assert pc.screen.arrival is None
+
+
+@pytest.mark.asyncio
+async def test_end_of_playlist_all_done_highlights_last():
+    library = _make_library(["a", "b"])
+    library.items[0].status = "done"
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    await pc.play("b")
+    drain(q)
+
+    await pc.on_playback_finished()
+
+    view = screens(drain(q))[-1]["view"]
+    assert _selected_row(view)["num"] == 2 and view["status"] == "Fine della coda"
+
+
+@pytest.mark.asyncio
+async def test_sync_removing_playing_video_shows_removed_notice():
+    library = _make_library(["a", "b"])
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    await pc.play("a")
+    library.items.pop(0)  # the sync thread removed it and moved the cursor
+    library.cursor_video_id = "b"
+    drain(q)
+
+    await pc.stop_and_remove("a")
+
+    view = screens(drain(q))[-1]["view"]
+    assert view["status"] == "Video rimosso dalla playlist"
+    assert view["state"] == "stopped" and _selected_row(view)["text"] == "b"
+    assert pc.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_calibration_from_stopped_returns_to_same_screen(fake_clip):
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b", "c"], "a")
+    await pc.next()  # highlight "b"
+    await _select_command(pc, "calibrate")
+
+    await pc.toggle()
+    assert pc.state == "calibrating"
+    drain(q)
+    await pc.next()  # ends calibration, does nothing else
+
+    msgs = drain(q)
+    assert {"type": "calibration", "url": None} in msgs
+    assert pc.state == "idle"
+    assert pc.screen.selected_video_id == "b"
+    assert pc.screen.selected_command(library.items) == "calibrate"
+    assert screens(msgs)[-1]["view"]["state"] == "stopped"
+    assert not loads(msgs)
+
+
+@pytest.mark.asyncio
+async def test_calibrate_cancels_a_pending_confirmation(fake_clip):
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 5.0)
+    await _select_command(pc, "delete")
+    await pc.toggle()  # armed on "a"
+
+    await pc.calibrate()  # Flipper Commands → Calibrate
+    await pc.next()  # ends it
+
+    assert pc.state == "paused" and pc.screen.confirm_video_id is None
+    view = screens(drain(q))[-1]["view"]
+    assert view["flash_kind"] != "confirm" and not any(r["confirm"] for r in view["rows"])
+    assert [i.video_id for i in library.items] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_commands_cancel_a_pending_confirmation():
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b"], "a")
+    kick = MagicMock()
+    pc.on_sync_request = kick
+
+    for command in (pc.toggle_loop, pc.request_sync, pc.stop):
+        await _select_command(pc, "delete")
+        await pc.toggle()
+        assert pc.screen.confirm_video_id == "a"
+        r = command()
+        if asyncio.iscoroutine(r):
+            await r
+        assert pc.screen.confirm_video_id is None, command
+
+    assert library.loop_mode is True
+    kick.assert_called_once()
+    await pc.toggle()  # the selection is still on "delete": arms again
+    await pc.play("b")
+    assert pc.state == "playing"
+    assert [i.video_id for i in library.items] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_while_stopped_resends_screen(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 5.0)
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b"], "a")
+    await pc.next()  # highlight "b"
+    sent = screens(drain(q))[-1]["view"]
+
+    receiver.unsubscribe(q)
+    q2 = receiver.subscribe()
+
+    msgs = drain(q2)
+    assert {"type": "blank"} in msgs and not loads(msgs)
+    assert screens(msgs)[-1]["view"] == sent
+    assert pc.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_up_down_while_stopped_move_highlight_no_cast():
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b", "c"], "a")
+
+    r = await pc.next()
+
+    assert r.did_action and pc.screen.selected_video_id == "b"
+    msgs = drain(q)
+    assert not loads(msgs)
+    assert _selected_row(screens(msgs)[-1]["view"])["text"] == "b"
+    await pc.prev()
+    await pc.prev()  # wraps to the last
+    assert pc.screen.selected_video_id == "c"
+    assert pc.state == "idle" and library.cursor_video_id == "a"
+    assert not loads(drain(q))
+
+
+@pytest.mark.asyncio
+async def test_ok_while_stopped_runs_selected_command():
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b"], "a")
+    library.items[1].playback_position = 12.0
+    await pc.next()  # highlight "b"
+    drain(q)
+
+    r = await pc.toggle()
+
+    assert r.did_action and pc.state == "playing"
+    load = loads(drain(q))[-1]
+    assert load["url"].endswith("/media/b.mp4") and load["position"] == 12.0
+    assert library.cursor_video_id == "b" and pc.screen is None
+
+
+@pytest.mark.asyncio
+async def test_closed_page_up_opens_stopped_screen_from_cursor():
+    library = _make_library(["a", "b", "c"])
+    library.cursor_video_id = "a"
+    pc, receiver, pages, cc = _player_without_page(library)
+
+    r = await pc.next()
+
+    assert r.did_action and r.reason == "launching"
+    assert pc.state == "idle" and pc.screen.selected_video_id == "b"
+    await _launched(pc)
+    cc.launch_receiver.assert_called_once()
+    msgs = drain(pages[0])
+    assert not loads(msgs)
+    view = screens(msgs)[-1]["view"]
+    assert view["state"] == "stopped" and _selected_row(view)["text"] == "b"
+    assert library.cursor_video_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_closed_page_ok_plays_ready_cursor():
+    library = _make_library(["a", "b"])
+    library.cursor_video_id = "b"
+    library.items[1].playback_position = 7.0
+    pc, receiver, pages, cc = _player_without_page(library)
+
+    r = await pc.toggle()
+    await _launched(pc)
+
+    assert r.did_action and pc.state == "playing"
+    load = loads(drain(pages[0]))[-1]
+    assert load["url"].endswith("/media/b.mp4") and load["position"] == 7.0
+
+
+@pytest.mark.asyncio
+async def test_closed_page_ok_on_unready_cursor_shows_not_ready():
+    library = _make_mixed_library([("a", True), ("b", False), ("c", True)])
+    library.cursor_video_id = "b"
+    pc, receiver, pages, cc = _player_without_page(library)
+
+    r = await pc.toggle()
+
+    assert r.did_action is False and r.reason == "no_playable_item"
+    assert pc.state == "idle" and library.cursor_video_id == "b"
+    assert pc.screen.selected_video_id == "b"
+    assert pc.screen.flash == "Non ancora pronto"
+    await _launched(pc)
+    cc.launch_receiver.assert_called_once()
+    msgs = drain(pages[0])
+    assert not loads(msgs)
+    assert screens(msgs)[-1]["view"]["flash"] == "Non ancora pronto"
+
+
+@pytest.mark.asyncio
+async def test_closed_page_seek_opens_screen_with_command_moved():
+    library = _make_library(["a", "b"])
+    library.cursor_video_id = "a"
+    pc, receiver, pages, cc = _player_without_page(library)
+
+    r = await pc.seek_relative(30)
+
+    assert r.did_action and r.reason == "launching"
+    assert pc.screen.selected_video_id == "a" and pc.screen.command_index == 1
+    await _launched(pc)
+    msgs = drain(pages[0])
+    assert not [m for m in msgs if m["type"] == "seek"]
+    assert screens(msgs)[-1]["view"]["help"] == "OK = Elimina"
+
+
+@pytest.mark.asyncio
+async def test_night_after_timeout_then_first_key_only_wakes(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NIGHT_AFTER_S", 0.01)
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b"], "a")
+
+    await asyncio.sleep(0.05)
+
+    assert pc.screen.night is True
+    assert screens(drain(q))[-1]["view"]["night"] is True
+
+    r = await pc.next()
+
+    assert r.did_action and r.reason == "woke"
+    assert pc.screen.night is False and pc.screen.selected_video_id == "a"
+    view = screens(drain(q))[-1]["view"]
+    assert view["night"] is False and _selected_row(view)["text"] == "a"
+
+    await pc.next()  # awake now: the key acts
+    assert pc.screen.selected_video_id == "b"
+
+
+@pytest.mark.asyncio
+async def test_night_while_paused_first_ok_only_wakes(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NIGHT_AFTER_S", 0.01)
+    pc, receiver, q, cc, library = await _paused_on(["a"], "a", 5.0)
+
+    await asyncio.sleep(0.05)
+    r = await pc.toggle()
+
+    assert r.reason == "woke" and pc.state == "paused" and pc.screen.night is False
+    assert {"type": "play"} not in drain(q)
+
+
+@pytest.mark.asyncio
+async def test_explicit_command_in_night_wakes_and_acts(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NIGHT_AFTER_S", 0.01)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 5.0)
+    await asyncio.sleep(0.05)
+    assert pc.screen.night is True
+    drain(q)
+
+    r = pc.toggle_loop()
+
+    assert r.did_action and library.loop_mode is True
+    assert pc.screen.night is False
+    view = screens(drain(q))[-1]["view"]
+    assert view["night"] is False and view["flash"] == "Loop attivo"
+
+
+@pytest.mark.asyncio
+async def test_refresh_during_night_keeps_night_and_timer(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NIGHT_AFTER_S", 0.1)
+    clock = Clock()
+    library = _make_mixed_library([("a", True), ("b", False)])
+    library.items[1].progress = 10.0
+    pc, receiver, q, cc = _make_player(library, clock=clock)
+    await pc.play("a")
+    await pc.stop()
+    inactive_since = pc._inactive_since
+
+    await asyncio.sleep(0.06)
+    clock.t += 60
+    library.items[1].progress = 20.0
+    pc.refresh_screen()  # a redraw is not a key: the timer is not re-armed
+    await asyncio.sleep(0.07)
+
+    assert pc.screen.night is True
+    assert pc._inactive_since == inactive_since
+    drain(q)
+
+    library.items[1].progress = 30.0
+    pc.refresh_screen()
+
+    view = screens(drain(q))[-1]["view"]
+    assert view["night"] is True and view["rows"][1]["right"] == "30%"
+    assert pc.screen.night is True and pc._inactive_since == inactive_since
+
+
+@pytest.mark.asyncio
+async def test_reconnect_resends_night_and_confirm(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NIGHT_AFTER_S", 0.01)
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 5.0)
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 5.0)
+    await pc.next()  # highlight "b"
+    await _select_command(pc, "delete")
+    await pc.toggle()  # armed on "b"
+    await asyncio.sleep(0.05)
+
+    receiver.unsubscribe(q)
+    q2 = receiver.subscribe()
+
+    view = screens(drain(q2))[-1]["view"]
+    assert view["night"] is True and view["flash_kind"] == "confirm"
+    assert next(r for r in view["rows"] if r["confirm"])["text"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_idle_close_counts_from_last_key():
+    clock = Clock()
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b"], "a", clock=clock)
+
+    clock.t += 1500
+    await pc.next()  # a key on the screen
+    clock.t += 1500  # 50 min from the stop, 25 from the key
+    await pc._close_if_idle(1800)
+
+    cc.quit_app.assert_not_called()
+    assert pc.screen_state == "stopped"
+
+    clock.t += 300  # 30 min from the key
+    await pc._close_if_idle(1800)
+
+    cc.quit_app.assert_called_once()
+    assert pc.screen is None and pc.screen_state == "none"
+
+
+@pytest.mark.asyncio
+async def test_screen_state_and_selected_video_id():
+    library = _make_library(["a", "b"])
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    assert (pc.screen_state, pc.selected_video_id) == ("none", None)
+
+    await pc.play("a")
+    assert (pc.screen_state, pc.selected_video_id) == ("none", None)
+
+    await pc.toggle()
+    assert (pc.screen_state, pc.selected_video_id) == ("paused", "a")
+
+    await pc.next()
+    assert pc.selected_video_id == "b"
+
+    await pc.stop()
+    assert (pc.screen_state, pc.selected_video_id) == ("stopped", "a")
+
+
+@pytest.mark.asyncio
+async def test_ok_on_empty_library_runs_player_command(fake_clip):
+    pc, receiver, q, cc, library = await _stopped_on(["a"], "a")
+    library.items.clear()  # the sync removed everything
+    library.cursor_video_id = None
+    pc.refresh_screen()
+
+    view = screens(drain(q))[-1]["view"]
+    assert view["help"] == "OK = Calibra" and view["count"] == 0
+
+    await pc.toggle()
+
+    assert pc.state == "calibrating"
+    assert not loads(drain(q))
