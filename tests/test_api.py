@@ -493,6 +493,15 @@ def test_receiver_page_is_served_as_html():
     assert "<title>" in r.text
 
 
+def test_receiver_font_route_serves_otf():
+    client = TestClient(create_app(LibraryStore()))
+    r = client.get("/receiver/bedstead.otf")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "font/otf"
+    assert r.headers["cache-control"] == "max-age=86400"
+    assert r.content[:4] == b"OTTO"
+
+
 def test_receiver_report_is_forwarded_to_channel():
     receiver = MagicMock()
     client = TestClient(create_app(LibraryStore(), receiver=receiver))

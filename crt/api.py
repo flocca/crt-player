@@ -11,6 +11,7 @@ from crt.receiver import ReceiverChannel, sse_events
 log = logging.getLogger(__name__)
 
 RECEIVER_PAGE = os.path.join(os.path.dirname(__file__), "receiver_page", "index.html")
+RECEIVER_FONT = os.path.join(os.path.dirname(__file__), "receiver_page", "bedstead.otf")
 
 
 def create_app(
@@ -204,6 +205,15 @@ def create_app(
         with open(RECEIVER_PAGE, encoding="utf-8") as f:
             html = f.read()
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+    @app.get("/receiver/bedstead.otf")
+    def receiver_font():
+        # The teletext font never changes between deploys of the same page.
+        return FileResponse(
+            RECEIVER_FONT,
+            media_type="font/otf",
+            headers={"Cache-Control": "max-age=86400"},
+        )
 
     @app.get("/receiver/events")
     def receiver_events():

@@ -31,4 +31,4 @@ include = ["crt*", "tui_client*"]
 exclude = ["tests*", "docker*"]
 
 [tool.setuptools.package-data]
-crt = ["receiver_page/*.html"]
+crt = ["receiver_page/*.html", "receiver_page/*.otf"]
