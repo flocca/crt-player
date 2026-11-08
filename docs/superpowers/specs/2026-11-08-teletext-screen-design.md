@@ -1,6 +1,6 @@
 # Schermata televideo per pausa e fermo
 
-Data: 2026-11-08. Stato: design in revisione.
+Data: 2026-11-08. Stato: approvata da Giacomo.
 
 Sostituisce il menu in pausa descritto in [2026-11-07-pause-menu-design.md](2026-11-07-pause-menu-design.md) (anello di righe e comandi, velo all'85%, Sinistra/Destra = seek) e il nero dopo Stop. Tutto il resto di quella spec (pagina nostra su DashCast, posizione, chiusura dopo 30 minuti, calibrazione nella pagina, reinterpretazione degli endpoint) resta valido.
 
@@ -283,6 +283,6 @@ Canvas piccolo (nella prova 160x90 con `image-rendering: pixelated`, circa 12 fo
 - Sostituti per i glifi che Bedstead non ha.
 - Come la pagina calcola font, altezza di riga e `letter-spacing` per riempire 40x18 (la prova ha un modo che funziona).
 
-## Issue da aprire
+## Issue collegate
 
-- Etichette della FAP allineate alla TV al prossimo riflash (vedi "Non obiettivi").
+- #23: etichette della FAP allineate alla TV al prossimo riflash (vedi "Non obiettivi").
