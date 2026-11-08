@@ -128,6 +128,9 @@ class PlayerCore:
         self.screen: Screen | None = None
         self._flash_handle: asyncio.TimerHandle | None = None
         self._arrival_handle: asyncio.TimerHandle | None = None
+        # Notice clears waiting for the page to connect, by handle name
+        # ("flash", "arrival"): a notice counts its seconds on the TV.
+        self._pending_clears: dict[str, tuple[float, Callable[[], None]]] = {}
         self._night_handle: asyncio.TimerHandle | None = None
         self._quit_task: asyncio.Task | None = None
         # Invoked when an item's encoded file is found missing on disk and the
@@ -244,6 +247,13 @@ class PlayerCore:
         return self._media_url(item.preview_filename())
 
     def _screen_view(self) -> dict:
+        ids = {i.video_id for i in self.library.items}
+        selected = self.screen.selected_video_id
+        if selected is not None and selected not in ids:
+            # A library change took the highlighted row away (sync, delete):
+            # the view moves the highlight and the status line says why.
+            # Not a key: night, idle close and night timer are left alone.
+            self._set_arrival(self.screen, REMOVED_NOTICE)
         sync_at, sync_error = self.sync_info() if self.sync_info is not None else (None, False)
         return self.screen.view(
             self.library.items,
@@ -282,35 +292,87 @@ class PlayerCore:
         if view != self._last_screen_view:
             self._send_screen(view)
 
-    def _show_stopped(self, *, highlight: str | None, arrival: str | None = None) -> None:
+    def _show_stopped(
+        self,
+        *,
+        highlight: str | None,
+        arrival: str | None = None,
+        open_page: bool = False,
+        library_change: bool = False,
+    ) -> None:
         """Unload the page's video and show the stopped screen on `highlight`,
-        with `arrival` on its status line for ARRIVAL_NOTICE_S. Launches the
-        page when it is not open (it gets the screen when it subscribes)."""
+        with `arrival` on its status line for ARRIVAL_NOTICE_S.
+
+        `open_page`: a key with the page closed, launch it when it is not
+        open (it gets the screen when it subscribes). Without it a page that
+        is not open is never launched: another app may hold the TV; a
+        reconnect within the grace shows the screen, past it _drop_page
+        clears it.
+
+        `library_change`: no key was pressed (the sync removed the video):
+        a night phase carries over, the idle close and the night timer keep
+        counting from the last key."""
+        old = self.screen if self._screen_shown() else None
+        inactive_since = self._inactive_since
         self._cancel_calibration_timer()
         self._loaded_video_id = None
         self.state = "idle"
         self.receiver.send({"type": "blank"})
         screen = Screen(highlight, None)
-        screen.arrival = arrival
         self.screen = screen
-        if self._arrival_handle is not None:
-            self._arrival_handle.cancel()
-            self._arrival_handle = None
+        self._cancel_clear("arrival")
         if arrival is not None:
-            def _clear() -> None:
-                self._arrival_handle = None
-                if self.screen is screen and screen.arrival == arrival:
-                    screen.arrival = None
-                    if self._screen_shown():
-                        self._send_screen()
-
-            self._arrival_handle = asyncio.get_running_loop().call_later(
-                ARRIVAL_NOTICE_S, _clear,
-            )
-        self._touch()
+            self._set_arrival(screen, arrival)
+        if library_change and old is not None:
+            screen.night = old.night
+            self._inactive_since = inactive_since
+        else:
+            self._touch()
         self._send_screen()
-        if not self._page_ready():
+        if open_page and not self._page_ready():
             self._start_launch()
+
+    def _cancel_clear(self, name: str) -> None:
+        self._pending_clears.pop(name, None)
+        handle = getattr(self, f"_{name}_handle")
+        if handle is not None:
+            handle.cancel()
+            setattr(self, f"_{name}_handle", None)
+
+    def _clear_later(self, name: str, delay: float, clear: Callable[[], None]) -> None:
+        """Run `clear` `delay` seconds after the notice reaches the TV: from
+        now when the page is open, else from when it connects (a launch
+        takes longer than a short notice lasts)."""
+        self._cancel_clear(name)
+
+        def _run() -> None:
+            setattr(self, f"_{name}_handle", None)
+            clear()
+
+        if self._page_ready():
+            setattr(self, f"_{name}_handle", asyncio.get_running_loop().call_later(delay, _run))
+        else:
+            self._pending_clears[name] = (delay, _run)
+
+    def _start_pending_clears(self) -> None:
+        if not self._pending_clears:
+            return
+        loop = asyncio.get_running_loop()
+        for name, (delay, run) in self._pending_clears.items():
+            setattr(self, f"_{name}_handle", loop.call_later(delay, run))
+        self._pending_clears.clear()
+
+    def _set_arrival(self, screen: Screen, text: str) -> None:
+        """`text` on the screen's status line for ARRIVAL_NOTICE_S."""
+        screen.arrival = text
+
+        def _clear() -> None:
+            if self.screen is screen and screen.arrival == text:
+                screen.arrival = None
+                if self._screen_shown():
+                    self._send_screen()
+
+        self._clear_later("arrival", ARRIVAL_NOTICE_S, _clear)
 
     def _touch(self) -> None:
         """A key on the screen: the idle close counts from now, and the
@@ -361,7 +423,7 @@ class PlayerCore:
     def _open_closed_page(self) -> None:
         """A navigation key while the page is closed: the stopped screen on
         the cursor, opening the page."""
-        self._show_stopped(highlight=self.library.cursor_video_id)
+        self._show_stopped(highlight=self.library.cursor_video_id, open_page=True)
 
     def _opened_result(self) -> ActionResult:
         return _DID_ACTION if self._page_ready() else _LAUNCHING
@@ -590,7 +652,7 @@ class PlayerCore:
             return self._cast(item)
         if item.filename:
             self._requeue_missing_cache(item)
-        self._show_stopped(highlight=item.video_id)
+        self._show_stopped(highlight=item.video_id, open_page=True)
         self._flash(NOT_READY_NOTICE)
         return _NO_PLAYABLE
 
@@ -708,9 +770,7 @@ class PlayerCore:
         screen is hidden (calibration) and sends it only when shown."""
         if self.screen is None:
             return
-        if self._flash_handle is not None:
-            self._flash_handle.cancel()
-            self._flash_handle = None
+        self._cancel_clear("flash")
         screen = self.screen
         screen.flash = text
         screen.flash_kind = kind
@@ -720,14 +780,13 @@ class PlayerCore:
             return
 
         def _clear() -> None:
-            self._flash_handle = None
             # The screen may have closed or been replaced in the meantime.
             if self.screen is screen and screen.flash == text:
                 screen.flash = None
                 if self._screen_shown():
                     self._send_screen()
 
-        self._flash_handle = asyncio.get_running_loop().call_later(NOTICE_S, _clear)
+        self._clear_later("flash", NOTICE_S, _clear)
 
     async def _resume(self) -> ActionResult:
         """Resume the paused video. If the page is gone (another app took the
@@ -780,7 +839,11 @@ class PlayerCore:
         # video (this runs later, on the loop): the page still shows it.
         on_screen = video_id in (self._loaded_video_id, self.library.cursor_video_id)
         if on_screen and self.state in ("playing", "paused", "calibrating"):
-            self._show_stopped(highlight=self.library.cursor_video_id, arrival=REMOVED_NOTICE)
+            self._show_stopped(
+                highlight=self.library.cursor_video_id,
+                arrival=REMOVED_NOTICE,
+                library_change=True,
+            )
 
     async def seek_relative(self, seconds: int) -> ActionResult:
         """Seek the page by `seconds` from the live position, clamped to
@@ -1127,6 +1190,8 @@ class PlayerCore:
         if self._lost_task is not None:
             self._lost_task.cancel()
             self._lost_task = None
+        # Short notices shown before the page was up start counting now.
+        self._start_pending_clears()
         item = self._loaded_item()
         if self.state == "calibrating":
             if self._calibration_return == "paused" and item is not None and item.filename:

@@ -1870,11 +1870,17 @@ async def test_play_while_calibrating_removes_the_pattern(monkeypatch, fake_clip
 
 def _player_without_page(library):
     """PlayerCore whose page is not open: launch_receiver opens a new page
-    (subscribes a queue, collected in `pages`)."""
+    (subscribes a queue, collected in `pages`). The page subscribes on the
+    loop, as a real one does through the SSE endpoint."""
     cc = _make_chromecast()
     receiver = ReceiverChannel(MARGINS)
     pages = []
-    cc.launch_receiver = MagicMock(side_effect=lambda url: pages.append(receiver.subscribe()))
+    loop = asyncio.get_running_loop()
+    cc.launch_receiver = MagicMock(
+        side_effect=lambda url: loop.call_soon_threadsafe(
+            lambda: pages.append(receiver.subscribe()),
+        ),
+    )
     pc = PlayerCore(library, cc, receiver)
     return pc, receiver, pages, cc
 
@@ -2707,3 +2713,147 @@ async def test_ok_on_empty_library_runs_player_command(fake_clip):
 
     assert pc.state == "calibrating"
     assert not loads(drain(q))
+
+
+# ---------------------------------------------------------------------
+# Review fixes: notices on a page that opens late, no launch over another
+# app, highlighted row removed by a library change
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_closed_page_not_ready_notice_counts_from_the_page_connecting(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NOTICE_S", 0.03)
+    library = _make_mixed_library([("a", False)])
+    library.cursor_video_id = "a"
+    cc = _make_chromecast()
+    receiver = ReceiverChannel(MARGINS)
+    cc.launch_receiver = MagicMock()  # the page connects later, below
+    pc = PlayerCore(library, cc, receiver)
+
+    await pc.toggle()
+    await asyncio.sleep(0.06)  # longer than the notice, page still opening
+
+    assert pc.screen.flash == "Non ancora pronto"
+    page = receiver.subscribe()
+    await _launched(pc)
+    assert screens(drain(page))[-1]["view"]["flash"] == "Non ancora pronto"
+
+    await asyncio.sleep(0.06)
+
+    assert pc.screen.flash is None
+    assert screens(drain(page))[-1]["view"]["flash"] is None
+
+
+@pytest.mark.asyncio
+async def test_stop_with_page_not_ready_does_not_launch(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 5.0)
+    library = _make_library(["a"])
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    await pc.play("a")
+    cc.receiver_app_active = False  # another app took the Chromecast
+    receiver.unsubscribe(q)
+
+    r = await pc.stop()
+    await asyncio.sleep(0)
+
+    assert r.did_action and pc.screen_state == "stopped"
+    assert pc._launch_task is None
+    cc.launch_receiver.assert_not_called()
+    q2 = receiver.subscribe()  # a reconnect within the grace shows it
+    assert screens(drain(q2))[-1]["view"]["state"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_stop_and_remove_with_page_not_ready_does_not_launch(monkeypatch):
+    monkeypatch.setattr("crt.player_core.RECEIVER_LOST_GRACE_S", 0.01)
+    library = _make_library(["a", "b"])
+    pc, receiver, q, cc = _make_player(library, clock=Clock())
+    await pc.play("a")
+    cc.receiver_app_active = False
+    receiver.unsubscribe(q)
+    library.items.pop(0)
+    library.cursor_video_id = "b"
+
+    await pc.stop_and_remove("a")
+    await asyncio.sleep(0.05)  # past the grace
+
+    assert pc._launch_task is None
+    cc.launch_receiver.assert_not_called()
+    assert pc.state == "idle" and pc.screen is None
+
+
+@pytest.mark.asyncio
+async def test_sync_removing_highlighted_row_moves_to_cursor_with_notice(monkeypatch):
+    monkeypatch.setattr("crt.player_core.ARRIVAL_NOTICE_S", 0.02)
+    clock = Clock()
+    pc, receiver, q, cc, library = await _paused_on(["a", "b", "c"], "a", 5.0, clock=clock)
+    await pc.next()  # highlight "b"
+    inactive_since = pc._inactive_since
+    night_timer = pc._night_handle
+    clock.t += 60
+    drain(q)
+    library.items.pop(1)  # the sync removes "b"
+
+    pc.refresh_screen()
+
+    view = screens(drain(q))[-1]["view"]
+    assert view["status"] == "Video rimosso dalla playlist"
+    assert _selected_row(view)["text"] == "a" and pc.state == "paused"
+    assert pc._inactive_since == inactive_since and pc._night_handle is night_timer
+
+    await asyncio.sleep(0.05)
+
+    assert screens(drain(q))[-1]["view"]["status"] is None
+
+
+@pytest.mark.asyncio
+async def test_removed_highlighted_row_on_stopped_screen_during_night_stays_night(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NIGHT_AFTER_S", 0.01)
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b"], "a")
+    await asyncio.sleep(0.05)
+    assert pc.screen.night is True
+    drain(q)
+    library.items.pop(0)  # the sync removes the highlighted "a"
+    library.cursor_video_id = "b"
+
+    pc.refresh_screen()
+
+    view = screens(drain(q))[-1]["view"]
+    assert view["night"] is True and view["status"] == "Video rimosso dalla playlist"
+    assert _selected_row(view)["text"] == "b" and pc.screen.night is True
+
+
+@pytest.mark.asyncio
+async def test_delete_from_screen_says_the_row_was_removed():
+    pc, receiver, q, cc, library = await _stopped_on(["a", "b"], "a")
+    await _select_command(pc, "delete")
+    await pc.toggle()
+    drain(q)
+
+    await pc.toggle()  # confirm
+
+    view = screens(drain(q))[-1]["view"]
+    assert view["status"] == "Video rimosso dalla playlist"
+    assert _selected_row(view)["text"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_sync_removal_of_paused_video_during_night_stays_night(monkeypatch):
+    monkeypatch.setattr("crt.player_core.NIGHT_AFTER_S", 0.01)
+    clock = Clock()
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "a", 5.0, clock=clock)
+    await asyncio.sleep(0.05)
+    assert pc.screen.night is True
+    inactive_since = pc._inactive_since
+    clock.t += 60
+    library.items.pop(0)
+    library.cursor_video_id = "b"
+
+    await pc.stop_and_remove("a")
+
+    view = screens(drain(q))[-1]["view"]
+    assert view["state"] == "stopped" and view["night"] is True
+    assert view["status"] == "Video rimosso dalla playlist"
+    assert pc.screen.night is True and pc._inactive_since == inactive_since
+    assert pc._night_handle is None
