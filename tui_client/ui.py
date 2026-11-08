@@ -54,6 +54,8 @@ class CRTCastApp(App):
     def __init__(self, daemon_url: str):
         super().__init__()
         self._row_video_ids: list = []
+        self._row_labels: list = []
+        self._row_widgets: list = []
         self.client = DaemonClient(daemon_url)
 
     def compose(self) -> ComposeResult:
@@ -84,29 +86,49 @@ class CRTCastApp(App):
             log.warning("fetch_status failed: %s", e)
 
     def watch_library_state(self, value: dict) -> None:
-        try:
-            list_view = self.query_one("#items_list", ListView)
-        except Exception:
-            return
-        previous_index = list_view.index
-        selected_id = (self.status_state or {}).get("player", {}).get("selected_video_id")
-        items = value.get("items", [])
-        self._row_video_ids = [item.get("video_id") for item in items]
-        list_view.clear()
-        for item in items:
-            cursor = ">>" if item.get("is_cursor") else "  "
-            tv = "*" if selected_id and item.get("video_id") == selected_id else " "
-            label = f"{cursor}{tv} {item['status']:>10s}  {item['title']}"
-            list_view.append(ListItem(Label(label)))
-        if previous_index is not None and items:
-            # clear() resets the highlight: restore the user's row (clamped).
-            list_view.index = min(previous_index, len(items) - 1)
+        self._schedule_rows_sync()
         # loop_mode lives in library_state; refresh the status bar to reflect it.
         self._render_status_bar()
 
     def watch_status_state(self, value: dict) -> None:
-        # The TV highlight marker depends on the status: redraw the rows too.
-        self.watch_library_state(self.library_state or {})
+        # The TV highlight marker depends on the status: sync the rows too.
+        self._schedule_rows_sync()
+        self._render_status_bar()
+
+    def _schedule_rows_sync(self) -> None:
+        # Exclusive worker: rebuilds never overlap, the last one wins.
+        self.run_worker(self._sync_rows, exclusive=True, group="rows")
+
+    def _row_label(self, item: dict, selected_id) -> str:
+        cursor = ">>" if item.get("is_cursor") else "  "
+        tv = "*" if selected_id and item.get("video_id") == selected_id else " "
+        return f"{cursor}{tv} {item['status']:>10s}  {item['title']}"
+
+    async def _sync_rows(self) -> None:
+        try:
+            list_view = self.query_one("#items_list", ListView)
+        except Exception:
+            return
+        items = (self.library_state or {}).get("items", [])
+        selected_id = (self.status_state or {}).get("player", {}).get("selected_video_id")
+        ids = [item.get("video_id") for item in items]
+        labels = [self._row_label(item, selected_id) for item in items]
+        if ids == self._row_video_ids and len(self._row_labels) == len(labels):
+            # Same rows: update the text in place, keeping the highlight.
+            for widget, old, new in zip(self._row_widgets, self._row_labels, labels):
+                if old != new:
+                    widget.update(new)
+            self._row_labels = labels
+            return
+        previous_index = list_view.index
+        await list_view.clear()
+        self._row_widgets = [Label(text) for text in labels]
+        await list_view.extend(ListItem(w) for w in self._row_widgets)
+        self._row_video_ids = ids
+        self._row_labels = labels
+        if previous_index is not None and items:
+            # clear() resets the highlight: restore the user's row (clamped).
+            list_view.index = min(previous_index, len(items) - 1)
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         index = event.list_view.index

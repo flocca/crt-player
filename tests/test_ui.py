@@ -139,10 +139,18 @@ async def test_list_keeps_index_across_refresh(tui_app, mock_daemon_client):
         lv = tui_app.query_one("#items_list", ListView)
         lv.index = 1
         await pilot.pause()
+        assert lv.children[1].highlighted
         tui_app.library_state = _two_items_library()
         await pilot.pause()
         await pilot.pause()
         assert lv.index == 1
+        assert lv.children[1].highlighted
+        status = mock_daemon_client.fetch_status.return_value
+        tui_app.status_state = {**status, "player": {**status["player"], "current_time_s": 5.0}}
+        await pilot.pause()
+        await pilot.pause()
+        assert lv.index == 1
+        assert lv.children[1].highlighted
 
 
 @pytest.mark.asyncio
