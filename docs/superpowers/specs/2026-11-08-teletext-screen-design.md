@@ -56,7 +56,7 @@ Le due facce differiscono solo in quattro cose: cosa c'è dietro la riga del vid
 ## Anti-obiettivi (sarebbe un fallimento anche se funziona)
 
 - **Un'anteprima con l'audio.** Stop e pausa vogliono dire silenzio.
-- **Il fotogramma sbagliato dietro il video in pausa** (residuo di un'anteprima precedente) o nero dove dovrebbe esserci il fotogramma.
+- **Il fotogramma sbagliato dietro il video in pausa** (residuo di un'anteprima precedente) o nero dove dovrebbe esserci il fotogramma. Fa eccezione il secondo circa di nero mentre la pagina ricarica il video in pausa dopo un'anteprima o la calibrazione (vedi "Anteprime"): con un solo decoder video non c'è altro modo.
 - **La pausa che diventa lenta**: schermo nero, logo o ritardo percepibile fra pausa, schermata e ripresa.
 - **Perdere la posizione** (issue #7, #12, #13): ripresa che riparte indietro o dall'inizio.
 - **Cancellare senza conferma un video diverso da quello che si sta guardando.** Con la schermata aperta ogni `Elimina`, da TV o da Flipper, chiede conferma sulla riga evidenziata.
@@ -72,7 +72,7 @@ Quelli della spec precedente restano (Chromecast Ultra con Chrome 90, DashCast c
 
 - **Geometria**: tutto quello che si disegna sta nel box largo 75% con `scaleX(1.3333)`. La griglia è di 40 colonne per 18 righe dentro i soli margini di calibrazione, più l'1,5% a sinistra (approvata sul TV).
 - **Font**: Bedstead (ricostruzione del set teletext SAA5050), licenza CC0 dichiarata dall'autore; va citato nel repo. Da verificare che abbia tutti i glifi usati (▶ ○ ✓ … ! ▌ ▓ ░ ▄); per quelli che mancano, scegliere sostituti che si leggano.
-- **Due video caricati in pausa**: l'anteprima deve avere un file senza traccia audio (vedi "Anteprime").
+- **Un solo decoder video** (scoperto nella prova sul TV del 2026-11-08): quando l'anteprima o la calibrazione caricano un file, il video principale resta nero e muto finché la pagina non lo ricarica. L'anteprima ha comunque un file senza traccia audio (vedi "Anteprime").
 - **Prestazioni**: niente animazioni CSS sopra i video; la neve è l'unico elemento che si ridisegna di continuo e si ferma di notte.
 - **Ridisegni frequenti**: la pipeline notifica a ogni punto percentuale di download e codifica (`crt/pipeline.py:297-299, 328-330` → `crt/daemon.py:129-131` → `refresh_menu`). La pagina deve applicare la vista senza ricaricare l'anteprima se video evidenziato e file non sono cambiati, e senza svegliare la fase notte.
 
@@ -147,7 +147,7 @@ Dietro la pagina c'è sempre qualcosa che dipende solo dalla riga evidenziata, s
 | un video in coda, in download, in codifica o in errore | neve attenuata dal velo |
 | playlist vuota | nero |
 
-Il cambio di riga è secco: nessuna transizione.
+Il cambio di riga è secco: nessuna transizione. Tornando sulla riga del video in pausa dopo un'anteprima c'è circa un secondo di nero, il tempo di ricaricarlo.
 
 ### Bozza
 
@@ -232,7 +232,8 @@ Quando DashCast non è aperto (dopo la chiusura per inattività, dopo `Spegni`, 
 - **Finestra**: i 20 secondi che precedono la posizione salvata, in loop; per un video senza posizione o già visto, i primi 20 secondi. Così l'anteprima ricorda dove si era rimasti e non anticipa niente. *(proposta da Fable, provata sul TV)*
 - **Sempre muta**, anche via `muted` sull'elemento, oltre alla copia senza audio.
 - **Una sola anteprima alla volta.** Quando la riga evidenziata non ne ha bisogno, l'anteprima viene **scaricata** (`src` tolto e `load()`), mai solo nascosta: altrimenti il suo ultimo fotogramma resta sul piano video.
-- **Il video principale caricato in pausa** (riconnessione, ripresa da pagina appena aperta, ritorno dalla calibrazione) parte un istante a volume zero e si rimette in pausa, così il Chromecast ne disegna il fotogramma.
+- **Il video principale caricato in pausa** (riconnessione, ripresa da pagina appena aperta, ritorno dalla calibrazione, ritorno sulla sua riga dopo un'anteprima) parte un istante a volume zero e si rimette in pausa, così il Chromecast ne disegna il fotogramma. Il muto va messo prima di caricarlo: messo subito prima del play si sente un attimo di audio.
+- **Dopo un'anteprima o la calibrazione il video principale ha perso il decoder**: la pagina lo ricarica dallo stesso file alla posizione della pausa quando si torna sulla sua riga, su Riprendi e alla riconnessione (circa un secondo di nero, poi il fotogramma).
 - **Ridisegni**: l'anteprima si ricarica solo se cambiano il video evidenziato o il suo file.
 
 ## Fase notte (deciso con Giacomo)
@@ -241,7 +242,7 @@ Uguale in pausa e da fermo.
 
 - Parte dopo **5 minuti senza tasti**. I ridisegni di libreria (percentuali, sync) non contano come tasti e non svegliano.
 - Resta solo la **testata al 35% di luminosità**. L'orologio con i secondi continua ed è l'unico movimento. Testo e testata si spostano di qualche pixel ogni 30 secondi (nella prova: 3 px). Il resto della pagina sparisce.
-- **Velo al 90%**. L'anteprima viene scaricata e la neve si ferma. Il video in pausa resta caricato sotto il velo, come oggi per tutta la pausa.
+- **Velo al 90%**. L'anteprima viene scaricata e la neve si ferma. Il video in pausa resta sotto il velo; se un'anteprima gli aveva preso il decoder, la pagina lo ricarica.
 - **Il primo tasto di navigazione sveglia e basta** (`prev`, `next`, `toggle`, `seek/*`), senza eseguire la sua azione: al buio non si vede cosa è evidenziato. Da lì la schermata torna com'era, anteprima compresa. I comandi espliciti (menu Comandi del Flipper: `stop`, `delete/current`, `calibrate`, `loop/toggle`, `sync`; Invio nella TUI) svegliano **e** agiscono, perché chi li dà ha scelto sul display del Flipper o sul Mac, non al buio sul TV *(scelta di Claude)*. Poiché è il daemon a interpretare i tasti, il daemon deve sapere se la pagina è in fase notte.
 - La chiusura per inattività resta a 30 minuti (`CRT_RECEIVER_IDLE_CLOSE_S`), contati **dall'ultimo tasto** sulla schermata e non più dall'ingresso in pausa o da fermo come oggi (`_inactive_since`, `crt/player_core.py:925-942`), così chi sta scorrendo la lista non si vede chiudere la pagina sotto gli occhi *(scelta di Claude)*. La notte dura quindi al massimo 25 minuti.
 
