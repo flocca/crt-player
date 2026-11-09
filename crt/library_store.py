@@ -66,6 +66,24 @@ class QueueItem:
         name = self.preview_filename()
         return bool(name) and os.path.isfile(os.path.join(config.TEMP_DIR, name))
 
+    def delete_files(self) -> None:
+        """Delete this item's files: the encoded MP4, its preview copy and the
+        original download. Used by the sync removal and by Elimina. Blocking:
+        call it via asyncio.to_thread from async code."""
+        paths = []
+        if self.filename:
+            paths += [os.path.join(config.TEMP_DIR, name)
+                      for name in (self.filename, config.preview_filename(self.filename))]
+        if self.downloaded_path:
+            paths.append(self.downloaded_path)
+        for path in paths:
+            if os.path.isfile(path):
+                try:
+                    os.unlink(path)
+                    log.debug("Deleted %s", path)
+                except OSError as e:
+                    log.warning("Failed to delete %s: %s", path, e)
+
     def requeue(self) -> None:
         """Reset this item to a fresh 'queued' state so the pipeline rebuilds it.
 

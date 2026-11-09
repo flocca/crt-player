@@ -1019,7 +1019,7 @@ class PlayerCore:
         """Background part of a deletion: cache files, then the YouTube
         playlist entry. Failures are only logged."""
         try:
-            await asyncio.to_thread(self._unlink_cache, item.video_id)
+            await asyncio.to_thread(item.delete_files)
         except Exception:
             log.exception("Removing the cache files of %s failed", item.video_id)
         try:
@@ -1041,16 +1041,6 @@ class PlayerCore:
                 "delete: playlist_item_id missing for %s; remote delete skipped",
                 item.video_id,
             )
-
-    def _unlink_cache(self, video_id: str) -> None:
-        encoded = config.cached_encoded_filename(video_id)
-        for name in (encoded, config.preview_filename(encoded)):
-            cache_path = os.path.join(config.TEMP_DIR, name)
-            if os.path.isfile(cache_path):
-                try:
-                    os.unlink(cache_path)
-                except OSError as e:
-                    log.warning("Failed to unlink cache %s: %s", cache_path, e)
 
     async def on_playback_finished(self) -> None:
         """Called when the Chromecast reports natural end of the current item.

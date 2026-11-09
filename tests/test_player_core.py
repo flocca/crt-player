@@ -877,17 +877,23 @@ async def test_delete_current_full_path(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unlink_cache_removes_preview_copy(tmp_path):
+async def test_delete_removes_encoded_preview_and_download(tmp_path):
+    """Elimina removes the same files as the sync removal: the stored
+    encoded name, its preview copy and the original download."""
     library = _make_library(["A", "B"])
-    library.items[0].filename = "A_pal_crop.mp4"
-    (tmp_path / "A_pal_crop.mp4").write_text("dummy")
-    preview = tmp_path / "A_pal_crop_noaudio.mp4"
-    preview.write_text("dummy")
+    library.cursor_video_id = "A"
+    library.items[0].filename = "A_pal_crop_m4-4-0-0.mp4"
+    files = [tmp_path / "A_pal_crop_m4-4-0-0.mp4", tmp_path / "A_pal_crop_m4-4-0-0_noaudio.mp4",
+             tmp_path / "A.webm"]
+    for f in files:
+        f.write_text("dummy")
+    library.items[0].downloaded_path = str(files[2])
     pc, receiver, q, cc = _make_player(library)
 
-    pc._unlink_cache("A")
+    await pc.delete_current()
+    await asyncio.gather(*pc._delete_tasks)
 
-    assert not preview.exists()
+    assert [f.exists() for f in files] == [False, False, False]
 
 
 @pytest.mark.asyncio
