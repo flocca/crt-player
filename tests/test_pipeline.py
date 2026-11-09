@@ -504,11 +504,31 @@ async def _quick_encode(input_path, output_path, duration, on_progress, worker=N
 
 
 @pytest.mark.asyncio
-async def test_prepare_one_download_overwrites_the_duration(monkeypatch, tmp_path):
-    """The downloaded file's duration (10 s in the fixture) wins over the
-    metadata read before it."""
+async def test_prepare_one_requeued_item_keeps_its_probed_duration(monkeypatch, tmp_path):
+    """The metadata only fills an unknown duration: a re-encode must not show
+    YouTube's 411 s over the file's 410.52 while it runs."""
     from crt import pipeline as pl
     worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+    item.duration = 410.52
+    monkeypatch.setattr(pl, "encode_video", _quick_encode)
+    monkeypatch.setattr(pl, "_get_duration", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    assert item.duration == 410.52
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_download_fills_an_unknown_duration(monkeypatch, tmp_path):
+    """No duration from fetch_title: the download's (10 s in the fixture) is used."""
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+
+    async def no_duration_title(url):
+        return "A", "A", 0.0
+
+    monkeypatch.setattr(pl, "fetch_title", no_duration_title)
     monkeypatch.setattr(pl, "encode_video", _quick_encode)
     monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
 
@@ -645,14 +665,31 @@ async def test_prepare_one_encode_probes_when_no_duration_is_known(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_prepare_one_skips_the_probe_when_the_duration_is_known(monkeypatch, tmp_path):
+async def test_prepare_one_encoded_file_duration_wins_over_the_metadata(monkeypatch, tmp_path):
+    """YouTube said 411 s for a file of 410.5 s: the row showed 06:51 while
+    the same video read from its file showed 06:50 (TV check, 2026-11-09)."""
     from crt import pipeline as pl
     worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
-    (tmp_path / cached_encoded_filename("A")).write_text("encoded")
-    probe = AsyncMock(return_value=77.0)
+    encoded = tmp_path / cached_encoded_filename("A")
+    encoded.write_text("encoded")
+    probe = AsyncMock(return_value=410.52)
     monkeypatch.setattr(pl, "_get_duration", probe)
     monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
 
     await worker._prepare_one(item)
 
-    probe.assert_not_awaited()
+    probe.assert_awaited_once_with(str(encoded))
+    assert item.duration == 410.52
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_keeps_the_metadata_when_ffprobe_fails(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+    (tmp_path / cached_encoded_filename("A")).write_text("encoded")
+    monkeypatch.setattr(pl, "_get_duration", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    assert item.duration == 300.0

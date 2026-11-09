@@ -319,10 +319,13 @@ class PipelineWorker:
             if item.cache_file_present() and not item.preview_present():
                 await self._ensure_preview(item)
 
-    async def _ensure_duration(self, item: QueueItem) -> None:
-        """Probe the encoded file when yt-dlp gave no duration."""
-        if item.duration > 0:
-            return
+    async def _probe_duration(self, item: QueueItem) -> None:
+        """Read the duration from the encoded file, the one the TV plays.
+
+        yt-dlp's metadata can be a second off (411 s for a 410.5 s file), and
+        the row would then disagree with the same video probed elsewhere.
+        A failed probe keeps the metadata.
+        """
         duration = await _get_duration(os.path.join(config.TEMP_DIR, item.filename))
         if duration > 0:
             item.duration = duration
@@ -331,8 +334,8 @@ class PipelineWorker:
     async def backfill_durations(self) -> None:
         """One-shot: read with ffprobe the duration of items cached before the field existed."""
         for item in list(self.queue.items):
-            if item.cache_file_present():
-                await self._ensure_duration(item)
+            if item.duration <= 0 and item.cache_file_present():
+                await self._probe_duration(item)
 
     async def _prepare_one(self, item: QueueItem) -> None:
         self._preparing = item
@@ -340,7 +343,9 @@ class PipelineWorker:
             item.title, video_id, duration = await fetch_title(item.url)
             if video_id:
                 item.video_id = video_id
-            if duration > 0:
+            # Metadata only fills an unknown duration: _probe_duration reads
+            # the encoded file once it exists.
+            if duration > 0 and item.duration <= 0:
                 item.duration = duration
             self.notify()
 
@@ -351,7 +356,7 @@ class PipelineWorker:
                 item.filename = os.path.basename(cached_encoded)
                 item.status = "ready"
                 self.notify()
-                await self._ensure_duration(item)
+                await self._probe_duration(item)
                 await self._ensure_preview(item)
                 return
 
@@ -360,7 +365,7 @@ class PipelineWorker:
                 log.info("Resuming encode from existing download: %s", item.downloaded_path)
                 downloaded_path = item.downloaded_path
                 duration = await _get_duration(downloaded_path)
-                if duration > 0:
+                if duration > 0 and item.duration <= 0:
                     item.duration = duration
             else:
                 # Download
@@ -378,7 +383,7 @@ class PipelineWorker:
                     item.url, config.TEMP_DIR, dl_progress
                 )
                 item.downloaded_path = downloaded_path
-                if duration > 0:
+                if duration > 0 and item.duration <= 0:
                     item.duration = duration
 
                 if self._prepare_cancel.is_set():
@@ -425,7 +430,7 @@ class PipelineWorker:
             item.status = "ready"
             self.notify()
             log.info("Ready: %s (encoded in %.1fs)", item.title, time.monotonic() - t0)
-            await self._ensure_duration(item)
+            await self._probe_duration(item)
             await self._ensure_preview(item)
 
         except Exception as e:
