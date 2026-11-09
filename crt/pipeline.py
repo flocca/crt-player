@@ -152,10 +152,15 @@ async def make_preview(encoded_path: str) -> str | None:
             *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
         )
         await proc.wait()
-        if proc.returncode == 0:
+        if proc.returncode == 0 and not os.path.isfile(encoded_path):
+            # Deleted while ffmpeg read it (Elimina, sync): its files are gone,
+            # the copy must not come back after them.
+            log.info("Preview of %s dropped: the video was deleted", encoded_path)
+        elif proc.returncode == 0:
             os.replace(tmp, final)
             return final
-        log.warning("Preview remux failed for %s (ffmpeg exit %s)", encoded_path, proc.returncode)
+        else:
+            log.warning("Preview remux failed for %s (ffmpeg exit %s)", encoded_path, proc.returncode)
     except Exception as e:
         log.warning("Preview remux failed for %s: %s", encoded_path, e)
     try:

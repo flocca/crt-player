@@ -370,6 +370,26 @@ async def test_make_preview_failure_leaves_no_file(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_make_preview_of_a_video_deleted_meanwhile_leaves_no_file(monkeypatch, tmp_path):
+    """The video is deleted (Elimina, sync) while ffmpeg remuxes it: the copy
+    must not be published after its files are gone."""
+    from crt import pipeline as pl
+    encoded = tmp_path / "X.mp4"
+    encoded.write_text("enc")
+    remux = _fake_ffmpeg(0, [])
+
+    async def remux_then_delete(*args, **kwargs):
+        proc = await remux(*args, **kwargs)
+        encoded.unlink()
+        return proc
+
+    monkeypatch.setattr(pl.asyncio, "create_subprocess_exec", remux_then_delete)
+
+    assert await pl.make_preview(str(encoded)) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_prepare_one_makes_preview_after_ready(monkeypatch, tmp_path):
     from crt import pipeline as pl
     worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
