@@ -84,7 +84,12 @@ def _right_field(item: QueueItem) -> str:
     if item.duration <= 0:
         return ""
     if item.playback_position > 0:
-        return "-" + _format_position(max(0.0, item.duration - item.playback_position))
+        # Floored apart like row 4 (00:52 / 09:12 → -08:20).
+        left = max(0, int(item.duration) - int(item.playback_position))
+        if left >= 36000:  # -10:00:00 would take 9 columns
+            h, rest = divmod(left, 3600)
+            return f"-{h}h{rest // 60:02d}"
+        return "-" + _format_position(left)
     return _format_position(item.duration)
 
 

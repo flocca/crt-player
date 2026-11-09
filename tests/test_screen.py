@@ -224,3 +224,22 @@ def test_command_index_clamped_when_commands_shrink():
     assert s.selected_command([]) == "power"
     s.command_index = 0
     assert s.selected_command([]) == "calibrate"
+
+
+def test_time_left_agrees_with_row_4_on_a_fractional_position():
+    """Row 4 floors position and duration apart (00:52 / 09:12): the row
+    must say 8:20, not the 8:19 of flooring their difference."""
+    assert _right("paused", duration=552, position=52.4, loaded="x") == "-08:20"
+
+
+def test_time_left_above_10_hours_fits_8_columns():
+    """-11:59:00 is 9 characters: above 10 h left the seconds go."""
+    assert _right("ready", duration=43200, position=60) == "-11h59"
+    assert len(_right("ready", duration=36000, position=1)) <= 8
+
+
+def test_paused_duration_is_none_while_unknown():
+    """The page then falls back to the <video>'s own duration."""
+    lib = items(("a", "paused"))
+    lib[0].playback_position = 30
+    assert view(Screen("a", "a"), lib, "a")["paused_duration"] is None

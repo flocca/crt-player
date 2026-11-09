@@ -98,7 +98,7 @@ Estetica teletext generica (standard ETS 300 706, non un servizio reale): monosp
 `simbolo numero titolo destra`: simbolo, numero a due cifre (posizione nella playlist), titolo troncato con `…` per stare nelle colonne disponibili, a destra 8 colonne allineate a destra (erano 7: l'ottava serve a `-1:05:00`, deciso con Giacomo il 2026-11-08 dopo la prova sul TV).
 
 - **Simboli**: ▶ solo sul video caricato (in pausa); ○ pronto; ✓ già visto; … in coda, in download o in codifica; ! errore. Oggi ▶ segue il cursore (`crt/pause_menu.py:36-37`): nella nuova schermata segue solo il video caricato, quindi da fermo nessuna riga lo porta.
-- **Colonna destra** (decisa con Giacomo il 2026-11-08, sentito il consulente), in ordine di precedenza: la percentuale (`43%`) se in download o in codifica; per un video iniziato e non finito (`playback_position > 0`), compreso quello in pausa (▶), il tempo che manca col meno davanti (`-33:00`, `-1:05:00` sopra l'ora; `-00:00` se la posizione supera la durata); negli altri casi la durata (`09:12`, `1:05:30`), anche per i visti (in grigio come la riga), per quelli in coda appena la pipeline l'ha letta e per quelli in errore se un tentativo precedente l'aveva letta; vuota se la durata non è ancora nota. Formato `mm:ss`, `h:mm:ss` sopra l'ora, come la riga 4.
+- **Colonna destra** (decisa con Giacomo il 2026-11-08, sentito il consulente), in ordine di precedenza: la percentuale (`43%`) se in download o in codifica; per un video iniziato e non finito (`playback_position > 0`), compreso quello in pausa (▶), il tempo che manca col meno davanti (`-33:00`, `-1:05:00` sopra l'ora; `-00:00` se la posizione supera la durata); negli altri casi la durata (`09:12`, `1:05:30`), anche per i visti (in grigio come la riga), per quelli in coda appena la pipeline l'ha letta e per quelli in errore se un tentativo precedente l'aveva letta; vuota se la durata non è ancora nota. Formato `mm:ss`, `h:mm:ss` sopra l'ora, come la riga 4. Il tempo che manca è la differenza dei due valori già troncati al secondo, così la riga ▶ dice lo stesso della riga 4 (`00:52 / 09:12` → `-08:20`); sopra le 10 ore che mancano diventa `-11h59`, perché `-11:59:00` non sta in 8 colonne *(scelte di Claude)*.
 - **Durata nella libreria** *(scelte di Claude)*: un campo `duration` per video, letto con il titolo prima del download (`fetch_title` ha già le informazioni di yt-dlp) e ricavato con ffprobe all'avvio per i video già in cache; la riga 4 prende la durata da lì invece che dal `<video>`.
 - **Testo di stato per i non pronti**, nel titolo: `In coda · Titolo`, `Download · Titolo` (con `43%` a destra), `Codifica · Titolo`, `Errore nel video · Titolo`.
 - **Colori**: pronto bianco; visto grigio; in coda, download, codifica ciano; errore magenta (il rosso come testo su CRT si legge male); riga evidenziata nero su giallo; riga in attesa di conferma `Elimina` nero su rosso.
@@ -157,16 +157,16 @@ P100 CRT QUEUE  1/2  dom 08 nov 21:34:05   P100 CRT QUEUE  1/2  dom 08 nov 21:36
 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 PLAYLIST                        19 video   PLAYLIST                        19 video
 ▌▌ 02:52 / 11:39  ▓▓▓▓░░░░░░░░░░
-○ 01 Un trucco per evitare di n…   04:07   ○ 01 Un trucco per evitare di n…   04:07
-✓ 02 Caracciolo a Otto e Mezzo:…           ✓ 02 Caracciolo a Otto e Mezzo:…
-○ 03 Classifico le fonti di PRO…   07:40   ○ 03 Classifico le fonti di PRO…   07:40
-○ 04 Binance $6 BILLION HACK (N…   01:51   ○ 04 Binance $6 BILLION HACK (N…   01:51
-○ 05 Come leggere per imparare?…           ○ 05 Come leggere per imparare?…
-○ 06 Generare l'icona di un'app…   03:37   ○ 06 Generare l'icona di un'app…   03:37
-▶ 07 I DEM vogliono bloccare l'…   02:52   ○ 07 I DEM vogliono bloccare l'…   02:52   ← evidenziata (nero su giallo)
-○ 08 Riesce Astra a capire qual…   10:31   ○ 08 Riesce Astra a capire qual…   10:31
-○ 09 Caracciolo a Otto e Mezzo:…   02:08   ○ 09 Caracciolo a Otto e Mezzo:…   02:08
-○ 10 Caracciolo a Repubblica: T…           ○ 10 Caracciolo a Repubblica: T…
+○ 01 Un trucco per evitare di …   -03:12   ○ 01 Un trucco per evitare di …   -03:12
+✓ 02 Caracciolo a Otto e Mezzo…    12:05   ✓ 02 Caracciolo a Otto e Mezzo…    12:05
+○ 03 Classifico le fonti di PR…   -07:40   ○ 03 Classifico le fonti di PR…   -07:40
+○ 04 Binance $6 BILLION HACK (…   -01:51   ○ 04 Binance $6 BILLION HACK (…   -01:51
+○ 05 Come leggere per imparare…    08:44   ○ 05 Come leggere per imparare…    08:44
+○ 06 Generare l'icona di un'ap…   -03:37   ○ 06 Generare l'icona di un'ap…   -03:37
+▶ 07 I DEM vogliono bloccare l…   -08:47   ○ 07 I DEM vogliono bloccare l…   -08:47   ← evidenziata (nero su giallo)
+○ 08 Riesce Astra a capire qua…   -10:31   ○ 08 Riesce Astra a capire qua…   -10:31
+○ 09 Caracciolo a Otto e Mezzo…   -02:08   ○ 09 Caracciolo a Otto e Mezzo…   -02:08
+○ 10 Caracciolo a Repubblica: …  1:05:30   ○ 10 Caracciolo a Repubblica: …  1:05:30
 
 Riprendi Elimina Stop                      Riprendi Elimina
 Calibra Loop Sync Spegni                   Calibra Loop Sync Spegni

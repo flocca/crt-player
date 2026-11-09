@@ -594,3 +594,65 @@ async def test_backfill_durations_leaves_zero_when_ffprobe_fails(monkeypatch, tm
     await worker.backfill_durations()
 
     assert library.items[0].duration == 0.0
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_cache_hit_probes_when_no_duration_is_known(monkeypatch, tmp_path):
+    """yt-dlp may give no duration: the encoded file still has one, and the
+    startup backfill would only see it at the next restart."""
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+    encoded = tmp_path / cached_encoded_filename("A")
+    encoded.write_text("encoded")
+
+    async def no_duration_title(url):
+        return "A", "A", 0.0
+
+    monkeypatch.setattr(pl, "fetch_title", no_duration_title)
+    probe = AsyncMock(return_value=77.0)
+    monkeypatch.setattr(pl, "_get_duration", probe)
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    probe.assert_awaited_once_with(str(encoded))
+    assert item.duration == 77.0
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_encode_probes_when_no_duration_is_known(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+
+    async def no_duration_title(url):
+        return "A", "A", 0.0
+
+    async def no_duration_download(url, temp_dir, on_progress):
+        path = os.path.join(temp_dir, "A.mp4")
+        with open(path, "w") as f:
+            f.write("source")
+        return path, 0.0
+
+    monkeypatch.setattr(pl, "fetch_title", no_duration_title)
+    monkeypatch.setattr(pl, "download_video", no_duration_download)
+    monkeypatch.setattr(pl, "encode_video", _quick_encode)
+    monkeypatch.setattr(pl, "_get_duration", AsyncMock(return_value=77.0))
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    assert item.status == "ready" and item.duration == 77.0
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_skips_the_probe_when_the_duration_is_known(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+    (tmp_path / cached_encoded_filename("A")).write_text("encoded")
+    probe = AsyncMock(return_value=77.0)
+    monkeypatch.setattr(pl, "_get_duration", probe)
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    probe.assert_not_awaited()
