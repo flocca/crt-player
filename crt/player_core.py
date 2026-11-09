@@ -138,6 +138,12 @@ class PlayerCore:
         self._pending_clears: dict[str, tuple[float, Callable[[], None]]] = {}
         self._night_handle: asyncio.TimerHandle | None = None
         self._quit_task: asyncio.Task | None = None
+        # DashCast launches and quits run one at a time, in the order asked.
+        # Each close (Spegni, idle close) bumps the epoch: a launch asked
+        # before it gives up instead of reopening the page.
+        self._app_lock = asyncio.Lock()
+        self._app_epoch = 0
+        self._launch_epoch = 0
         # Background part of each deletion (cache unlinks, YouTube delete),
         # kept referenced until done so it is not garbage-collected.
         self._delete_tasks: set[asyncio.Task] = set()
@@ -453,7 +459,10 @@ class PlayerCore:
         return 0.0
 
     def _page_ready(self) -> bool:
-        return self.receiver.connected and self.chromecast.receiver_app_active
+        # A page whose app is being quit is not open: the next key launches
+        # again, after the quit.
+        quitting = self._quit_task is not None and not self._quit_task.done()
+        return not quitting and self.receiver.connected and self.chromecast.receiver_app_active
 
     def _start_launch(self) -> None:
         """Open our page on the Chromecast in the background, once.
@@ -462,24 +471,33 @@ class PlayerCore:
         happens when the page is not connected or another app is in front.
         Commands keep changing the player's state meanwhile; the new page
         gets that state when it subscribes (_on_receiver_connect)."""
-        if self._launch_task is not None and not self._launch_task.done():
+        pending = self._launch_task is not None and not self._launch_task.done()
+        if pending and self._launch_epoch == self._app_epoch:
             return
-        self._launch_task = asyncio.get_running_loop().create_task(self._launch())
+        # A launch left over from before a close gives up on its own.
+        self._launch_epoch = self._app_epoch
+        self._launch_task = asyncio.get_running_loop().create_task(
+            self._launch(self._app_epoch),
+        )
 
-    async def _launch(self) -> None:
+    async def _launch(self, epoch: int) -> None:
         # Restored "ready" items can be played before discovery completes.
         await self.chromecast.wait_for_connection()
         url = f"http://{_get_local_ip()}:{config.SERVER_PORT}/receiver"
-        seen = self.receiver.subscriptions
-        try:
-            await asyncio.to_thread(self.chromecast.launch_receiver, url)
-        except Exception as e:
-            log.error("Launching the receiver page failed: %s", e)
-            self._drop_page("launch failed")
-            return
+        async with self._app_lock:  # after a quit still running
+            if self._app_epoch != epoch:
+                return  # closed after this launch was asked
+            seen = self.receiver.subscriptions
+            try:
+                await asyncio.to_thread(self.chromecast.launch_receiver, url)
+            except Exception as e:
+                log.error("Launching the receiver page failed: %s", e)
+                self._drop_page("launch failed")
+                return
         # Wait for a NEW connection: a stale subscriber left over from a page
         # that another app replaced must not count.
-        if not await self.receiver.wait_new_subscriber(seen, RECEIVER_CONNECT_TIMEOUT_S):
+        connected = await self.receiver.wait_new_subscriber(seen, RECEIVER_CONNECT_TIMEOUT_S)
+        if not connected and self._app_epoch == epoch:
             log.error(
                 "Receiver page did not connect within %.0fs of launching %s",
                 RECEIVER_CONNECT_TIMEOUT_S, url,
@@ -771,17 +789,26 @@ class PlayerCore:
         if item is not None and item.status in ("playing", "paused"):
             self._snapshot_position(item)
             item.status = "ready"
+        log.info("Power off: closing the receiver app")
+        self._close_app()
+        return _DID_ACTION
+
+    def _close_app(self) -> None:
+        """Empty the page and quit DashCast in the background (Spegni, idle
+        close). A launch asked before this gives up; one asked after waits
+        for the quit (_app_lock)."""
         self._cancel_night_timer()
         self._blank_page()
         self.screen = None
         self._loaded_video_id = None
         self.state = "idle"
         self._inactive_since = None
-        log.info("Power off: closing the receiver app")
-        self._quit_task = asyncio.get_running_loop().create_task(
-            asyncio.to_thread(self.chromecast.quit_app),
-        )
-        return _DID_ACTION
+        self._app_epoch += 1
+        self._quit_task = asyncio.get_running_loop().create_task(self._quit_app())
+
+    async def _quit_app(self) -> None:
+        async with self._app_lock:
+            await asyncio.to_thread(self.chromecast.quit_app)
 
     def _blank_page(self) -> None:
         """Empty the page before quitting DashCast: quit_app swallows its
@@ -1375,11 +1402,6 @@ class PlayerCore:
             if item is not None:
                 self._snapshot_position(item)
                 item.status = "ready"
-        self._cancel_night_timer()
-        self._blank_page()
-        self.screen = None
-        self._loaded_video_id = None
-        self.state = "idle"
         log.info("No playback for %.0fs: closing the receiver app", close_after_s)
-        await asyncio.to_thread(self.chromecast.quit_app)
-        self._inactive_since = None
+        self._close_app()
+        await self._quit_task

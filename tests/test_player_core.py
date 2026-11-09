@@ -3156,3 +3156,60 @@ async def test_tui_play_of_unready_row_flashes_not_ready_on_the_screen():
     assert r.did_action is False and r.reason == "no_playable_item"
     assert pc.state == "paused"
     assert screens(drain(q))[-1]["view"]["flash"] == "Non ancora pronto"
+
+
+@pytest.mark.asyncio
+async def test_power_off_during_a_pending_launch_never_opens_the_page():
+    """Spegni while the page is still being opened (here: before discovery):
+    the launch must not go on and open DashCast after the power-off."""
+    library = _make_library(["a", "b"])
+    library.cursor_video_id = "a"
+    pc, receiver, pages, cc = _player_without_page(library)
+    discovered = asyncio.Event()
+    cc.wait_for_connection = AsyncMock(side_effect=discovered.wait)
+    r = await pc.next()
+    assert r.reason == "launching"
+    await _select_command(pc, "power")
+
+    await pc.toggle()
+    discovered.set()
+    await pc._quit_task
+    await _launched(pc)
+
+    cc.quit_app.assert_called_once()
+    cc.launch_receiver.assert_not_called()
+    assert pc.state == "idle" and pc.screen is None
+
+
+@pytest.mark.asyncio
+async def test_key_during_power_off_waits_for_the_quit_then_relaunches():
+    """A key while quit_app is still running: the page that is closing must
+    not count as open, and the new launch comes after the quit."""
+    import threading
+
+    pc, receiver, q, cc, library = await _paused_on(["a", "b"], "b", 30.0)
+    calls = []
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def quit_app():
+        release.wait(5)
+        calls.append("quit")
+
+    def launch_receiver(url):
+        calls.append("launch")
+        loop.call_soon_threadsafe(receiver.subscribe)
+
+    cc.quit_app = MagicMock(side_effect=quit_app)
+    cc.launch_receiver = MagicMock(side_effect=launch_receiver)
+    await _select_command(pc, "power")
+    await pc.toggle()
+
+    r = await pc.next()
+
+    assert r.did_action and r.reason == "launching"
+    release.set()
+    await pc._quit_task
+    await _launched(pc)
+    assert calls == ["quit", "launch"]
+    assert pc.screen is not None and pc.state == "idle"
