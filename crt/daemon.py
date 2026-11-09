@@ -31,6 +31,10 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# How long shutdown waits for deletions still finishing in the background
+# (YouTube delete): well inside `docker stop`'s 10 s before SIGKILL.
+SHUTDOWN_DELETE_TIMEOUT_S = 5.0
+
 
 def cleanup_temp_files(library: LibraryStore) -> None:
     """Remove cache files older than FILE_TTL_HOURS that no library item uses.
@@ -219,6 +223,7 @@ async def main_async() -> None:
     log.info("Shutdown signal received")
 
     server.should_exit = True
+    await player.finish_deletes(timeout_s=SHUTDOWN_DELETE_TIMEOUT_S)
     for t in tasks:
         if not t.done():
             t.cancel()

@@ -3219,3 +3219,23 @@ async def test_key_during_power_off_waits_for_the_quit_then_relaunches():
     await _launched(pc)
     assert calls == ["quit", "launch"]
     assert pc.screen is not None and pc.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_finish_deletes_waits_for_the_youtube_delete():
+    """Shutdown right after an acknowledged Elimina: the YouTube delete must
+    still run, or the next sync brings the video back."""
+    import time
+
+    library = _make_library(["A", "B"])
+    library.cursor_video_id = "A"
+    library.items[0].playlist_item_id = "PLI-A"
+    yt = MagicMock()
+    yt.delete_playlist_item = MagicMock(side_effect=lambda _id: time.sleep(0.1))
+    pc, *_ = _make_player(library, youtube_client=yt)
+
+    await pc.delete_current()
+    await pc.finish_deletes(timeout_s=5)
+
+    yt.delete_playlist_item.assert_called_once_with("PLI-A")
+    assert not pc._delete_tasks

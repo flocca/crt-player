@@ -1015,6 +1015,17 @@ class PlayerCore:
         self._delete_tasks.add(task)
         task.add_done_callback(self._delete_tasks.discard)
 
+    async def finish_deletes(self, timeout_s: float) -> None:
+        """Wait, up to `timeout_s`, for the deletions still in the background
+        (daemon shutdown): an Elimina already acknowledged must reach YouTube,
+        or the next sync brings the video back."""
+        if not self._delete_tasks:
+            return
+        log.info("Waiting for %d deletion(s) before shutdown", len(self._delete_tasks))
+        _, pending = await asyncio.wait(set(self._delete_tasks), timeout=timeout_s)
+        if pending:
+            log.warning("%d deletion(s) not finished at shutdown", len(pending))
+
     async def _finish_delete(self, item: QueueItem) -> None:
         """Background part of a deletion: cache files, then the YouTube
         playlist entry. Failures are only logged."""
