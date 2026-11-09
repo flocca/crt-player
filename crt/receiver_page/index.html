@@ -139,7 +139,7 @@
 
   // ─── Teletext grid ─────────────────────────────────────────────
 
-  var COLS = 40, ROWS = 18, PER_PAGE = 10, BAR_COLS = 14;
+  var COLS = 40, ROWS = 18, PER_PAGE = 10;
   var C = {
     white: "#f0f0f0", yellow: "#f0f000", cyan: "#00f0f0", green: "#00e000",
     magenta: "#f000f0", red: "#f00000", blue: "#2020ff", grey: "#a0a0a0", black: "#000"
@@ -210,9 +210,10 @@
     if (v.paused_position !== null && v.paused_position !== undefined) {
       var dur = v.paused_duration > 0 ? v.paused_duration : knownDuration();
       var pos = v.paused_position;
-      var filled = dur > 0 ? Math.max(0, Math.min(BAR_COLS, Math.round(BAR_COLS * pos / dur))) : 0;
-      return [seg("▌▌ " + fmt(pos) + " / " + (dur > 0 ? fmt(dur) : "--:--") + "  " +
-        repeat("▓", filled) + repeat("░", BAR_COLS - filled))];
+      var head = "▌▌ " + fmt(pos) + " / " + (dur > 0 ? fmt(dur) : "--:--") + "  ";
+      var bar = COLS - len(head);  // up to column 40, like the rows' right field
+      var filled = dur > 0 ? Math.max(0, Math.min(bar, Math.round(bar * pos / dur))) : 0;
+      return [seg(head + repeat("▓", filled) + repeat("░", bar - filled))];
     }
     return [seg(v.status || " ")];
   }

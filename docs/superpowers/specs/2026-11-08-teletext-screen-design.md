@@ -109,7 +109,7 @@ Dieci video per sottopagina, pagine fisse come nel teletext (1-10, 11-20, ...). 
 
 ### Riga 4: stato del player
 
-- **In pausa**: il video in pausa, sempre, anche se l'evidenziazione è su un'altra sottopagina: `▌▌ 12:34 / 45:00  ▓▓▓▓▓░░░░░░░░░` (barra di 14 colonne a blocchi). La durata viene dalla libreria (`QueueItem.duration`, vedi "Durata nella libreria"), e dal `<video>` della pagina finché la libreria non la conosce.
+- **In pausa**: il video in pausa, sempre, anche se l'evidenziazione è su un'altra sottopagina: `▌▌ 12:34 / 45:00  ▓▓▓▓▓▓▓░░░░░░░░░░░░░░░` (barra a blocchi fino alla colonna 40, come la colonna destra delle righe: chiesto da Giacomo sul TV il 2026-11-09; con i tempi in `h:mm:ss` si accorcia). La durata viene dalla libreria (`QueueItem.duration`, vedi "Durata nella libreria"), e dal `<video>` della pagina finché la libreria non la conosce.
 - **Da fermo**: l'avviso d'arrivo per 5 secondi (vedi "Arrivo"), poi vuota.
 - **Playlist vuota**: `La playlist è vuota`, fisso.
 
@@ -156,7 +156,7 @@ Il cambio di riga è secco: nessuna transizione. Tornando sulla riga del video i
 P100 CRT QUEUE  1/2  dom 08 nov 21:34:05   P100 CRT QUEUE  1/2  dom 08 nov 21:36:12
 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄   ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
 PLAYLIST                        19 video   PLAYLIST                        19 video
-▌▌ 02:52 / 11:39  ▓▓▓▓░░░░░░░░░░
+▌▌ 02:52 / 11:39  ▓▓▓▓▓░░░░░░░░░░░░░░░░░
 ○ 01 Un trucco per evitare di …   -03:12   ○ 01 Un trucco per evitare di …   -03:12
 ✓ 02 Caracciolo a Otto e Mezzo…    12:05   ✓ 02 Caracciolo a Otto e Mezzo…    12:05
 ○ 03 Classifico le fonti di PR…   -07:40   ○ 03 Classifico le fonti di PR…   -07:40

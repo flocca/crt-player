@@ -143,6 +143,15 @@ def test_row_4_keeps_the_duration_across_a_reload():
     assert "knownDuration()" in line
 
 
+def test_row_4_bar_runs_to_the_right_edge():
+    """The bar takes the columns the times leave, up to column 40 like the
+    rows' right field (asked on the TV, 2026-11-09)."""
+    src = PAGE.read_text()
+    line = _between(src, "function playerLine(", "function videoLine(")
+    assert "COLS - len(head)" in line
+    assert "BAR_COLS" not in src
+
+
 def test_video_rows_right_field_is_8_columns():
     """8 columns fit -1:05:00; the title gives up the column."""
     src = PAGE.read_text()
