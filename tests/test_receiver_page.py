@@ -152,6 +152,14 @@ def test_row_4_bar_runs_to_the_right_edge():
     assert "BAR_COLS" not in src
 
 
+def test_row_4_shows_the_arrival_notice_over_the_paused_time():
+    """Paused, the sync removes the highlighted row: "Video rimosso dalla
+    playlist" takes row 4 for its 5 s, then the time and bar come back."""
+    src = PAGE.read_text()
+    line = _between(src, "function playerLine(", "function videoLine(")
+    assert line.index("v.status") < line.index("v.paused_position")
+
+
 def test_video_rows_right_field_is_8_columns():
     """8 columns fit -1:05:00; the title gives up the column."""
     src = PAGE.read_text()

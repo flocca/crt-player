@@ -207,6 +207,9 @@
   }
 
   function playerLine(v) {
+    // An arrival notice ("Video rimosso dalla playlist") takes the row for
+    // its 5 s, over the paused time too.
+    if (v.status) { return [seg(v.status)]; }
     if (v.paused_position !== null && v.paused_position !== undefined) {
       var dur = v.paused_duration > 0 ? v.paused_duration : knownDuration();
       var pos = v.paused_position;
@@ -215,7 +218,7 @@
       var filled = dur > 0 ? Math.max(0, Math.min(bar, Math.round(bar * pos / dur))) : 0;
       return [seg(head + repeat("▓", filled) + repeat("░", bar - filled))];
     }
-    return [seg(v.status || " ")];
+    return [seg(" ")];
   }
 
   function videoLine(r) {
