@@ -229,14 +229,30 @@
     return [seg(text, ROW_COLOURS[r.kind] || C.white)];
   }
 
-  function commandLine(entries) {
+  // The commands from `first` (the daemon scrolls by whole commands), with
+  // "…" on the cut sides: before the first command when some are hidden on
+  // the left, and on column 40 when the row runs past it. The daemon keeps
+  // the selected command clear of both (_fits in crt/screen.py).
+  function commandLine(entries, first) {
     var segs = [];
-    (entries || []).forEach(function (e, i) {
+    if (first > 0) { segs.push(seg("…")); }
+    (entries || []).slice(first).forEach(function (e, i) {
       if (i > 0) { segs.push(seg(" ")); }
       var col = COMMAND_COLOURS[e.key] || C.white;
       segs.push(e.selected ? seg(e.label, C.black, col) : seg(e.label, col));
     });
-    return segs.length ? segs : [seg(" ")];
+    if (!segs.length) { return [seg(" ")]; }
+    var used = 0;
+    segs.forEach(function (s) { used += len(s.t); });
+    if (used <= COLS) { return segs; }
+    var cut = [], room = COLS - 1;
+    for (var i = 0; i < segs.length && room > 0; i++) {
+      var c = chars(segs[i].t).slice(0, room);
+      cut.push(seg(c.join(""), segs[i].fg, segs[i].bg));
+      room -= c.length;
+    }
+    cut.push(seg("…"));
+    return cut;
   }
 
   function bottomLine(v) {
@@ -272,9 +288,8 @@
       L.push({ s: rows[i] ? videoLine(rows[i]) : [seg(" ")] });
     }
     L.push({ s: [seg(" ")] });
-    var cmds = v.commands || [[], []];
-    L.push({ s: commandLine(cmds[0]) });
-    L.push({ s: commandLine(cmds[1]) });
+    L.push({ s: commandLine(v.commands, v.command_first || 0) });
+    L.push({ s: [seg(" ")] });
     L.push({ s: bottomLine(v) });
     return L;
   }

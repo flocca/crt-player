@@ -177,3 +177,24 @@ def test_paused_load_is_muted_before_its_pipeline_starts():
     assert mute < load.index("main.load()")
     start = _between(src, "function startAt(", "function load(")
     assert start.index("main.muted = false") < start.index("main.play()")
+
+
+def test_commands_are_one_row_scrolled_by_the_daemon():
+    """One command row (16) drawn from the daemon's command_first. Row 17
+    stays empty, so the status row is still the 18th."""
+    src = PAGE.read_text()
+    body = _between(src, "function lines(", "function lineNode(")
+    assert body.count("commandLine(") == 1
+    assert "v.command_first" in body
+    cmd = body.index("commandLine(")
+    assert body.index('L.push({ s: [seg(" ")] });', cmd) < body.index("bottomLine(v)")
+
+
+def test_command_row_marks_its_cut_sides_with_an_ellipsis():
+    """Same rule as crt/screen.py's _fits: "…" before the first command when
+    scrolled, and "…" on column 40 when the row runs past it."""
+    src = PAGE.read_text()
+    line = _between(src, "function commandLine(", "function bottomLine(")
+    assert 'if (first > 0) { segs.push(seg("…")); }' in line
+    assert "if (used <= COLS) { return segs; }" in line
+    assert "room = COLS - 1" in line

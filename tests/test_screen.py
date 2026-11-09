@@ -3,6 +3,7 @@ import pytest
 from crt import config
 from crt.library_store import QueueItem
 from crt.screen import (
+    COLUMNS,
     CONFIRM_DELETE,
     EMPTY_PLAYLIST,
     Screen,
@@ -173,7 +174,8 @@ def test_selection_falls_back_to_cursor_then_first():
 def test_empty_library_view():
     v = view(Screen(None), [])
     assert v["rows"] == [] and v["status"] == EMPTY_PLAYLIST
-    assert v["commands"][0] == [] and v["background"] == "black" and v["preview"] is None
+    assert [c["key"] for c in v["commands"]] == ["calibrate", "loop", "sync", "power"]
+    assert v["background"] == "black" and v["preview"] is None
     assert v["help"] == "OK = Calibra" and v["pages"] == 1 and v["count"] == 0
 
 
@@ -204,9 +206,10 @@ def test_paused_position_and_state():
     v = view(Screen("a", "a"), lib, "a")
     assert v["state"] == "paused" and v["paused_position"] == 30
     assert v["paused_duration"] == 552
-    assert [c["key"] for c in v["commands"][0]] == ["resume", "delete", "stop"]
-    assert [c["key"] for c in v["commands"][1]] == ["calibrate", "loop", "sync", "power"]
-    assert v["commands"][0][0]["label"] == "Riprendi" and v["commands"][0][0]["selected"]
+    assert [c["key"] for c in v["commands"]] == [
+        "resume", "delete", "stop", "calibrate", "loop", "sync", "power"]
+    assert v["commands"][0]["label"] == "Riprendi" and v["commands"][0]["selected"]
+    assert v["command_first"] == 0
     assert v["help"] == "OK = Riprendi"
     v = view(Screen("a"), lib, "a")
     assert v["state"] == "stopped" and v["paused_position"] is None
@@ -243,3 +246,106 @@ def test_paused_duration_is_none_while_unknown():
     lib = items(("a", "paused"))
     lib[0].playback_position = 30
     assert view(Screen("a", "a"), lib, "a")["paused_duration"] is None
+
+
+def _visible(v):
+    return [c["label"] for c in v["commands"][v["command_first"]:]]
+
+
+def _drawn(v):
+    """The command row as the page draws it (commandLine in index.html): a
+    "…" before the first command when the row is scrolled, and past column
+    40 the row is cut with "…" on its last column."""
+    row = ("…" if v["command_first"] > 0 else "") + " ".join(_visible(v))
+    if len(row) > COLUMNS:
+        row = row[:COLUMNS - 1] + "…"
+    return row
+
+
+def _selected_is_whole(v):
+    first = v["command_first"]
+    sel = next(i for i, c in enumerate(v["commands"]) if c["selected"])
+    if sel < first:
+        return False
+    labels = [c["label"] for c in v["commands"]]
+    start = (1 if first > 0 else 0) + sum(len(label) + 1 for label in labels[first:sel])
+    return _drawn(v)[start:start + len(labels[sel])] == labels[sel]
+
+
+def test_command_row_scrolls_only_when_the_selection_runs_past_the_edge():
+    """One row of 46 columns: Spegni is past column 40, so reaching it
+    scrolls by whole commands; going back left scrolls only at Riprendi."""
+    lib = items(("a", "paused"), ("b", "ready"))
+    s = Screen("a", "a")
+    firsts = []
+    for _ in range(6):
+        s.move_command(lib, +1)
+        firsts.append(view(s, lib, "a")["command_first"])
+    assert firsts == [0, 0, 0, 0, 0, 1]
+    v = view(s, lib, "a")
+    assert _drawn(v) == "…Elimina Stop Calibra Loop Sync Spegni"
+    firsts = []
+    for _ in range(6):
+        s.move_command(lib, -1)
+        firsts.append(view(s, lib, "a")["command_first"])
+    assert firsts == [1, 1, 1, 1, 1, 0]
+
+
+def test_command_row_wraps_back_to_the_start():
+    lib = items(("a", "paused"))
+    s = Screen("a", "a")
+    s.move_command(lib, -1)  # from Riprendi to Spegni
+    assert view(s, lib, "a")["command_first"] == 1
+    s.move_command(lib, +1)  # and back to Riprendi
+    assert view(s, lib, "a")["command_first"] == 0
+
+
+def test_row_change_scrolls_the_command_row_back():
+    lib = items(("a", "paused"), ("b", "ready"))
+    s = Screen("a", "a")
+    s.move_command(lib, -1)
+    assert view(s, lib, "a")["command_first"] == 1
+    s.move(lib, +1)
+    assert view(s, lib, "a")["command_first"] == 0
+
+
+@pytest.mark.parametrize("loaded, position", [("a", 30), (None, 0), (None, 30)])
+def test_selected_command_is_always_whole_on_screen(loaded, position):
+    """Paused or stopped, Riprendi or Riproduci, both directions."""
+    lib = items(("a", "paused" if loaded else "ready"), ("b", "ready"))
+    lib[0].playback_position = position
+    s = Screen("a", loaded)
+    n = len(s.commands(lib))
+    for delta in [+1] * (n + 2) + [-1] * (n + 2):
+        s.move_command(lib, delta)
+        v = view(s, lib, "a")
+        assert len(_drawn(v)) <= COLUMNS
+        assert _selected_is_whole(v), _drawn(v)
+
+
+def test_command_row_marks_the_cut_sides_with_an_ellipsis():
+    lib = items(("a", "paused"), ("b", "ready"))
+    assert _drawn(view(Screen("a", "a"), lib, "a")) == "Riprendi Elimina Stop Calibra Loop Sync…"
+    assert _drawn(view(Screen("b"), lib, "a")) == "Riproduci Elimina Calibra Loop Sync Spe…"
+    s = Screen("b")
+    s.move_command(lib, -1)
+    assert _drawn(view(s, lib, "a")) == "…Elimina Calibra Loop Sync Spegni"
+
+
+def test_right_ellipsis_never_covers_the_selected_command():
+    """Paused on a with b highlighted (Riproduci): Sync ends on column 40,
+    where the "…" goes, so selecting it scrolls."""
+    lib = items(("a", "paused"), ("b", "ready"))
+    s = Screen("b", "a")
+    for _ in range(5):
+        s.move_command(lib, +1)
+    v = view(s, lib, "a")
+    assert v["commands"][5]["label"] == "Sync" and v["commands"][5]["selected"]
+    assert _drawn(v) == "…Elimina Stop Calibra Loop Sync Spegni"
+
+
+def test_empty_library_command_row_never_scrolls():
+    s = Screen(None)
+    for _ in range(4):
+        s.move_command([], +1)
+        assert view(s, [])["command_first"] == 0

@@ -5,7 +5,9 @@ instance while the player is paused or stopped, moves it on next/prev and
 sends `view()` to the receiver page.
 
 The selection is a video of the playlist; a second axis walks the commands
-(two rows: video commands, then player commands).
+(one row: video commands, then player commands). The row is wider than the
+grid: it scrolls sideways by whole commands to keep the selected one on screen,
+and the page marks the cut sides with "…".
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from typing import Callable
 from crt.library_store import QueueItem
 
 ROWS_PER_PAGE = 10
+COLUMNS = 40  # the page's grid width (COLS in crt/receiver_page/index.html)
 PREVIEW_WINDOW_S = 20.0
 
 LABELS = {
@@ -41,8 +44,23 @@ _PREFIXES = {
     "encoding": "Codifica · ",
     "error": "Errore nel video · ",
 }
-_VIDEO_COMMANDS = ("resume", "delete", "stop")
 _PLAYER_COMMANDS = ["calibrate", "loop", "sync", "power"]
+
+
+def _width(labels: list[str]) -> int:
+    """Columns taken by these commands drawn one space apart."""
+    return sum(len(label) for label in labels) + len(labels) - 1
+
+
+def _fits(labels: list[str], first: int, sel: int) -> bool:
+    """Whether the selected command is whole on the row drawn from `first`.
+    The page (commandLine) puts a "…" before the first command when the row
+    is scrolled, and cuts the row past column 40 with "…" on its last column,
+    which must not cover the selected command."""
+    left = 1 if first > 0 else 0
+    if left + _width(labels[first:]) <= COLUMNS:
+        return True
+    return left + _width(labels[first:sel + 1]) <= COLUMNS - 1
 
 
 def preview_window(position: float) -> tuple[float, float]:
@@ -98,6 +116,7 @@ class Screen:
         self.selected_video_id = selected_video_id
         self.loaded_video_id = loaded_video_id
         self.command_index = 0
+        self.command_first = 0  # first command drawn on the row (see _scroll)
         self.confirm_video_id: str | None = None
         self.flash: str | None = None
         self.flash_kind = "info"  # "info" | "error"
@@ -157,6 +176,16 @@ class Screen:
     def _label(self, key: str, items: list[QueueItem]) -> str:
         return self.resume_label(items) if key == "resume" else LABELS[key]
 
+    def _scroll(self, labels: list[str], sel: int) -> int:
+        """First command drawn: the row scrolls only when the selected command
+        would be cut, left as far as the selection, right by whole commands
+        until it fits. The commands after it may run past the edge."""
+        first = min(self.command_first, sel)
+        while first < sel and not _fits(labels, first, sel):
+            first += 1
+        self.command_first = first
+        return first
+
     def view(
         self,
         items: list[QueueItem],
@@ -183,13 +212,14 @@ class Screen:
             rows.append(row)
 
         keys = self.commands(items)
-        sel_key = keys[self._index(items)]
+        cmd_idx = self._index(items)
+        sel_key = keys[cmd_idx]
+        labels = [self._label(k, items) for k in keys]
         entries = [
-            {"key": k, "label": self._label(k, items), "selected": k == sel_key}
-            for k in keys
+            {"key": k, "label": label, "selected": k == sel_key}
+            for k, label in zip(keys, labels)
         ]
-        video_cmds = [e for e in entries if e["key"] in _VIDEO_COMMANDS]
-        player_cmds = [e for e in entries if e["key"] not in _VIDEO_COMMANDS]
+        command_first = self._scroll(labels, cmd_idx)
 
         loaded = next((i for i in items if i.video_id == self.loaded_video_id), None)
         selected = self._selected_item(items)
@@ -221,7 +251,8 @@ class Screen:
             "paused_position": loaded.playback_position if loaded else None,
             "paused_duration": (loaded.duration or None) if loaded else None,
             "status": status,
-            "commands": [video_cmds, player_cmds],
+            "commands": entries,
+            "command_first": command_first,
             "flash": flash,
             "flash_kind": flash_kind,
             "help": "OK = " + self._label(sel_key, items),

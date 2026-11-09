@@ -354,8 +354,8 @@ def _selected_row(view):
     return next(r for r in view["rows"] if r["selected"])
 
 
-def _labels(view, line=0):
-    return [c["label"] for c in view["commands"][line]]
+def _labels(view):
+    return [c["label"] for c in view["commands"]]
 
 
 @pytest.mark.asyncio
@@ -376,8 +376,7 @@ async def test_pause_opens_screen_on_loaded_video():
     assert view["state"] == "paused"
     assert [r["selected"] for r in view["rows"]] == [False, True, False]
     assert _selected_row(view)["symbol"] == "▶"
-    assert _labels(view) == ["Riprendi", "Elimina", "Stop"]
-    assert _labels(view, 1) == ["Calibra", "Loop", "Sync", "Spegni"]
+    assert _labels(view) == ["Riprendi", "Elimina", "Stop", "Calibra", "Loop", "Sync", "Spegni"]
     assert view["background"] == "frame"
     assert view["help"] == "OK = Riprendi"
     assert result.did_action

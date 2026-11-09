@@ -46,7 +46,7 @@ Le due facce differiscono solo in quattro cose: cosa c'è dietro la riga del vid
 
 ## Non obiettivi
 
-- Pagina 200 "STATO" (messaggi d'errore dei download, coda, Chromecast, prossimo sync): dopo. Nella seconda riga dei comandi resta il posto per un futuro `Stato`.
+- Pagina 200 "STATO" (messaggi d'errore dei download, coda, Chromecast, prossimo sync): dopo. Un futuro `Stato` si aggiunge in fondo alla riga dei comandi, che scorre.
 - Etichette del menu Comandi della FAP (`flipper_app/crt_remote_app.c:51-55`: "Calibrate", "Toggle loop", "Sync now") e della home (`< -15s`, `> +30s`): restano. Si apre una issue da fare al prossimo riflash (`Calibra`, `Loop`, `Sync`, home con "< > comandi").
 - Zapping a canali (concetto B delle consulenze): messo da parte.
 - Cambiare cosa fanno i tasti durante la riproduzione (Su/Giù passano al video pronto adiacente come oggi, Sinistra/Destra `-15s`/`+30s`, OK mette in pausa).
@@ -89,8 +89,8 @@ Estetica teletext generica (standard ETS 300 706, non un servizio reale): monosp
 | 4 | Riga di stato del player (vedi sotto). |
 | 5-14 | Dieci righe di video. |
 | 15 | Vuota. |
-| 16 | Prima riga comandi: comandi sul video. |
-| 17 | Seconda riga comandi: comandi del player. |
+| 16 | Riga dei comandi: prima quelli sul video, poi quelli del player. |
+| 17 | Vuota. |
 | 18 | Riga verde: stato del sistema, aiuto, avvisi brevi e conferma. |
 
 ### Righe dei video
@@ -126,12 +126,12 @@ Dieci video per sottopagina, pagine fisse come nel teletext (1-10, 11-20, ...). 
 
 ### Comandi
 
-Due righe fisse, sempre nella stessa posizione:
+Una riga sola, la 16 (chiesto da Giacomo il 2026-11-09; prima erano due righe, video e player), con i comandi separati da uno spazio:
 
-- **Riga 16, comandi sul video evidenziato**: `Riprendi`/`Riproduci`, `Elimina`, e `Stop` solo in pausa.
-- **Riga 17, comandi del player**: `Calibra`, `Loop`, `Sync`, `Spegni`.
+- **Comandi sul video evidenziato**: `Riprendi`/`Riproduci`, `Elimina`, e `Stop` solo in pausa.
+- **Comandi del player**: `Calibra`, `Loop`, `Sync`, `Spegni`.
 
-Sinistra e Destra percorrono i comandi come un'unica sequenza (dall'ultimo della riga 16 si passa al primo della 17 e viceversa). La sequenza ricomincia dall'inizio dopo l'ultimo comando *(scelta di Claude: coerente con Su/Giù)*. `Stop` compare e scompare senza spostare la riga 17.
+In pausa la riga è lunga 46 colonne (47 con `Riproduci`), da fermo 41 o 42: sborda a destra, quello che passa la colonna 40 è tagliato e la colonna 40 diventa `…`, come nei titoli troncati (`Riproduci Elimina Calibra Loop Sync Spe…`). Sinistra e Destra percorrono i comandi in sequenza, e la riga scorre solo quando il comando selezionato verrebbe tagliato o coperto dal `…`: verso destra di comandi interi, finché il selezionato sta tutto (su `Spegni` sparisce `Riprendi`); verso sinistra solo quando la selezione supera il primo comando mostrato *(scelte di Claude)*. Quando la riga è scorsa, un `…` prima del primo comando dice che a sinistra ce ne sono altri (`…Elimina Stop Calibra Loop Sync Spegni`). I due `…` chiesti da Giacomo il 2026-11-09. Il conto lo fa il daemon (`Screen.command_first`, con `COLUMNS = 40` uguale a `COLS` della pagina), la pagina disegna la riga da lì. La sequenza ricomincia dall'inizio dopo l'ultimo comando *(scelta di Claude: coerente con Su/Giù)*, e la riga torna all'inizio con lei e a ogni cambio di riga. `Stop` che compare o scompare sposta i comandi del player sulla stessa riga.
 
 **Colori fissi per comando** (nella prova erano per posizione e scalavano quando mancava `Stop`: va corretto): `Riprendi`/`Riproduci` verde, `Elimina` rosso, `Stop` giallo, `Calibra` ciano, `Loop` magenta, `Sync` blu, `Spegni` bianco. Il comando selezionato è nero su fondo del suo colore, gli altri sono colorati su nero.
 
