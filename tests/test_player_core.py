@@ -3239,3 +3239,21 @@ async def test_finish_deletes_waits_for_the_youtube_delete():
 
     yt.delete_playlist_item.assert_called_once_with("PLI-A")
     assert not pc._delete_tasks
+
+
+@pytest.mark.asyncio
+async def test_delete_while_playing_targets_the_loaded_video_not_the_cursor():
+    """The sync thread removed the video on air and moved the cursor to its
+    successor; its stop_and_remove has not run yet. delete/current must not
+    delete the successor, which was never on the TV."""
+    library = _make_library(["a", "b"])
+    library.cursor_video_id = "a"
+    pc, receiver, q, cc = _make_player(library)
+    await pc.play("a")
+    library.remove(library.items[0].id)
+    library.cursor_video_id = "b"
+
+    r = await pc.delete_request()
+
+    assert r.deleted_video_id is None
+    assert [i.video_id for i in library.items] == ["b"]

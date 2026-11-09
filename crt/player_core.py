@@ -966,16 +966,23 @@ class PlayerCore:
         return self._opened_result()
 
     async def delete_current(self) -> str | None:
-        """Delete the cursor video at once (/control/delete/current while
-        playing): stop whatever is on the page first. Returns the deleted
-        video_id (None if there was no cursor video). Never suspends: the
-        cache unlinks and the YouTube delete finish in the background."""
-        item = self.library.cursor_item()
-        if item is None:
-            log.info("delete_current: no cursor item, skipping")
-            return None
+        """Delete the video on the page at once (/control/delete/current while
+        playing), stopping it first; with nothing loaded, the cursor video.
+        Returns the deleted video_id (None if there was none). Never suspends:
+        the cache unlinks and the YouTube delete finish in the background."""
         if self.state in ("playing", "paused", "calibrating"):
+            # Not the cursor: the sync can have removed the video on air and
+            # moved the cursor before its stop_and_remove runs.
+            item = self._loaded_item()
+            if item is None:
+                log.info("delete_current: the video on air already left the library, skipping")
+                return None
             await self.stop()
+        else:
+            item = self.library.cursor_item()
+            if item is None:
+                log.info("delete_current: no cursor item, skipping")
+                return None
         self._remove(item)
         return item.video_id
 
