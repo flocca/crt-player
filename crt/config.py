@@ -105,3 +105,9 @@ def cached_encoded_filename(video_id_or_base: str) -> str:
     else:
         suffix = ""
     return f"{video_id_or_base}_pal_{SCALE_MODE}{suffix}.mp4"
+
+
+def preview_filename(encoded_filename: str) -> str:
+    """Name of the audio-less copy of an encoded file ("X.mp4" -> "X_noaudio.mp4")."""
+    base, ext = os.path.splitext(encoded_filename)
+    return f"{base}_noaudio{ext}"

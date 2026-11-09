@@ -27,6 +27,7 @@ class QueueItem:
     playback_position: float = 0.0
     downloaded_path: str | None = None
     playlist_item_id: str | None = None
+    duration: float = 0.0  # seconds, 0 while unknown
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +42,7 @@ class QueueItem:
             "playback_position": self.playback_position,
             "downloaded_path": self.downloaded_path,
             "playlist_item_id": self.playlist_item_id,
+            "duration": self.duration,
         }
 
     def cache_file_present(self) -> bool:
@@ -55,13 +57,40 @@ class QueueItem:
             os.path.join(config.TEMP_DIR, self.filename)
         )
 
+    def preview_filename(self) -> str | None:
+        """Name of the audio-less preview copy, None without an encoded file."""
+        return config.preview_filename(self.filename) if self.filename else None
+
+    def preview_present(self) -> bool:
+        """True if the audio-less preview copy exists on disk."""
+        name = self.preview_filename()
+        return bool(name) and os.path.isfile(os.path.join(config.TEMP_DIR, name))
+
+    def delete_files(self) -> None:
+        """Delete this item's files: the encoded MP4, its preview copy and the
+        original download. Used by the sync removal and by Elimina. Blocking:
+        call it via asyncio.to_thread from async code."""
+        paths = []
+        if self.filename:
+            paths += [os.path.join(config.TEMP_DIR, name)
+                      for name in (self.filename, config.preview_filename(self.filename))]
+        if self.downloaded_path:
+            paths.append(self.downloaded_path)
+        for path in paths:
+            if os.path.isfile(path):
+                try:
+                    os.unlink(path)
+                    log.debug("Deleted %s", path)
+                except OSError as e:
+                    log.warning("Failed to delete %s: %s", path, e)
+
     def requeue(self) -> None:
         """Reset this item to a fresh 'queued' state so the pipeline rebuilds it.
 
         The single re-queue contract used by every self-heal path (issue #10):
         prepare_for_play, load_state, PlayerCore, and SyncEngine. Keeps
-        downloaded_path (so the encoder can reuse a complete raw download) and
-        playback_position (resume point survives a re-encode).
+        downloaded_path (so the encoder can reuse a complete raw download),
+        playback_position (resume point survives a re-encode) and duration.
         """
         self.status = "queued"
         self.filename = None
@@ -82,6 +111,7 @@ class QueueItem:
             playback_position=d.get("playback_position", 0.0),
             downloaded_path=d.get("downloaded_path"),
             playlist_item_id=d.get("playlist_item_id"),
+            duration=d.get("duration", 0.0),
         )
 
 

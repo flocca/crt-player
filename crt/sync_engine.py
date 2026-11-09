@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from datetime import datetime, timezone
 
-from crt import config
 from crt.library_store import LibraryStore, QueueItem
 from crt.youtube_client import PlaylistEntry, YouTubeAuthError, YouTubeClient
 
@@ -45,7 +43,7 @@ class SyncEngine:
         instead of waiting for an external signal.
 
         on_synced: callback() invoked on the event loop after every sync
-        attempt (the pause menu redraws its rows)."""
+        attempt (the teletext screen redraws its rows)."""
         self.library = library
         self.yt = yt_client
         self.playlist_id = playlist_id
@@ -174,7 +172,7 @@ class SyncEngine:
             except Exception:
                 log.exception("on_remove callback failed for %s", video_id)
 
-        self._delete_cache_files(item)
+        item.delete_files()
         self._retry_backoff.pop(video_id, None)
 
         cursor_was_here = self.library.cursor_video_id == video_id
@@ -221,18 +219,3 @@ class SyncEngine:
         if self._kick is not None:
             self._kick.set()
 
-    def _delete_cache_files(self, item: QueueItem) -> None:
-        if item.filename:
-            encoded = os.path.join(config.TEMP_DIR, item.filename)
-            if os.path.isfile(encoded):
-                try:
-                    os.unlink(encoded)
-                    log.debug("Deleted encoded: %s", encoded)
-                except OSError as e:
-                    log.warning("Failed to delete encoded %s: %s", encoded, e)
-        if item.downloaded_path and os.path.isfile(item.downloaded_path):
-            try:
-                os.unlink(item.downloaded_path)
-                log.debug("Deleted download: %s", item.downloaded_path)
-            except OSError as e:
-                log.warning("Failed to delete download %s: %s", item.downloaded_path, e)

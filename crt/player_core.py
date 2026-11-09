@@ -2,12 +2,17 @@
 
 Manages cursor navigation (next/prev/play), playback through the receiver
 page (opened on the Chromecast via DashCast, driven over ReceiverChannel),
-the pause menu, and autoplay/loop on playback completion. Does not download
-or encode — it consumes items that are already in status='ready' with a
-filename set.
+the teletext screen, and autoplay/loop on playback completion. Does not
+download or encode — it consumes items that are already in status='ready'
+with a filename set.
 
-States: idle | playing | paused | calibrating. While paused the TV shows the
-pause menu (PauseMenu) and next/prev/toggle/seek are reinterpreted for it.
+States: idle | playing | paused | calibrating. While paused, and while idle
+with the page open (the stopped screen), the TV shows the teletext screen
+(Screen): next/prev move the highlighted row, seek moves the command
+selection and toggle runs the selected command on that row. Idle without a
+screen is the closed page: a navigation key opens the stopped screen. After
+NIGHT_AFTER_S without keys the screen goes into its night phase; the first
+navigation key only wakes it.
 """
 from __future__ import annotations
 
@@ -24,8 +29,8 @@ from googleapiclient.errors import HttpError
 from crt import config
 from crt.chromecast_mgr import ChromecastManager
 from crt.library_store import LibraryStore, QueueItem
-from crt.pause_menu import PauseMenu
 from crt.receiver import ReceiverChannel
+from crt.screen import END_OF_QUEUE_NOTICE, NOT_READY_NOTICE, REMOVED_NOTICE, Screen
 from crt.youtube_client import YouTubeAuthError
 
 log = logging.getLogger(__name__)
@@ -33,7 +38,7 @@ log = logging.getLogger(__name__)
 # Seconds to wait for the page to connect after launching DashCast (in the
 # background: commands answer at once with reason "launching").
 RECEIVER_CONNECT_TIMEOUT_S = 20.0
-# Seconds a menu notice stays on screen.
+# Seconds a short notice stays on the screen's bottom line.
 NOTICE_S = 2.0
 # Stays until a key: the page cannot play the loaded file.
 MEDIA_ERROR_NOTICE = "Errore nel video"
@@ -47,6 +52,11 @@ RECEIVER_LOST_GRACE_S = 10.0
 # Seconds before the end where a seek stops: at exactly `duration` the
 # element resumes from 0 instead of ending.
 SEEK_END_MARGIN_S = 0.5
+# Seconds the arrival notice (end of queue, video removed) stays on the
+# stopped screen's status line.
+ARRIVAL_NOTICE_S = 5.0
+# Seconds without keys before the screen goes into its night phase.
+NIGHT_AFTER_S = 300.0
 
 
 @dataclass
@@ -55,12 +65,20 @@ class ActionResult:
     distinguish "action performed" from "silent no-op" (issue #6).
 
     reason is one of: None (action performed), "no_items", "no_playable_item",
-    "cursor_unchanged", "no_chromecast_session", or "launching" (performed;
-    the page is opening in the background and will pick it up).
+    "cursor_unchanged", "no_chromecast_session", "already_stopped" (stop
+    while already stopped: nothing to do), "woke" (performed: the key only
+    woke the screen from its night phase, its own action was not run), or
+    "launching" (performed; the page is opening in the background and will
+    pick it up). A closed-page key (toggle on an unready cursor or an empty
+    playlist, next/prev, delete) that opens the page acks "launching" even
+    when its own action did nothing; with the page already open it acks its
+    own outcome.
     """
 
     did_action: bool
     reason: str | None = None
+    # The video deleted at once by /control/delete/current while playing.
+    deleted_video_id: str | None = None
 
 
 # Convenience singletons for the common no-op outcomes.
@@ -70,6 +88,8 @@ _CURSOR_UNCHANGED = ActionResult(False, "cursor_unchanged")
 _NO_CC_SESSION = ActionResult(False, "no_chromecast_session")
 _DID_ACTION = ActionResult(True)
 _LAUNCHING = ActionResult(True, "launching")
+_ALREADY_STOPPED = ActionResult(False, "already_stopped")
+_WOKE = ActionResult(True, "woke")
 
 
 def _get_local_ip() -> str:
@@ -99,17 +119,41 @@ class PlayerCore:
         self.chromecast = chromecast
         self.receiver = receiver
         self.youtube = youtube_client
-        # Wired by the daemon to sync_engine.kick (menu command "Sync now").
+        # Wired by the daemon to sync_engine.kick (screen command "Sync").
         self.on_sync_request = on_sync_request
+        # Wired by the daemon: () -> (last sync time ISO or None, sync in
+        # error), shown on the screen's bottom line.
+        self.sync_info: Callable[[], tuple[str | None, bool]] | None = None
+        # Wired by the daemon to pipeline.cancel_prepare_for: a deleted video
+        # must not keep its download/encode running (issue #17).
+        self.on_delete: Callable[[str], None] | None = None
         self._clock = clock
-        self.menu: PauseMenu | None = None
-        self._notice_handle: asyncio.TimerHandle | None = None
+        # The teletext screen while paused or stopped (kept, hidden, under
+        # calibration). None while playing and when the page is closed.
+        self.screen: Screen | None = None
+        self._flash_handle: asyncio.TimerHandle | None = None
+        self._arrival_handle: asyncio.TimerHandle | None = None
+        # Notice clears waiting for the page to connect, by handle name
+        # ("flash", "arrival"): a notice counts its seconds on the TV.
+        self._pending_clears: dict[str, tuple[float, Callable[[], None]]] = {}
+        self._night_handle: asyncio.TimerHandle | None = None
+        self._quit_task: asyncio.Task | None = None
+        # DashCast launches and quits run one at a time, in the order asked.
+        # Each close (Spegni, idle close) bumps the epoch: a launch asked
+        # before it gives up instead of reopening the page.
+        self._app_lock = asyncio.Lock()
+        self._app_epoch = 0
+        self._launch_epoch = 0
+        # Background part of each deletion (cache unlinks, YouTube delete),
+        # kept referenced until done so it is not garbage-collected.
+        self._delete_tasks: set[asyncio.Task] = set()
         # Invoked when an item's encoded file is found missing on disk and the
         # item is re-queued (issue #10). Wired to pipeline.wake_prepare so the
         # prepare loop re-downloads/re-encodes it immediately.
         self._on_cache_miss = on_cache_miss
-        # When the player last became idle/paused (None while playing or
-        # calibrating, and after the idle close): drives watch_idle.
+        # When the player last became idle/paused, or the last key on the
+        # screen (None while playing or calibrating, and after the idle
+        # close): drives watch_idle.
         self._inactive_since: float | None = clock()
         self._state: str = "idle"
         self._calibration_timer: asyncio.TimerHandle | None = None
@@ -125,7 +169,7 @@ class PlayerCore:
         # The page reported a media error on the loaded video: resuming it
         # reloads the file instead of sending `play` to a broken element.
         self._load_failed = False
-        self._last_menu_view: dict | None = None
+        self._last_screen_view: dict | None = None
         receiver.set_callbacks(
             self._on_receiver_connect, self._on_receiver_disconnect,
             on_media_error=self._on_media_error,
@@ -143,6 +187,24 @@ class PlayerCore:
         else:
             self._inactive_since = None
         self._state = value
+
+    @property
+    def screen_state(self) -> str:
+        """"paused" or "stopped" while the screen is on the TV, else "none"."""
+        if self.screen is None:
+            return "none"
+        if self.state == "paused":
+            return "paused"
+        if self.state == "idle":
+            return "stopped"
+        return "none"
+
+    @property
+    def selected_video_id(self) -> str | None:
+        """The video highlighted on the TV screen, None when it is not shown."""
+        if self.screen_state == "none":
+            return None
+        return self.screen.selected_video_id
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -192,26 +254,199 @@ class PlayerCore:
             (i for i in self.library.items if i.video_id == self._loaded_video_id), None,
         )
 
-    def _send_menu(self, view: dict | None = None) -> None:
-        if self.menu is None:
-            return
-        if view is None:
-            view = self.menu.view(self.library.items, self.library.cursor_video_id)
-        self._last_menu_view = view
-        self.receiver.send({"type": "menu", "view": view})
+    def _preview_url(self, item: QueueItem) -> str | None:
+        """URL of the item's audio-less copy, None until it exists."""
+        if not item.preview_present():
+            return None
+        return self._media_url(item.preview_filename())
 
-    def refresh_menu(self) -> None:
-        """Redraw the open menu if the library changed under it (encode
+    def _screen_view(self) -> dict:
+        ids = {i.video_id for i in self.library.items}
+        selected = self.screen.selected_video_id
+        if selected is not None and selected not in ids:
+            # A library change took the highlighted row away (sync, delete):
+            # the view moves the highlight and the status line says why.
+            # Not a key: night, idle close and night timer are left alone.
+            self._set_arrival(self.screen, REMOVED_NOTICE)
+        sync_at, sync_error = self.sync_info() if self.sync_info is not None else (None, False)
+        return self.screen.view(
+            self.library.items,
+            self.library.cursor_video_id,
+            loop=self.library.loop_mode,
+            sync_at=sync_at,
+            sync_error=sync_error,
+            preview_url=self._preview_url,
+        )
+
+    def _screen_shown(self) -> bool:
+        """The screen is on the TV (not hidden under the calibration)."""
+        return self.screen is not None and self.state in ("paused", "idle")
+
+    def _send_screen(self, view: dict | None = None) -> None:
+        """Send the screen's view to the page, or hide it when there is no
+        screen."""
+        if view is None and self.screen is not None:
+            view = self._screen_view()
+        self._last_screen_view = view
+        self.receiver.send({"type": "screen", "view": view})
+
+    def _hide_screen(self) -> None:
+        """Take the screen off the TV (the model may stay, as under the
+        calibration)."""
+        self._last_screen_view = None
+        self.receiver.send({"type": "screen", "view": None})
+
+    def refresh_screen(self) -> None:
+        """Redraw the screen if the library changed under it (encode
         progress, a finished download, a sync). Wired by the daemon to the
         pipeline's updates and the end of each sync; must run on the loop."""
-        if self.menu is None:
+        if not self._screen_shown():
             return
-        view = self.menu.view(self.library.items, self.library.cursor_video_id)
-        if view != self._last_menu_view:
-            self._send_menu(view)
+        view = self._screen_view()
+        if view != self._last_screen_view:
+            self._send_screen(view)
 
-    def _video_ids(self) -> list[str]:
-        return [i.video_id for i in self.library.items]
+    def _show_stopped(
+        self,
+        *,
+        highlight: str | None,
+        arrival: str | None = None,
+        open_page: bool = False,
+        library_change: bool = False,
+    ) -> None:
+        """Unload the page's video and show the stopped screen on `highlight`,
+        with `arrival` on its status line for ARRIVAL_NOTICE_S.
+
+        `open_page`: a key with the page closed, launch it when it is not
+        open (it gets the screen when it subscribes). Without it a page that
+        is not open is never launched: another app may hold the TV; a
+        reconnect within the grace shows the screen, past it _drop_page
+        clears it.
+
+        `library_change`: no key was pressed (the sync removed the video):
+        a night phase carries over, the idle close and the night timer keep
+        counting from the last key."""
+        old = self.screen if self._screen_shown() else None
+        inactive_since = self._inactive_since
+        self._cancel_calibration_timer()
+        self._loaded_video_id = None
+        self.state = "idle"
+        self.receiver.send({"type": "blank"})
+        screen = Screen(highlight, None)
+        self.screen = screen
+        self._cancel_clear("arrival")
+        if arrival is not None:
+            self._set_arrival(screen, arrival)
+        if library_change and old is not None:
+            screen.night = old.night
+            self._inactive_since = inactive_since
+        else:
+            self._touch()
+        self._send_screen()
+        if open_page and not self._page_ready():
+            self._start_launch()
+
+    def _cancel_clear(self, name: str) -> None:
+        self._pending_clears.pop(name, None)
+        handle = getattr(self, f"_{name}_handle")
+        if handle is not None:
+            handle.cancel()
+            setattr(self, f"_{name}_handle", None)
+
+    def _clear_later(self, name: str, delay: float, clear: Callable[[], None]) -> None:
+        """Run `clear` `delay` seconds after the notice reaches the TV: from
+        now when the page is open, else from when it connects (a launch
+        takes longer than a short notice lasts)."""
+        self._cancel_clear(name)
+
+        def _run() -> None:
+            setattr(self, f"_{name}_handle", None)
+            clear()
+
+        if self._page_ready():
+            setattr(self, f"_{name}_handle", asyncio.get_running_loop().call_later(delay, _run))
+        else:
+            self._pending_clears[name] = (delay, _run)
+
+    def _start_pending_clears(self) -> None:
+        if not self._pending_clears:
+            return
+        loop = asyncio.get_running_loop()
+        for name, (delay, run) in self._pending_clears.items():
+            setattr(self, f"_{name}_handle", loop.call_later(delay, run))
+        self._pending_clears.clear()
+
+    def _set_arrival(self, screen: Screen, text: str) -> None:
+        """`text` on the screen's status line for ARRIVAL_NOTICE_S."""
+        screen.arrival = text
+
+        def _clear() -> None:
+            if self.screen is screen and screen.arrival == text:
+                screen.arrival = None
+                if self._screen_shown():
+                    self._send_screen()
+
+        self._clear_later("arrival", ARRIVAL_NOTICE_S, _clear)
+
+    def _touch(self) -> None:
+        """A key on the screen: the idle close counts from now, and the
+        night phase starts NIGHT_AFTER_S from now. Library redraws never
+        call this."""
+        self._cancel_night_timer()
+        if self.state in ("idle", "paused"):
+            self._inactive_since = self._clock()
+        if self._screen_shown():
+            self._night_handle = asyncio.get_running_loop().call_later(
+                NIGHT_AFTER_S, self._enter_night,
+            )
+
+    def _cancel_night_timer(self) -> None:
+        if self._night_handle is not None:
+            self._night_handle.cancel()
+            self._night_handle = None
+
+    def _enter_night(self) -> None:
+        self._night_handle = None
+        if not self._screen_shown() or self.screen.night:
+            return
+        self.screen.night = True
+        self._send_screen()
+        log.info("Screen asleep (night phase)")
+
+    def _wake_if_night(self) -> bool:
+        """Wake the screen from its night phase. True if it was asleep."""
+        if self.screen is None or not self.screen.night:
+            return False
+        self.screen.night = False
+        self._touch()
+        if self._screen_shown():
+            self._send_screen()
+        return True
+
+    def _explicit_command(self) -> None:
+        """A command chosen off the TV (Flipper Commands menu, TUI): it wakes
+        the screen and acts, and drops a pending delete confirmation."""
+        if self.screen is None:
+            return
+        woke = self._wake_if_night()
+        if self.screen.confirm_video_id is not None:
+            self._cancel_confirm()
+        if not woke:
+            self._touch()
+
+    def _open_closed_page(self) -> None:
+        """A navigation key while the page is closed: the stopped screen on
+        the cursor, opening the page."""
+        self._show_stopped(highlight=self.library.cursor_video_id, open_page=True)
+
+    def _opened_result(self) -> ActionResult:
+        return _DID_ACTION if self._page_ready() else _LAUNCHING
+
+    def _closed_result(self, fallback: ActionResult) -> ActionResult:
+        """Ack for a closed-page key whose own action did nothing: when the
+        page is being opened the key still performed something (launching),
+        otherwise `fallback`."""
+        return fallback if self._page_ready() else _LAUNCHING
 
     def live_position(self) -> float:
         """Where playback is now, for /status and the periodic save."""
@@ -224,7 +459,10 @@ class PlayerCore:
         return 0.0
 
     def _page_ready(self) -> bool:
-        return self.receiver.connected and self.chromecast.receiver_app_active
+        # A page whose app is being quit is not open: the next key launches
+        # again, after the quit.
+        quitting = self._quit_task is not None and not self._quit_task.done()
+        return not quitting and self.receiver.connected and self.chromecast.receiver_app_active
 
     def _start_launch(self) -> None:
         """Open our page on the Chromecast in the background, once.
@@ -233,24 +471,33 @@ class PlayerCore:
         happens when the page is not connected or another app is in front.
         Commands keep changing the player's state meanwhile; the new page
         gets that state when it subscribes (_on_receiver_connect)."""
-        if self._launch_task is not None and not self._launch_task.done():
+        pending = self._launch_task is not None and not self._launch_task.done()
+        if pending and self._launch_epoch == self._app_epoch:
             return
-        self._launch_task = asyncio.get_running_loop().create_task(self._launch())
+        # A launch left over from before a close gives up on its own.
+        self._launch_epoch = self._app_epoch
+        self._launch_task = asyncio.get_running_loop().create_task(
+            self._launch(self._app_epoch),
+        )
 
-    async def _launch(self) -> None:
+    async def _launch(self, epoch: int) -> None:
         # Restored "ready" items can be played before discovery completes.
         await self.chromecast.wait_for_connection()
         url = f"http://{_get_local_ip()}:{config.SERVER_PORT}/receiver"
-        seen = self.receiver.subscriptions
-        try:
-            await asyncio.to_thread(self.chromecast.launch_receiver, url)
-        except Exception as e:
-            log.error("Launching the receiver page failed: %s", e)
-            self._drop_page("launch failed")
-            return
+        async with self._app_lock:  # after a quit still running
+            if self._app_epoch != epoch:
+                return  # closed after this launch was asked
+            seen = self.receiver.subscriptions
+            try:
+                await asyncio.to_thread(self.chromecast.launch_receiver, url)
+            except Exception as e:
+                log.error("Launching the receiver page failed: %s", e)
+                self._drop_page("launch failed")
+                return
         # Wait for a NEW connection: a stale subscriber left over from a page
         # that another app replaced must not count.
-        if not await self.receiver.wait_new_subscriber(seen, RECEIVER_CONNECT_TIMEOUT_S):
+        connected = await self.receiver.wait_new_subscriber(seen, RECEIVER_CONNECT_TIMEOUT_S)
+        if not connected and self._app_epoch == epoch:
             log.error(
                 "Receiver page did not connect within %.0fs of launching %s",
                 RECEIVER_CONNECT_TIMEOUT_S, url,
@@ -298,13 +545,21 @@ class PlayerCore:
 
         Skips items still encoding/queued — the remote should never land on
         an item that can't be cast. Returns an ActionResult describing the
-        outcome (issue #6). While paused it moves the menu highlight instead.
+        outcome (issue #6). While the screen is shown it moves the highlighted
+        row instead; with the page closed it opens the stopped screen.
         """
         if self.state == "calibrating":
             await self._end_calibration()
             return _DID_ACTION
-        if self.state == "paused" and self.menu is not None:
-            return self._move_menu(+1)
+        if self._wake_if_night():
+            return _WOKE
+        self._touch()
+        if self._screen_shown():
+            return self._move_row(+1)
+        if self.state == "idle":
+            self._open_closed_page()
+            self._move_row(+1)
+            return self._opened_result()
         if not self.library.items:
             return _NO_ITEMS
         n = len(self.library.items)
@@ -330,13 +585,21 @@ class PlayerCore:
         Skips items still encoding/queued. No wrap. Recovers from a stale /
         phantom cursor (a video_id no longer in the library) by scanning
         backward from the last item — symmetric to next()/toggle() (issue #5).
-        While paused it moves the menu highlight instead.
+        While the screen is shown it moves the highlighted row instead; with
+        the page closed it opens the stopped screen.
         """
         if self.state == "calibrating":
             await self._end_calibration()
             return _DID_ACTION
-        if self.state == "paused" and self.menu is not None:
-            return self._move_menu(-1)
+        if self._wake_if_night():
+            return _WOKE
+        self._touch()
+        if self._screen_shown():
+            return self._move_row(-1)
+        if self.state == "idle":
+            self._open_closed_page()
+            self._move_row(-1)
+            return self._opened_result()
         if not self.library.items:
             return _NO_ITEMS
         idx = self._cursor_index()
@@ -357,50 +620,82 @@ class PlayerCore:
     async def play(self, video_id: str) -> ActionResult:
         """Jump cursor to a specific video_id and cast.
 
-        Raises KeyError if video_id is not in the library.
+        Raises KeyError if video_id is not in the library. An unready video
+        casts nothing; with the screen shown it flashes "Non ancora pronto".
         """
         idx = self._index_of(video_id)
         if idx is None:
             raise KeyError(f"video_id not in library: {video_id}")
-        return self._cast(self.library.items[idx])
+        self._explicit_command()
+        result = self._cast(self.library.items[idx])
+        if not result.did_action and self._screen_shown():
+            # As the screen's own Riproduci on an unready row.
+            self._flash(NOT_READY_NOTICE)
+        return result
 
-    def _move_menu(self, delta: int) -> ActionResult:
-        self.menu.move(self._video_ids(), delta)
-        self._send_menu()
+    def _cancel_confirm(self) -> bool:
+        """A key other than OK while a delete waits for confirmation only
+        cancels it. Returns True if there was one."""
+        if self.screen.confirm_video_id is None:
+            return False
+        self.screen.confirm_video_id = None
+        self._send_screen()
+        return True
+
+    def _move_row(self, delta: int) -> ActionResult:
+        if self._cancel_confirm():
+            return _DID_ACTION
+        self.screen.fix_selection(self.library.items, self.library.cursor_video_id)
+        self.screen.move(self.library.items, delta)
+        self._send_screen()
+        return _DID_ACTION
+
+    def _move_command(self, delta: int) -> ActionResult:
+        if self._cancel_confirm():
+            return _DID_ACTION
+        self.screen.move_command(self.library.items, delta)
+        self._send_screen()
         return _DID_ACTION
 
     async def toggle(self) -> ActionResult:
-        """playing→pause (menu opens), paused→resume, idle→start nearest
-        playable item.
+        """playing→pause (the screen opens), screen shown→run its selected
+        command, closed page→play the cursor video.
 
-        From idle, scans forward from the cursor (inclusive) for the first item
-        with a cache file and casts it. If the cursor lands on an unready item
-        (encoding/queued), the remote's toggle skips ahead instead of no-op.
+        With the page closed, a ready cursor video plays from its position;
+        an unready one opens the stopped screen on it with "Non ancora
+        pronto". It never skips ahead to the next ready video.
         """
         if self.state == "calibrating":
             await self._end_calibration()
             return _DID_ACTION
+        if self._wake_if_night():
+            return _WOKE
+        self._touch()
         if self.state == "playing":
             self._pause()
             return _DID_ACTION
+        if self._screen_shown():
+            return await self._screen_select()
         if self.state == "paused":
-            if self.menu is not None:
-                return await self._menu_select()
             return await self._resume()
-        if not self.library.items:
-            return _NO_ITEMS
-        idx = self._cursor_index()
-        start = 0 if idx is None else idx
-        new_idx = self._find_playable_index(
-            start_idx=start, direction=1, wrap=self.library.loop_mode,
-        )
-        if new_idx is None:
-            return _NO_PLAYABLE
-        return self._cast(self.library.items[new_idx])
+        items = self.library.items
+        if not items:
+            self._open_closed_page()
+            return self._closed_result(_NO_ITEMS)
+        # The cursor, or the first video when it is not in the playlist (the
+        # row the stopped screen would highlight).
+        item = self.library.cursor_item() or items[0]
+        if item.cache_file_present():
+            return self._cast(item)
+        if item.filename:
+            self._requeue_missing_cache(item)
+        self._show_stopped(highlight=item.video_id, open_page=True)
+        self._flash(NOT_READY_NOTICE)
+        return self._closed_result(_NO_PLAYABLE)
 
     def _pause(self, open_menu: bool = True) -> None:
         """Pause the page, save the position on the loaded video, open the
-        menu on it."""
+        screen on it."""
         item = self._loaded_item()
         if item is not None:
             self._snapshot_position(item)
@@ -408,93 +703,144 @@ class PlayerCore:
         self.receiver.send({"type": "pause"})
         self.state = "paused"
         if open_menu:
-            self.menu = PauseMenu(
-                item.video_id if item is not None else (self.library.cursor_video_id or ""),
-            )
-            self._send_menu()
+            loaded = item.video_id if item is not None else None
+            self.screen = Screen(loaded or self.library.cursor_video_id, loaded)
+            self._touch()
+            self._send_screen()
         log.info(
             "Paused %s at %.1fs",
             item.video_id if item else None,
             item.playback_position if item else 0.0,
         )
 
-    async def _menu_select(self) -> ActionResult:
-        """OK while the pause menu is open: act on the highlighted entry."""
-        menu = self.menu
-        entry = menu.selected
-        if entry.kind == "video":
-            if entry.key == self.library.cursor_video_id:
+    async def _screen_select(self) -> ActionResult:
+        """OK while the screen is shown: run the selected command on the
+        highlighted row, or confirm a pending delete."""
+        screen = self.screen
+        items = self.library.items
+        pending = screen.confirm_video_id
+        # Drops the confirmation if the sync removed that video meanwhile.
+        screen.fix_selection(items, self.library.cursor_video_id)
+        if pending is not None:
+            confirmed = screen.confirm_video_id
+            screen.confirm_video_id = None
+            if confirmed is None:
+                log.warning("Delete of %s dropped: it left the playlist", pending)
+                self._send_screen()
+                return _NO_PLAYABLE
+            await self._delete_video(confirmed)
+            return _DID_ACTION
+        # Any key clears a notice that waits for one (media error).
+        if screen.flash_kind == "error":
+            screen.flash = None
+            screen.flash_kind = "info"
+
+        command = screen.selected_command(items)
+        if command == "resume":
+            item = next((i for i in items if i.video_id == screen.selected_video_id), None)
+            if item is None:
+                return _NO_ITEMS
+            if item.video_id == screen.loaded_video_id:
                 return await self._resume()
-            item = next((i for i in self.library.items if i.video_id == entry.key), None)
-            if item is None or not item.cache_file_present():
-                if item is not None and item.filename:
+            if not item.cache_file_present():
+                if item.filename:
                     self._requeue_missing_cache(item)
-                self._flash_notice("non ancora pronto")
+                self._flash(NOT_READY_NOTICE)
                 return _NO_PLAYABLE
             return self._cast(item)
-
-        key = entry.key
-        if key == "stop":
-            return await self.stop()
-        if key == "delete":
-            # Always the paused (cursor) video, never the highlighted row, and
-            # only after a second OK. Any other key clears the confirm.
-            if not menu.confirming_delete:
-                menu.confirming_delete = True
-                self._send_menu()
-                return _DID_ACTION
-            paused_id = menu.current_video_id
-            if paused_id != self.library.cursor_video_id or (
-                self._loaded_video_id is not None and paused_id != self._loaded_video_id
-            ):
-                # The playlist moved under the menu (sync): never delete a
-                # video other than the one that was paused.
-                log.warning(
-                    "Delete refused: paused %s, cursor %s, loaded %s",
-                    paused_id, self.library.cursor_video_id, self._loaded_video_id,
-                )
-                menu.confirming_delete = False
-                self._send_menu()
-                return _NO_PLAYABLE
-            self.menu = None
-            await self.delete_current()
+        if command == "delete":
+            screen.confirm_video_id = screen.selected_video_id
+            self._send_screen()
             return _DID_ACTION
-        if key == "calibrate":
+        if command == "stop":
+            return await self.stop()
+        if command == "calibrate":
             await self.calibrate()
             return _DID_ACTION
-        if key == "loop":
-            self.library.loop_mode = not self.library.loop_mode
-            self._flash_notice("Loop attivo" if self.library.loop_mode else "Loop disattivato")
-            return _DID_ACTION
-        if key == "sync":
-            if self.on_sync_request is None:
-                self._flash_notice("Sync non disponibile")
-                return _DID_ACTION
-            self.on_sync_request()
-            self._flash_notice("Sync avviato")
-            return _DID_ACTION
-        log.warning("Unknown menu command %s", key)
+        if command == "loop":
+            return self.toggle_loop()
+        if command == "sync":
+            return self.request_sync()
+        if command == "power":
+            return self.power_off()
+        log.warning("Unknown screen command %s", command)
         return _NO_PLAYABLE
 
-    def _flash_notice(self, text: str) -> None:
-        """Show `text` under the menu commands for NOTICE_S seconds. A newer
-        notice cancels the pending clear of the older one."""
-        if self.menu is None:
+    def toggle_loop(self) -> ActionResult:
+        self._explicit_command()
+        self.library.loop_mode = not self.library.loop_mode
+        self._flash("Loop attivo" if self.library.loop_mode else "Loop disattivato")
+        return _DID_ACTION
+
+    def request_sync(self) -> ActionResult:
+        self._explicit_command()
+        if self.on_sync_request is None:
+            self._flash("Sync non disponibile")
+            return _DID_ACTION
+        self.on_sync_request()
+        self._flash("Sync avviato")
+        return _DID_ACTION
+
+    def power_off(self) -> ActionResult:
+        """Save the position and close DashCast now, as the idle close does
+        after CRT_RECEIVER_IDLE_CLOSE_S: the TV goes back to the Chromecast's
+        backdrop. The app quits in a thread; this never waits for it."""
+        item = self._loaded_item()
+        if item is not None and item.status in ("playing", "paused"):
+            self._snapshot_position(item)
+            item.status = "ready"
+        log.info("Power off: closing the receiver app")
+        self._close_app()
+        return _DID_ACTION
+
+    def _close_app(self) -> None:
+        """Empty the page and quit DashCast in the background (Spegni, idle
+        close). A launch asked before this gives up; one asked after waits
+        for the quit (_app_lock)."""
+        self._cancel_night_timer()
+        self._blank_page()
+        self.screen = None
+        self._loaded_video_id = None
+        self.state = "idle"
+        self._inactive_since = None
+        self._app_epoch += 1
+        self._quit_task = asyncio.get_running_loop().create_task(self._quit_app())
+
+    async def _quit_app(self) -> None:
+        async with self._app_lock:
+            await asyncio.to_thread(self.chromecast.quit_app)
+
+    def _blank_page(self) -> None:
+        """Empty the page before quitting DashCast: quit_app swallows its
+        timeouts, and a page left open must not keep an awake screen (no
+        night, no idle close) that the daemon no longer tracks."""
+        self.receiver.send({"type": "blank"})
+        self._hide_screen()
+
+    def _flash(self, text: str, kind: str = "info") -> None:
+        """Show `text` on the screen's bottom line: NOTICE_S seconds for an
+        "info" notice, until a key for an "error" one. A newer notice cancels
+        the pending clear of the older one. The model keeps it even when the
+        screen is hidden (calibration) and sends it only when shown."""
+        if self.screen is None:
             return
-        if self._notice_handle is not None:
-            self._notice_handle.cancel()
-        menu = self.menu
-        menu.notice = text
-        self._send_menu()
+        self._cancel_clear("flash")
+        screen = self.screen
+        screen.flash = text
+        screen.flash_kind = kind
+        if self._screen_shown():
+            self._send_screen()
+        if kind == "error":
+            return
 
         def _clear() -> None:
-            self._notice_handle = None
-            # The menu may have closed or been replaced in the meantime.
-            if self.menu is menu and menu.notice == text:
-                menu.notice = None
-                self._send_menu()
+            # The screen may have closed or been replaced in the meantime.
+            if self.screen is screen and screen.flash == text:
+                screen.flash = None
+                if self._screen_shown():
+                    self._send_screen()
 
-        self._notice_handle = asyncio.get_running_loop().call_later(NOTICE_S, _clear)
+        self._clear_later("flash", NOTICE_S, _clear)
 
     async def _resume(self) -> ActionResult:
         """Resume the paused video. If the page is gone (another app took the
@@ -507,39 +853,35 @@ class PlayerCore:
                 return _NO_PLAYABLE
             log.info("Resume by reloading %s", item.video_id)
             return self._cast(item)
-        self.receiver.send({"type": "menu", "view": None})
+        self.receiver.send({"type": "screen", "view": None})
         self.receiver.send({"type": "play"})
         if item is not None:
             item.status = "playing"
-        self.menu = None
+        self._cancel_night_timer()
+        self.screen = None
         self.state = "playing"
         return _DID_ACTION
 
     async def stop(self) -> ActionResult:
-        """Stop playback and set state to idle. Cursor stays on the current item;
-        its status reverts to 'ready' so a subsequent toggle/play re-casts it
-        from where it left off.
+        """Stop playback and show the stopped screen on the video just
+        stopped. Cursor stays on the current item; its status reverts to
+        'ready' so a subsequent toggle/play re-casts it from where it left
+        off. Already stopped (or the page closed): nothing to do.
 
         The live position is snapshotted onto the item first (issue #13):
         without it, resume relied solely on the 30s periodic save, which can be
-        stale by up to a full interval. The page stays open on a black screen
-        so the next play starts without the DashCast logo.
+        stale by up to a full interval. The page stays open so the next play
+        starts without the DashCast logo.
         """
+        self._explicit_command()
+        if self.state == "idle":
+            return _ALREADY_STOPPED
         item = self._loaded_item() or self.library.cursor_item()
         if item is not None and item.status in ("playing", "paused"):
             self._snapshot_position(item)
             item.status = "ready"
-        self._blank()
-        self.state = "idle"
+        self._show_stopped(highlight=self._loaded_video_id or self.library.cursor_video_id)
         return _DID_ACTION
-
-    def _blank(self) -> None:
-        self._cancel_calibration_timer()
-        self.menu = None
-        self._loaded_video_id = None
-        if self.receiver.connected:
-            self.receiver.send({"type": "menu", "view": None})
-            self.receiver.send({"type": "blank"})
 
     async def stop_and_remove(self, video_id: str) -> None:
         """If video_id is the currently playing/paused item, stop it.
@@ -551,17 +893,30 @@ class PlayerCore:
         # video (this runs later, on the loop): the page still shows it.
         on_screen = video_id in (self._loaded_video_id, self.library.cursor_video_id)
         if on_screen and self.state in ("playing", "paused", "calibrating"):
-            self._blank()
-            self.state = "idle"
+            self._show_stopped(
+                highlight=self.library.cursor_video_id,
+                arrival=REMOVED_NOTICE,
+                library_change=True,
+            )
 
     async def seek_relative(self, seconds: int) -> ActionResult:
         """Seek the page by `seconds` from the live position, clamped to
         [0, duration] (no upper clamp while the duration is unknown). While
-        paused the new position is also the resume point, and the menu is
-        re-sent so its time line updates."""
+        the screen is shown it moves the command selection instead (back =
+        left, forward = right): there is no seek in pause. With the page
+        closed it opens the stopped screen with the selection moved."""
         if self.state == "calibrating":
             await self._end_calibration()
             return _DID_ACTION
+        if self._wake_if_night():
+            return _WOKE
+        self._touch()
+        if self._screen_shown():
+            return self._move_command(-1 if seconds < 0 else +1)
+        if self.state == "idle":
+            self._open_closed_page()
+            self._move_command(-1 if seconds < 0 else +1)
+            return self._opened_result()
         if self.state not in ("playing", "paused"):
             return _NO_CC_SESSION
         item = self._loaded_item()
@@ -572,44 +927,138 @@ class PlayerCore:
         if self.receiver.duration > 0:
             new = min(new, max(self.receiver.duration - SEEK_END_MARGIN_S, 0.0))
         self.receiver.send({"type": "seek", "position": new})
-        if self.state == "paused":
-            if item is not None:
-                item.playback_position = new
-            if self.menu is not None:
-                self.menu.confirming_delete = False
-                self._send_menu()
+        if self.state == "paused" and item is not None:
+            # Paused without the screen (never in practice): the new position
+            # is the resume point.
+            item.playback_position = new
         return _DID_ACTION
 
-    async def delete_current(self) -> None:
-        item = self.library.cursor_item()
-        if item is None:
-            log.info("delete_current: no cursor item, skipping")
-            return
+    async def delete_request(self) -> ActionResult:
+        """/control/delete/current. Playing: delete the video on air at once.
+        Screen shown: ask confirmation on the highlighted row, or cancel the
+        pending one (a second press or a bridge retry never confirms). Closed
+        page: open the stopped screen on the cursor already asking. An
+        explicit command: it wakes the night phase and acts."""
+        if self.state == "calibrating":
+            await self._end_calibration()
+        if self.state == "playing":
+            return ActionResult(True, deleted_video_id=await self.delete_current())
+        items = self.library.items
+        if self._screen_shown():
+            woke = self._wake_if_night()
+            if self._cancel_confirm():
+                return _DID_ACTION
+            if not woke:
+                self._touch()
+            self.screen.fix_selection(items, self.library.cursor_video_id)
+            video_id = self.screen.selected_video_id
+            if video_id is None:
+                return _NO_ITEMS
+            self.screen.confirm_video_id = video_id
+            self._send_screen()
+            return _DID_ACTION
+        if not items:
+            return _NO_ITEMS
+        item = self.library.cursor_item() or items[0]
+        self._show_stopped(highlight=item.video_id, open_page=True)
+        self.screen.confirm_video_id = item.video_id
+        self._send_screen()
+        return self._opened_result()
+
+    async def delete_current(self) -> str | None:
+        """Delete the video on the page at once (/control/delete/current while
+        playing), stopping it first; with nothing loaded, the cursor video.
+        Returns the deleted video_id (None if there was none). Never suspends:
+        the cache unlinks and the YouTube delete finish in the background."""
         if self.state in ("playing", "paused", "calibrating"):
+            # Not the cursor: the sync can have removed the video on air and
+            # moved the cursor before its stop_and_remove runs.
+            item = self._loaded_item()
+            if item is None:
+                log.info("delete_current: the video on air already left the library, skipping")
+                return None
             await self.stop()
-        self.menu = None
-        await asyncio.to_thread(self._delete_local, item)
+        else:
+            item = self.library.cursor_item()
+            if item is None:
+                log.info("delete_current: no cursor item, skipping")
+                return None
+        self._remove(item)
+        return item.video_id
+
+    async def _delete_video(self, video_id: str) -> None:
+        """Delete `video_id` after the screen's confirmation. The loaded video
+        is stopped first; any other video leaves the pause alone. Never
+        suspends: a bridge retry of a slow OK would run on the new screen."""
+        item = next((i for i in self.library.items if i.video_id == video_id), None)
+        if item is None:
+            return
+        if video_id == self._loaded_video_id and self.state in ("playing", "paused", "calibrating"):
+            await self.stop()
+        self._remove(item)
+
+    def _remove(self, item: QueueItem) -> None:
+        """Remove `item` from the library now and redraw the screen; its cache
+        files and its YouTube playlist entry go in a background task. The
+        cursor moves to its successor, as when the sync removes it
+        (SyncEngine._remove_item)."""
+        idx = self._index_of(item.video_id)
+        cursor_was_here = self.library.cursor_video_id == item.video_id
+        if self.on_delete is not None:
+            try:
+                self.on_delete(item.video_id)
+            except Exception:
+                log.exception("on_delete callback failed for %s", item.video_id)
+        self.library.remove(item.id)
+        if cursor_was_here and idx is not None:
+            if not self.library.items:
+                self.library.cursor_video_id = None
+            else:
+                new_idx = min(idx, len(self.library.items) - 1)
+                self.library.cursor_video_id = self.library.items[new_idx].video_id
+        if self._screen_shown():
+            self._send_screen()
+        task = asyncio.get_running_loop().create_task(self._finish_delete(item))
+        self._delete_tasks.add(task)
+        task.add_done_callback(self._delete_tasks.discard)
+
+    async def finish_deletes(self, timeout_s: float) -> None:
+        """Wait, up to `timeout_s`, for the deletions still in the background
+        (daemon shutdown): an Elimina already acknowledged must reach YouTube,
+        or the next sync brings the video back."""
+        if not self._delete_tasks:
+            return
+        log.info("Waiting for %d deletion(s) before shutdown", len(self._delete_tasks))
+        _, pending = await asyncio.wait(set(self._delete_tasks), timeout=timeout_s)
+        if pending:
+            log.warning("%d deletion(s) not finished at shutdown", len(pending))
+
+    async def _finish_delete(self, item: QueueItem) -> None:
+        """Background part of a deletion: cache files, then the YouTube
+        playlist entry. Failures are only logged."""
+        try:
+            await asyncio.to_thread(item.delete_files)
+        except Exception:
+            log.exception("Removing the cache files of %s failed", item.video_id)
+        try:
+            await self._remove_remote(item)
+        except Exception:
+            log.exception("YouTube remote delete failed for %s", item.video_id)
+
+    async def _remove_remote(self, item: QueueItem) -> None:
+        """Remove `item` from the YouTube playlist (failures only logged)."""
         if item.playlist_item_id and self.youtube is not None:
             try:
                 await asyncio.to_thread(self.youtube.delete_playlist_item, item.playlist_item_id)
             except (YouTubeAuthError, HttpError, OSError) as e:
                 log.error("YouTube remote delete failed for %s: %s", item.video_id, e)
         elif self.youtube is None:
-            log.warning("delete_current: no youtube_client, remote delete skipped")
+            log.warning("delete: no youtube_client, remote delete skipped")
         else:
             log.warning(
-                "delete_current: playlist_item_id missing for %s; remote delete skipped",
+                "delete: playlist_item_id missing for %s; remote delete skipped",
                 item.video_id,
             )
-
-    def _delete_local(self, item) -> None:
-        self.library.remove(item.id)
-        cache_path = os.path.join(config.TEMP_DIR, config.cached_encoded_filename(item.video_id))
-        if os.path.isfile(cache_path):
-            try:
-                os.unlink(cache_path)
-            except OSError as e:
-                log.warning("Failed to unlink cache %s: %s", cache_path, e)
 
     async def on_playback_finished(self) -> None:
         """Called when the Chromecast reports natural end of the current item.
@@ -647,9 +1096,16 @@ class PlayerCore:
             self._end_of_playlist()
 
     def _end_of_playlist(self) -> None:
-        """Nothing left to play: black screen, like after Stop."""
-        self._blank()
-        self.state = "idle"
+        """Nothing left to play: the stopped screen on the first video not
+        yet watched (the last one if all are), with "Fine della coda"."""
+        items = self.library.items
+        first = next((i for i in items if i.status != "done"), None)
+        if first is None and items:
+            first = items[-1]
+        self._show_stopped(
+            highlight=first.video_id if first is not None else None,
+            arrival=END_OF_QUEUE_NOTICE,
+        )
 
     # ------------------------------------------------------------------
     # Cast helpers
@@ -661,7 +1117,7 @@ class PlayerCore:
         Never waits: if the page is not open, the state is set anyway and the
         page is launched in the background (reason "launching"); it loads the
         video when it connects. The cursor moves only when a video is loaded,
-        so a failed pick leaves the menu and the pause on the video on screen.
+        so a failed pick leaves the screen and the pause on the video on screen.
         Returns _NO_PLAYABLE when the encoded file is missing (issue #6).
         """
         if not item.cache_file_present():
@@ -679,7 +1135,7 @@ class PlayerCore:
             return _NO_PLAYABLE
 
         # Save where the outgoing video is (next/prev while playing, a pick
-        # from the menu).
+        # from the screen).
         outgoing = self._loaded_item()
         if outgoing is not None and outgoing.status in ("playing", "paused"):
             self._snapshot_position(outgoing)
@@ -698,7 +1154,7 @@ class PlayerCore:
         # Clear a stale "ended" from the previous item so the natural-end
         # watcher doesn't fire immediately for the new one.
         self.receiver.reset_ended()
-        self.receiver.send({"type": "menu", "view": None})
+        self.receiver.send({"type": "screen", "view": None})
         self.receiver.send({
             "type": "load",
             "url": self._media_url(item.filename),
@@ -708,7 +1164,8 @@ class PlayerCore:
         self._loaded_video_id = item.video_id
         self.library.cursor_video_id = item.video_id
         self._load_failed = False
-        self.menu = None
+        self._cancel_night_timer()
+        self.screen = None
         item.status = "playing"
         self.state = "playing"
         if not self._page_ready():
@@ -769,23 +1226,25 @@ class PlayerCore:
         Never waits: the clip is rendered at startup (prepare_calibration).
         A video that is playing is paused first with its position saved. The
         pattern stays until any key (toggle/next/prev/seek) or for
-        CALIBRATION_TIMEOUT_S, then the player goes back to the paused menu on
-        the same video (or to a black screen if nothing was playing). Its end
-        never marks a video done and its time never touches a resume position.
+        CALIBRATION_TIMEOUT_S, then the player goes back to the screen exactly
+        as it was, paused or stopped (the stopped screen on the cursor when
+        the page was closed). The screen model is kept, hidden, under the
+        pattern. Its end never marks a video done and its time never touches
+        a resume position.
         """
         if self.state == "calibrating":
             return
+        self._explicit_command()
         if self._calibration_clip is None:
             log.warning("Calibration requested but the pattern is not ready")
-            if self.menu is not None:
-                self._flash_notice(CALIBRATION_NOT_READY_NOTICE)
+            self._flash(CALIBRATION_NOT_READY_NOTICE)
             return
         if self.state == "playing":
             self._pause(open_menu=False)
         self._calibration_return = "paused" if self.state == "paused" else "idle"
-        self.menu = None
         self._calibration_url = self._media_url(os.path.basename(self._calibration_clip))
-        self.receiver.send({"type": "menu", "view": None})
+        self._cancel_night_timer()
+        self._hide_screen()
         self.receiver.send({"type": "calibration", "url": self._calibration_url})
         self.state = "calibrating"
         self._cancel_calibration_timer()
@@ -810,13 +1269,19 @@ class PlayerCore:
         item = self._loaded_item()
         if self._calibration_return == "paused" and item is not None:
             self.state = "paused"
-            self.menu = PauseMenu(item.video_id)
+            if self.screen is None:
+                self.screen = Screen(item.video_id, item.video_id)
+            self._touch()
             if self._load_failed:
-                self.menu.notice = MEDIA_ERROR_NOTICE
-            self._send_menu()
-        else:
-            self._blank()
+                self._flash(MEDIA_ERROR_NOTICE, "error")
+            else:
+                self._send_screen()
+        elif self._calibration_return == "idle" and self.screen is not None:
             self.state = "idle"
+            self._touch()
+            self._send_screen()
+        else:
+            self._show_stopped(highlight=self.library.cursor_video_id)
         log.info("Calibration ended (now %s)", self.state)
 
     # ------------------------------------------------------------------
@@ -827,11 +1292,14 @@ class PlayerCore:
         """A page subscribed (first connection, a reconnect after a blip, a
         page just launched, or a replacement while the old connection is
         still listed). Every new page starts empty, so it gets the player's
-        whole state: the loaded video at its position, paused with the menu
-        or playing, the calibration pattern, or a black screen."""
+        whole state: the loaded video at its position, paused with the screen
+        or playing, the calibration pattern, or the stopped screen (with its
+        night phase and pending confirmation, as they are)."""
         if self._lost_task is not None:
             self._lost_task.cancel()
             self._lost_task = None
+        # Short notices shown before the page was up start counting now.
+        self._start_pending_clears()
         item = self._loaded_item()
         if self.state == "calibrating":
             if self._calibration_return == "paused" and item is not None and item.filename:
@@ -853,15 +1321,19 @@ class PlayerCore:
                 "position": item.playback_position,
                 "autoplay": self.state == "playing",
             })
-            if self.state == "paused" and self.menu is not None:
-                self._send_menu()
+            if self.state == "paused" and self.screen is not None:
+                self._send_screen()
             else:
-                self.receiver.send({"type": "menu", "view": None})
+                self._hide_screen()
             log.info("Receiver page connected: restored %s while %s", item.video_id, self.state)
             return
-        # Idle (a Stop the page could not hear, or nothing played yet).
-        self.receiver.send({"type": "menu", "view": None})
+        # Idle: the stopped screen (kept from before, or on the cursor when
+        # the page opens on its own, e.g. a page left open by a restart).
         self.receiver.send({"type": "blank"})
+        if self.screen is None:
+            self.screen = Screen(self.library.cursor_video_id, None)
+            self._touch()
+        self._send_screen()
 
     def _on_receiver_disconnect(self) -> None:
         if self._lost_task is not None:
@@ -881,15 +1353,18 @@ class PlayerCore:
 
     def _drop_page(self, why: str) -> None:
         """No page to play on (lost past the grace, or a launch that failed):
-        go idle with the position saved, so the next play resumes there."""
+        go idle with the position saved, so the next play resumes there.
+        The screen goes with the page: the next key finds the page closed."""
+        self._cancel_night_timer()
         if self.state not in ("playing", "paused", "calibrating"):
+            self.screen = None
             return
         item = self._loaded_item()
         if item is not None and item.status in ("playing", "paused"):
             self._snapshot_position(item)
             item.status = "ready"
         self._cancel_calibration_timer()
-        self.menu = None
+        self.screen = None
         self._loaded_video_id = None
         self.state = "idle"
         log.warning(
@@ -901,20 +1376,21 @@ class PlayerCore:
 
     def _on_media_error(self) -> None:
         """The page cannot play the loaded file (corrupt, or gone): pause on
-        it with the menu and a notice, so the user can pick another video,
-        stop, or retry with OK (which reloads it). Under the calibration
-        pattern the failure is only recorded; the menu shows it on return."""
+        it with the screen and a notice that stays until a key, so the user
+        can pick another video, stop, or retry with OK (which reloads it).
+        Under the calibration pattern the failure is only recorded; the
+        screen shows it on return."""
         self._load_failed = True
         if self.state == "playing":
             self._pause()
-        if self.menu is not None:
-            self.menu.notice = MEDIA_ERROR_NOTICE
-            self._send_menu()
+        if self.state == "paused" and self.screen is not None:
+            self._flash(MEDIA_ERROR_NOTICE, "error")
 
     async def watch_idle(self, close_after_s: float, poll_s: float = 30.0) -> None:
         """Background loop: after `close_after_s` without playback (idle or
-        paused), save the position and close the DashCast app. The next play
-        reopens it (logo) and resumes from the saved position."""
+        paused) and without keys on the screen, save the position and close
+        the DashCast app. The next play reopens it (logo) and resumes from
+        the saved position."""
         while True:
             await asyncio.sleep(poll_s)
             try:
@@ -934,9 +1410,6 @@ class PlayerCore:
             if item is not None:
                 self._snapshot_position(item)
                 item.status = "ready"
-        self.menu = None
-        self._loaded_video_id = None
-        self.state = "idle"
         log.info("No playback for %.0fs: closing the receiver app", close_after_s)
-        await asyncio.to_thread(self.chromecast.quit_app)
-        self._inactive_since = None
+        self._close_app()
+        await self._quit_task

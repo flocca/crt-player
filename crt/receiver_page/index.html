@@ -7,90 +7,71 @@
 <style>
   /* Target: Chromecast Ultra, Chrome 90, viewport 1280x720 CSS px.
      The TV squeezes 16:9 into 4:3, so everything drawn over the video sits
-     in a 75%-wide box stretched by 4/3 horizontally (.stretch). */
+     in a 75%-wide box stretched by 4/3 horizontally (.stretch).
+     The page runs at 24-30 fps: nothing over the video is animated. */
+  @font-face {
+    font-family: "Bedstead";
+    src: url("/receiver/bedstead.otf") format("opentype");
+  }
   html, body {
     margin: 0; padding: 0; width: 100%; height: 100%;
     background: #000; overflow: hidden;
-    font-family: "Roboto", "Helvetica Neue", Arial, sans-serif;
     color: #f0f0f0;
   }
-  video {
+  video, #snow {
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-    object-fit: fill; background: #000;
+    object-fit: fill;
   }
-  #cal { z-index: 2; }
-  .hidden { display: none !important; }
-  #menu {
+  /* Bottom to top: paused video, preview, snow, veil, teletext, calibration. */
+  #main { z-index: 0; background: #000; }
+  #preview { z-index: 1; }
+  #snow { z-index: 2; image-rendering: pixelated; }
+  #veil {
     position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 3;
-    box-sizing: border-box;
-    padding: 5% 8%;
-    background: rgba(16, 16, 16, .85);
+    background: #000; opacity: .7;
   }
-  #menu .box { position: relative; width: 100%; height: 100%; }
-  #menu .stretch {
-    width: 75%;
+  #screen {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 4;
+    box-sizing: border-box;
+  }
+  #cal { z-index: 5; }
+  .hidden { display: none !important; }
+  #screen .box { position: relative; width: 100%; height: 100%; }
+  #screen .stretch {
+    width: 75%; height: 100%;
     transform: scaleX(1.3333); transform-origin: left top;
   }
-  .line {
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  #title { font-size: 44px; font-weight: bold; line-height: 1.25; }
-  #time { font-size: 34px; line-height: 1.3; }
-  #bar {
-    height: 12px; margin: 6px 0 10px 0; background: #444; position: relative;
-  }
-  #bar-fill { position: absolute; top: 0; left: 0; bottom: 0; width: 0; background: #f0f0f0; }
-  #rows .row {
-    font-size: 36px; font-weight: bold; line-height: 1.25;
-    padding: 0 10px;
-  }
-  .row.selected, .cmd.selected, #confirm {
-    background: #f0f0f0; color: #101010;
-  }
-  .row.dim { opacity: .6; }
-  #sep { height: 3px; background: #888; margin: 8px 0; }
-  #commands { font-size: 30px; font-weight: bold; line-height: 1.4; white-space: nowrap; }
-  .cmd { padding: 0 6px; }
-  .dot { padding: 0 4px; }
-  #confirm, #notice {
-    font-size: 30px; font-weight: bold; line-height: 1.4; margin-top: 6px;
-    padding: 0 6px; display: inline-block;
-  }
+  #ttx { font-family: "Bedstead", monospace; white-space: pre; }
+  #ttx .tl { display: block; overflow: hidden; }
+  body.night #veil { opacity: .9; }
+  body.night #ttx .tl { visibility: hidden; }
+  body.night #ttx .tl.head { visibility: visible; opacity: .35; }
 </style>
 </head>
 <body>
 <video id="main" playsinline></video>
-<video id="cal" class="hidden" loop muted playsinline></video>
-<div id="menu" class="hidden">
+<video id="preview" muted playsinline></video>
+<canvas id="snow" width="160" height="90" class="hidden"></canvas>
+<div id="veil" class="hidden"></div>
+<div id="screen" class="hidden">
   <div class="box">
-    <div class="stretch">
-      <div id="title" class="line"></div>
-      <div id="time" class="line"></div>
-      <div id="bar"><div id="bar-fill"></div></div>
-      <div id="rows"></div>
-      <div id="sep"></div>
-      <div id="commands"></div>
-      <div><span id="confirm" class="hidden"></span></div>
-      <div><span id="notice" class="hidden"></span></div>
+    <div class="stretch" id="stretch">
+      <div id="ttx"></div>
     </div>
   </div>
 </div>
+<video id="cal" class="hidden" loop muted playsinline></video>
 <script>
 (function () {
   "use strict";
   var main = document.getElementById("main");
+  var preview = document.getElementById("preview");
+  var snow = document.getElementById("snow");
+  var veil = document.getElementById("veil");
+  var screenEl = document.getElementById("screen");
+  var stretch = document.getElementById("stretch");
+  var ttx = document.getElementById("ttx");
   var cal = document.getElementById("cal");
-  var menu = document.getElementById("menu");
-  var els = {
-    title: document.getElementById("title"),
-    time: document.getElementById("time"),
-    barFill: document.getElementById("bar-fill"),
-    rows: document.getElementById("rows"),
-    commands: document.getElementById("commands"),
-    confirm: document.getElementById("confirm"),
-    notice: document.getElementById("notice")
-  };
-  var COMMANDS_FONT_PX = 30;
   var loadToken = 0;
 
   // ─── Reports to the daemon ─────────────────────────────────────
@@ -118,8 +99,29 @@
     } catch (e) { /* never let a report break the page */ }
   }
 
+  // While a paused load is priming its frame (see primeFrame) the element
+  // plays for a moment: those status reports would tell the daemon it is
+  // playing, so they are skipped and one report follows the pause.
+  var priming = null;
+
+  // The Chromecast has one hardware video decoder. When #preview or #cal
+  // loads a file, #main's pipeline is revoked and turns into a dummy: it
+  // still reports success, but shows and plays nothing (black, silent) until
+  // #main is reloaded. mainStale keeps where #main was paused; the next
+  // paused frame, play or same-file load reloads it from there.
+  var mainStale = null;  // { position } while #main's decoder is revoked
+
+  function markMainStale() {
+    if (mainStale === null && currentSrc()) {
+      // A load still waiting for its metadata reads currentTime 0.
+      mainStale = { position: pending !== null ? pending.position : (main.currentTime || 0) };
+    }
+  }
+
   ["playing", "pause", "seeked", "loadedmetadata"].forEach(function (ev) {
-    main.addEventListener(ev, function () { report("status"); });
+    main.addEventListener(ev, function () {
+      if (priming === null) { report("status"); }
+    });
   });
   main.addEventListener("ended", function () { report("ended"); });
   main.addEventListener("error", function () {
@@ -132,101 +134,388 @@
     report("error", { error: String(message) });
   };
   setInterval(function () {
-    if (currentSrc() && !main.paused) { report("status"); }
+    if (currentSrc() && !main.paused && priming === null) { report("status"); }
   }, 1000);
 
-  // ─── Menu rendering ────────────────────────────────────────────
+  // ─── Teletext grid ─────────────────────────────────────────────
+
+  var COLS = 40, ROWS = 18, PER_PAGE = 10;
+  var C = {
+    white: "#f0f0f0", yellow: "#f0f000", cyan: "#00f0f0", green: "#00e000",
+    magenta: "#f000f0", red: "#f00000", blue: "#2020ff", grey: "#a0a0a0", black: "#000"
+  };
+  var COMMAND_COLOURS = {
+    resume: C.green, delete: C.red, stop: C.yellow, calibrate: C.cyan,
+    loop: C.magenta, sync: C.blue, power: C.white
+  };
+  var ROW_COLOURS = { ready: C.white, done: C.grey, preparing: C.cyan, error: C.magenta };
+  var DAYS = ["dom", "lun", "mar", "mer", "gio", "ven", "sab"];
+  var MONTHS = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"];
+
+  var view = null;  // the last screen view, null while the screen is hidden
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
 
   function fmt(t) {
     if (!isFinite(t) || t < 0) { t = 0; }
     t = Math.floor(t);
     var h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
-    var ss = (s < 10 ? "0" : "") + s;
-    if (h > 0) { return h + ":" + (m < 10 ? "0" : "") + m + ":" + ss; }
-    return (m < 10 ? "0" : "") + m + ":" + ss;
+    return (h > 0 ? h + ":" + pad2(m) : pad2(m)) + ":" + pad2(s);
   }
 
-  function updateTime() {
-    var d = isFinite(main.duration) ? main.duration : 0;
-    els.time.textContent = fmt(main.currentTime) + " / " + fmt(d);
-    var pct = d > 0 ? Math.min(100, (main.currentTime / d) * 100) : 0;
-    els.barFill.style.width = pct + "%";
+  // Lengths in code points, not UTF-16 units, so the grid stays aligned.
+  function chars(s) { return Array.from(String(s)); }
+  function len(s) { return chars(s).length; }
+  function spaces(n) { var s = ""; for (var i = 0; i < n; i++) { s += " "; } return s; }
+  function padR(s, n) {
+    var c = chars(s);
+    if (c.length > n) { return c.slice(0, Math.max(0, n - 1)).join("") + "…"; }
+    return c.join("") + spaces(n - c.length);
   }
-  main.addEventListener("timeupdate", updateTime);
-  main.addEventListener("seeked", updateTime);
-  main.addEventListener("loadedmetadata", updateTime);
+  function padL(s, n) { return spaces(n - len(s)) + s; }
+  function repeat(ch, n) { var s = ""; for (var i = 0; i < n; i++) { s += ch; } return s; }
 
-  function clear(node) {
-    while (node.firstChild) { node.removeChild(node.firstChild); }
+  function seg(text, fg, bg) { return { t: text, fg: fg || C.white, bg: bg || null }; }
+
+  function headerDate() {
+    var d = new Date();
+    return DAYS[d.getDay()] + " " + pad2(d.getDate()) + " " + MONTHS[d.getMonth()] + " " +
+      pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
   }
 
-  // Keep the commands on one line: shrink the font until it fits.
-  function fitCommands() {
-    var size = COMMANDS_FONT_PX;
-    els.commands.style.fontSize = size + "px";
-    while (size > 16 && els.commands.scrollWidth > els.commands.clientWidth) {
-      size -= 1;
-      els.commands.style.fontSize = size + "px";
+  function headerLine(v) {
+    var sub = v.page + "/" + v.pages;
+    var left = "P100 CRT QUEUE  " + sub;
+    return [seg("P100", C.yellow), seg(" CRT QUEUE  "), seg(sub, C.yellow),
+      seg(padL(headerDate(), COLS - len(left)))];
+  }
+
+  // "2026-11-08T20:10:00.123456+00:00" → local "21:10".
+  function syncTime(iso) {
+    if (!iso) { return null; }
+    var d = new Date(String(iso).replace(/(\.\d{3})\d+/, "$1"));
+    if (isNaN(d.getTime())) { return null; }
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  // main.duration is NaN again after every reload of the same file (see
+  // reloadMain): row 4 keeps the last duration known for that file.
+  var lastDuration = { src: null, d: 0 };
+  function knownDuration() {
+    if (isFinite(main.duration) && main.duration > 0) { return main.duration; }
+    return lastDuration.src !== null && lastDuration.src === currentSrc() ? lastDuration.d : 0;
+  }
+
+  function playerLine(v) {
+    // An arrival notice ("Video rimosso dalla playlist") takes the row for
+    // its 5 s, over the paused time too.
+    if (v.status) { return [seg(v.status)]; }
+    if (v.paused_position !== null && v.paused_position !== undefined) {
+      var dur = v.paused_duration > 0 ? v.paused_duration : knownDuration();
+      var pos = v.paused_position;
+      var head = "▌▌ " + fmt(pos) + " / " + (dur > 0 ? fmt(dur) : "--:--") + "  ";
+      var bar = COLS - len(head);  // up to column 40, like the rows' right field
+      var filled = dur > 0 ? Math.max(0, Math.min(bar, Math.round(bar * pos / dur))) : 0;
+      return [seg(head + repeat("▓", filled) + repeat("░", bar - filled))];
     }
+    return [seg(" ")];
   }
 
-  function setOptionalLine(node, text) {
-    if (text === null || text === undefined || text === "") {
-      node.classList.add("hidden");
-      node.textContent = "";
+  function videoLine(r) {
+    var head = r.symbol + " " + pad2(r.num) + " ";
+    var text = head + padR(r.text, COLS - len(head) - 9) + " " + padL(r.right || "", 8);
+    if (r.confirm) { return [seg(text, C.black, C.red)]; }
+    if (r.selected) { return [seg(text, C.black, C.yellow)]; }
+    return [seg(text, ROW_COLOURS[r.kind] || C.white)];
+  }
+
+  function commandLine(entries) {
+    var segs = [];
+    (entries || []).forEach(function (e, i) {
+      if (i > 0) { segs.push(seg(" ")); }
+      var col = COMMAND_COLOURS[e.key] || C.white;
+      segs.push(e.selected ? seg(e.label, C.black, col) : seg(e.label, col));
+    });
+    return segs.length ? segs : [seg(" ")];
+  }
+
+  function bottomLine(v) {
+    var help = v.help || "";
+    var left;
+    if (v.flash) {
+      var col = v.flash_kind === "confirm" ? C.red : (v.flash_kind === "error" ? C.magenta : C.green);
+      left = [seg(v.flash, col)];
+      // The confirmation already says what OK does.
+      if (v.flash_kind === "confirm") { help = ""; }
     } else {
-      node.textContent = text;
-      node.classList.remove("hidden");
+      var at = syncTime(v.sync_at);
+      left = v.sync_error ? [seg("Sync errore", C.magenta)] : [seg(at ? "Sync " + at : "Sync mai", C.green)];
+      if (v.loop) { left.push(seg("  Loop attivo", C.green)); }
     }
+    var used = 0;
+    left.forEach(function (s) { used += len(s.t); });
+    if (help && used + 1 + len(help) <= COLS) {
+      left.push(seg(spaces(COLS - used - len(help)) + help, C.green));
+    }
+    return left;
   }
 
-  function renderMenu(view) {
-    if (view === null || view === undefined) {
-      menu.classList.add("hidden");
+  function lines(v) {
+    var L = [];
+    L.push({ head: true, s: headerLine(v) });
+    L.push({ s: [seg(repeat("▄", COLS), C.blue)] });
+    var count = v.count + " video";
+    L.push({ s: [seg("PLAYLIST" + padL(count, COLS - 8), C.cyan)] });
+    L.push({ s: playerLine(v) });
+    var rows = v.rows || [];
+    for (var i = 0; i < PER_PAGE; i++) {
+      L.push({ s: rows[i] ? videoLine(rows[i]) : [seg(" ")] });
+    }
+    L.push({ s: [seg(" ")] });
+    var cmds = v.commands || [[], []];
+    L.push({ s: commandLine(cmds[0]) });
+    L.push({ s: commandLine(cmds[1]) });
+    L.push({ s: bottomLine(v) });
+    return L;
+  }
+
+  function lineNode(l) {
+    var d = document.createElement("div");
+    d.className = "tl" + (l.head ? " head" : "");
+    l.s.forEach(function (s) {
+      var sp = document.createElement("span");
+      sp.textContent = s.t;
+      sp.style.color = s.fg;
+      if (s.bg) { sp.style.background = s.bg; }
+      d.appendChild(sp);
+    });
+    return d;
+  }
+
+  var headNode = null;
+  function renderGrid() {
+    while (ttx.firstChild) { ttx.removeChild(ttx.firstChild); }
+    headNode = null;
+    lines(view).forEach(function (l) {
+      var node = lineNode(l);
+      if (l.head) { headNode = node; }
+      ttx.appendChild(node);
+    });
+  }
+
+  // The clock: only the header changes every second.
+  setInterval(function () {
+    if (view === null || headNode === null) { return; }
+    var node = lineNode({ head: true, s: headerLine(view) });
+    ttx.replaceChild(node, headNode);
+    headNode = node;
+  }, 1000);
+
+  // Row 4 shows the duration the page learns from the paused video.
+  main.addEventListener("durationchange", function () {
+    if (isFinite(main.duration) && main.duration > 0) {
+      lastDuration = { src: currentSrc(), d: main.duration };
+    }
+    if (view !== null && view.paused_position !== null && view.paused_position !== undefined) {
+      renderGrid();
+    }
+  });
+
+  // 40 columns fill the width, 18 rows fill the height of the box inside
+  // the calibration margins (approved on the TV).
+  function fitGrid() {
+    var probe = document.createElement("span");
+    probe.textContent = repeat("M", COLS);
+    probe.style.fontSize = "100px";
+    probe.style.fontFamily = "Bedstead, monospace";
+    probe.style.whiteSpace = "pre";
+    probe.style.position = "absolute";
+    probe.style.visibility = "hidden";
+    document.body.appendChild(probe);
+    var w100 = probe.getBoundingClientRect().width;
+    document.body.removeChild(probe);
+    var width = stretch.clientWidth, height = stretch.clientHeight;
+    if (!w100 || !width || !height) { return; }
+    var lineH = height / ROWS;
+    var font = Math.min(100 * width / w100, lineH);
+    ttx.style.fontSize = font.toFixed(2) + "px";
+    ttx.style.lineHeight = lineH.toFixed(2) + "px";
+    var spare = width - w100 * font / 100;
+    ttx.style.letterSpacing = Math.max(0, spare / COLS).toFixed(2) + "px";
+  }
+  if (document.fonts && document.fonts.load) {
+    document.fonts.load("20px Bedstead").then(fitGrid, function () {});
+  }
+  window.addEventListener("resize", fitGrid);
+
+  // Burn-in guard: the grid moves 3 px every 30 s (awake and at night).
+  var DRIFT = [[0, 0], [3, 0], [3, 3], [0, 3]];
+  var drift = 0;
+  setInterval(function () {
+    drift = (drift + 1) % DRIFT.length;
+    stretch.style.transform = "translate(" + DRIFT[drift][0] + "px," + DRIFT[drift][1] + "px) scaleX(1.3333)";
+  }, 30000);
+
+  // ─── Snow ──────────────────────────────────────────────────────
+  // The canvas is opaque: it also paints the black background over a
+  // paused video when the highlighted row has nothing to show.
+
+  var snowCtx = snow.getContext("2d");
+  var snowImg = snowCtx.createImageData(160, 90);
+  var snowTimer = null;
+
+  function drawSnow() {
+    var d = snowImg.data;
+    for (var i = 0; i < d.length; i += 4) {
+      var v = 40 + ((Math.random() * 121) | 0);
+      d[i] = d[i + 1] = d[i + 2] = v;
+      d[i + 3] = 255;
+    }
+    snowCtx.putImageData(snowImg, 0, 0);
+  }
+
+  // mode: "snow" | "black" | "off"
+  function setSnow(mode) {
+    if (mode !== "snow" && snowTimer !== null) {
+      clearInterval(snowTimer);
+      snowTimer = null;
+    }
+    if (mode === "off") {
+      snow.classList.add("hidden");
       return;
     }
-    els.title.textContent = "▶ " + (view.title || "");
-    updateTime();
-
-    clear(els.rows);
-    (view.rows || []).forEach(function (r) {
-      var div = document.createElement("div");
-      div.className = "row line" + (r.selected ? " selected" : "") + (r.dim ? " dim" : "");
-      div.textContent = r.symbol + " " + r.title;
-      els.rows.appendChild(div);
-    });
-
-    clear(els.commands);
-    (view.commands || []).forEach(function (c, i) {
-      if (i > 0) {
-        var dot = document.createElement("span");
-        dot.className = "dot";
-        dot.textContent = "·";
-        els.commands.appendChild(dot);
-      }
-      var span = document.createElement("span");
-      span.className = "cmd" + (c.selected ? " selected" : "");
-      span.textContent = c.label;
-      els.commands.appendChild(span);
-    });
-
-    setOptionalLine(els.confirm, view.confirm);
-    setOptionalLine(els.notice, view.notice);
-    menu.classList.remove("hidden");
-    fitCommands();
-    fitHeight();
+    if (mode === "black") {
+      snowCtx.fillStyle = "#000";
+      snowCtx.fillRect(0, 0, 160, 90);
+    } else if (snowTimer === null) {
+      drawSnow();
+      snowTimer = setInterval(drawSnow, 83);
+    }
+    snow.classList.remove("hidden");
   }
 
-  // Large overscan margins can leave less room than the menu needs: squash
-  // it vertically rather than let the bottom lines fall off the screen.
-  var stretch = document.querySelector("#menu .stretch");
-  var box = document.querySelector("#menu .box");
-  function fitHeight() {
-    stretch.style.transform = "";
-    var k = Math.min(1, box.clientHeight / stretch.scrollHeight);
-    if (k < 1) {
-      stretch.style.transform = "scaleX(1.3333) scaleY(" + k.toFixed(3) + ")";
+  // ─── Preview ───────────────────────────────────────────────────
+  // Always muted (the file has no audio track either). Unloaded, never just
+  // hidden: a hidden <video> leaves its last frame on the video plane.
+
+  var previewWindow = { start: 0, end: 20 };
+
+  function muteAll() { preview.muted = true; preview.volume = 0; }
+  muteAll();
+  preview.addEventListener("volumechange", function () {
+    if (!preview.muted || preview.volume !== 0) { muteAll(); }
+  });
+
+  function playPreview() {
+    muteAll();
+    var p = preview.play();
+    if (p && p.catch) { p.catch(function () {}); }
+  }
+
+  function seekPreviewToStart() {
+    try { preview.currentTime = previewWindow.start; } catch (e) { /* not seekable yet */ }
+  }
+
+  function previewOff() {
+    preview.pause();
+    if (preview.getAttribute("src")) {
+      preview.removeAttribute("src");
+      preview.load();
     }
+  }
+
+  // Redraws come at every percent of a download: the file is reloaded only
+  // when its URL changes, and the loop restarts only when its window does.
+  function showPreview(p) {
+    var sameWindow = previewWindow.start === p.start && previewWindow.end === p.end;
+    previewWindow = { start: p.start, end: p.end };
+    if (preview.getAttribute("src") !== p.url) {
+      markMainStale();
+      muteAll();
+      preview.setAttribute("src", p.url);
+      var url = p.url;
+      var onMeta = function () {
+        preview.removeEventListener("loadedmetadata", onMeta);
+        if (preview.getAttribute("src") !== url) { return; }
+        seekPreviewToStart();
+        playPreview();
+      };
+      preview.addEventListener("loadedmetadata", onMeta);
+      preview.load();
+      return;
+    }
+    if (preview.readyState < 1) { return; }  // its loadedmetadata will start it
+    if (!sameWindow) { seekPreviewToStart(); }
+    if (preview.paused) { playPreview(); }
+  }
+
+  preview.addEventListener("timeupdate", function () {
+    if (!preview.getAttribute("src")) { return; }
+    var t = preview.currentTime;
+    if (t >= previewWindow.end || t < previewWindow.start - 1) { seekPreviewToStart(); }
+  });
+  preview.addEventListener("ended", function () {
+    if (!preview.getAttribute("src")) { return; }
+    seekPreviewToStart();
+    playPreview();
+  });
+
+  // ─── Screen ────────────────────────────────────────────────────
+
+  function applyBackground(v) {
+    if (v.night) {
+      previewOff();
+      setSnow("off");
+      // The paused video stays under the night veil.
+      if (mainStale !== null) { reloadMain(false); }
+      return;
+    }
+    switch (v.background) {
+      case "frame":
+        previewOff();
+        setSnow("off");
+        if (mainStale !== null) { reloadMain(false); }
+        break;
+      case "preview":
+        if (v.preview && priming === null) {
+          setSnow("off");
+          showPreview(v.preview);
+        } else {
+          // No copy yet, or #main is priming (see primeFrame): black for now.
+          previewOff();
+          setSnow("black");
+        }
+        break;
+      case "snow":
+        previewOff();
+        setSnow("snow");
+        break;
+      default:  // "black"
+        previewOff();
+        setSnow("black");
+        break;
+    }
+  }
+
+  function showScreen(v) {
+    if (v === null || v === undefined) {
+      view = null;
+      headNode = null;
+      screenEl.classList.add("hidden");
+      veil.classList.add("hidden");
+      document.body.classList.remove("night");
+      previewOff();
+      setSnow("off");
+      return;
+    }
+    var wasHidden = view === null;
+    view = v;
+    document.body.classList.toggle("night", !!v.night);
+    applyBackground(v);
+    renderGrid();
+    veil.classList.remove("hidden");
+    screenEl.classList.remove("hidden");
+    if (wasHidden) { fitGrid(); }
   }
 
   // ─── Playback commands ─────────────────────────────────────────
@@ -235,21 +524,92 @@
     m = m || {};
     var top = (m.top || 0) * 1.25, bottom = (m.bottom || 0) * 1.25;
     var left = (m.left || 0) * 1.6667, right = (m.right || 0) * 1.6667;
-    menu.style.padding =
-      "calc(5% + " + top + "px) calc(8% + " + right + "px) " +
-      "calc(5% + " + bottom + "px) calc(8% + " + left + "px)";
+    screenEl.style.padding =
+      top + "px " + right + "px " + bottom + "px calc(1.5% + " + left + "px)";
+    fitGrid();
+  }
+
+  // Priming: a video loaded and paused at once may never draw its frame on
+  // the Chromecast, so it plays muted for a moment and pauses again.
+  // - It starts PRIME_LEAD_S before the wanted position, so the pause lands
+  //   about where the video was: reconnects do not push the resume point on.
+  //   No seek after the pause (a seek while paused does not redraw, #20).
+  // - No preview is loaded while #main plays: the Chromecast has one video
+  //   decoder (a preview would revoke #main, see mainStale) and ignores
+  //   `muted` on a second loaded <video>; the background comes back after.
+  // - PRIME_TIMEOUT_MS ends it if `playing` never comes.
+  var PRIME_PLAY_MS = 250;
+  var PRIME_LEAD_S = 0.25;
+  var PRIME_TIMEOUT_MS = 3000;
+  var SEEK_END_MARGIN_S = 0.5;  // as in crt/player_core.py
+
+  function primeStart(position) {
+    var start = Math.max(0, (position || 0) - PRIME_LEAD_S);
+    if (isFinite(main.duration) && main.duration > 0) {
+      start = Math.min(start, Math.max(0, main.duration - SEEK_END_MARGIN_S - PRIME_LEAD_S));
+    }
+    return start;
+  }
+
+  // End priming: `pause` leaves the video paused and unmuted and sends the
+  // one status report; without it (a command took over) only unmute.
+  function endPriming(pause) {
+    if (priming === null) { return; }
+    clearTimeout(priming.timer);
+    clearTimeout(priming.fallback);
+    main.removeEventListener("playing", priming.onPlaying);
+    priming = null;
+    if (pause) {
+      var wasPlaying = !main.paused;
+      main.pause();
+      // A pause of a playing element reports through its "pause" event.
+      if (!wasPlaying) { report("status"); }
+    }
+    main.muted = false;
+    if (view !== null) { applyBackground(view); }
+  }
+
+  function cancelPriming() { endPriming(false); }
+
+  function primeFrame() {
+    if (priming !== null) {
+      clearTimeout(priming.timer);
+      clearTimeout(priming.fallback);
+      main.removeEventListener("playing", priming.onPlaying);
+    }
+    var state = { timer: null, fallback: null, onPlaying: null };
+    state.onPlaying = function () {
+      main.removeEventListener("playing", state.onPlaying);
+      state.timer = setTimeout(function () {
+        if (priming === state) { endPriming(true); }
+      }, PRIME_PLAY_MS);
+    };
+    state.fallback = setTimeout(function () {
+      if (priming === state) { endPriming(true); }
+    }, PRIME_TIMEOUT_MS);
+    priming = state;
+    previewOff();
+    main.muted = true;
+    main.addEventListener("playing", state.onPlaying);
+    var p = main.play();
+    if (p && p.catch) {
+      p.catch(function () {
+        if (priming === state) { endPriming(true); }
+      });
+    }
   }
 
   function startAt(position, autoplay) {
-    try { main.currentTime = position || 0; } catch (e) { /* not seekable yet */ }
+    var at = autoplay ? (position || 0) : primeStart(position);
+    try { main.currentTime = at; } catch (e) { /* not seekable yet */ }
     if (autoplay) {
+      main.muted = false;
       var p = main.play();
       if (p && p.catch) {
         p.catch(function (e) { report("error", { error: "play() failed: " + e }); });
       }
     } else {
-      main.pause();
-      report("status");
+      primeFrame();
     }
   }
 
@@ -258,13 +618,18 @@
   // after a load must win over the load's own autoplay).
   var pending = null;
 
-  function load(msg) {
+  function load(msg, force) {
     var token = ++loadToken;
+    // A revoked #main must really reload (see mainStale). Cleared before
+    // cancelPriming, whose background redraw would otherwise reload it too.
+    var reload = !!force || mainStale !== null;
+    mainStale = null;
     pending = null;
+    cancelPriming();
     // Same file already loaded (e.g. the event stream reconnected): seek in
     // place instead of reloading, so the screen does not go black. A failed
     // element keeps its error until load(), so a retry reloads for real.
-    if (currentSrc() === msg.url && main.readyState >= 1 && !main.error) {
+    if (!reload && currentSrc() === msg.url && main.readyState >= 1 && !main.error) {
       startAt(msg.position, msg.autoplay);
       return;
     }
@@ -277,17 +642,27 @@
       startAt(want.position, want.autoplay);
     };
     main.addEventListener("loadedmetadata", onMeta);
+    if (!msg.autoplay) { main.muted = true; }
     main.setAttribute("src", msg.url);
     main.load();
   }
 
+  // Reload a revoked #main from the same file where it was paused: a fresh
+  // pipeline takes the decoder back (paused: primed, as at page open).
+  function reloadMain(autoplay) {
+    load({ url: currentSrc(), position: mainStale.position, autoplay: autoplay }, true);
+  }
+
+  // Unload the main video and stop the calibration; the screen is left as
+  // it is (the stopped screen follows in its own message).
   function blank() {
     loadToken++;
+    mainStale = null;
     pending = null;
+    cancelPriming();
     main.pause();
     main.removeAttribute("src");
     main.load();
-    menu.classList.add("hidden");
     stopCalibration();
   }
 
@@ -303,6 +678,7 @@
       stopCalibration();
       return;
     }
+    markMainStale();
     cal.setAttribute("src", url);
     cal.classList.remove("hidden");
     cal.load();
@@ -315,20 +691,25 @@
       case "config": applyMargins(msg.margins); break;
       case "load": load(msg); break;
       case "play":
+        cancelPriming();
+        if (mainStale !== null) { reloadMain(true); break; }
         if (pending !== null) { pending.autoplay = true; break; }
         var p = main.play();
         if (p && p.catch) { p.catch(function (e) { report("error", { error: "play() failed: " + e }); }); }
         break;
       case "pause":
+        cancelPriming();
         if (pending !== null) { pending.autoplay = false; }
         main.pause();
         break;
       case "seek":
-        if (pending !== null) { pending.position = msg.position; break; }
+        if (mainStale !== null) { mainStale.position = msg.position; }
+        if (pending !== null) { pending.position = msg.position; }
+        if (mainStale !== null || pending !== null) { break; }
         try { main.currentTime = msg.position; } catch (e) { /* ignore */ }
         break;
       case "blank": blank(); break;
-      case "menu": renderMenu(msg.view); break;
+      case "screen": showScreen(msg.view); break;
       case "calibration": calibration(msg.url); break;
       default: break;
     }

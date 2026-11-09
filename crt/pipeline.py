@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from typing import Callable
 
 import yt_dlp
@@ -14,13 +15,17 @@ from crt.library_store import QueueItem, LibraryStore
 log = logging.getLogger(__name__)
 
 
-async def fetch_title(url: str) -> tuple[str, str]:
-    """Return (title, video_id) for the given URL."""
+async def fetch_title(url: str) -> tuple[str, str, float]:
+    """Return (title, video_id, duration) for the given URL; duration 0 if unknown."""
     def _extract():
         opts = {"quiet": True, "no_warnings": True, "skip_download": True}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            return info.get("title", "Unknown"), info.get("id", "")
+            return (
+                info.get("title", "Unknown"),
+                info.get("id", ""),
+                float(info.get("duration") or 0.0),
+            )
 
     return await asyncio.to_thread(_extract)
 
@@ -123,6 +128,46 @@ async def _get_duration(path: str) -> float:
         return float(stdout.decode().strip())
     except (ValueError, AttributeError):
         return 0.0
+
+
+async def make_preview(encoded_path: str) -> str | None:
+    """Remux the encoded file without audio, for muted previews.
+
+    Writes to a temp name and renames, so a half-written copy is never taken
+    as present. Returns the final path, or None on failure (never raises).
+    """
+    final = os.path.join(
+        os.path.dirname(encoded_path),
+        config.preview_filename(os.path.basename(encoded_path)),
+    )
+    # Unique per call: backfill_previews and _prepare_one can remux the same
+    # video at once, and a shared temp file would mix the two outputs.
+    tmp = f"{os.path.splitext(final)[0]}.{uuid.uuid4().hex[:12]}.part.mp4"
+    cmd = [
+        "ffmpeg", "-v", "error", "-y", "-i", encoded_path,
+        "-map", "0:v", "-c", "copy", "-an", "-movflags", "+faststart", tmp,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.wait()
+        if proc.returncode == 0 and not os.path.isfile(encoded_path):
+            # Deleted while ffmpeg read it (Elimina, sync): its files are gone,
+            # the copy must not come back after them.
+            log.info("Preview of %s dropped: the video was deleted", encoded_path)
+        elif proc.returncode == 0:
+            os.replace(tmp, final)
+            return final
+        else:
+            log.warning("Preview remux failed for %s (ffmpeg exit %s)", encoded_path, proc.returncode)
+    except Exception as e:
+        log.warning("Preview remux failed for %s: %s", encoded_path, e)
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    return None
 
 
 async def _detect_crop(input_path: str) -> str | None:
@@ -264,12 +309,49 @@ class PipelineWorker:
                 continue
             await self._prepare_one(item)
 
+    async def _ensure_preview(self, item: QueueItem) -> None:
+        """Make the audio-less copy if missing; a failure never touches the status."""
+        if item.preview_present():
+            return
+        await make_preview(os.path.join(config.TEMP_DIR, item.filename))
+        self.notify()
+
+    async def backfill_previews(self) -> None:
+        """One-shot: make the preview copy of ready items encoded before it existed."""
+        for item in list(self.queue.items):
+            if self._preparing is not None and self._preparing.video_id == item.video_id:
+                continue  # _prepare_one makes its copy
+            if item.cache_file_present() and not item.preview_present():
+                await self._ensure_preview(item)
+
+    async def _probe_duration(self, item: QueueItem) -> None:
+        """Read the duration from the encoded file, the one the TV plays.
+
+        yt-dlp's metadata can be a second off (411 s for a 410.5 s file), and
+        the row would then disagree with the same video probed elsewhere.
+        A failed probe keeps the metadata.
+        """
+        duration = await _get_duration(os.path.join(config.TEMP_DIR, item.filename))
+        if duration > 0:
+            item.duration = duration
+            self.notify()
+
+    async def backfill_durations(self) -> None:
+        """One-shot: read with ffprobe the duration of items cached before the field existed."""
+        for item in list(self.queue.items):
+            if item.duration <= 0 and item.cache_file_present():
+                await self._probe_duration(item)
+
     async def _prepare_one(self, item: QueueItem) -> None:
         self._preparing = item
         try:
-            item.title, video_id = await fetch_title(item.url)
+            item.title, video_id, duration = await fetch_title(item.url)
             if video_id:
                 item.video_id = video_id
+            # Metadata only fills an unknown duration: _probe_duration reads
+            # the encoded file once it exists.
+            if duration > 0 and item.duration <= 0:
+                item.duration = duration
             self.notify()
 
             # Check for cached encoded file
@@ -279,6 +361,8 @@ class PipelineWorker:
                 item.filename = os.path.basename(cached_encoded)
                 item.status = "ready"
                 self.notify()
+                await self._probe_duration(item)
+                await self._ensure_preview(item)
                 return
 
             # Skip download if file already exists from a previous interrupted session
@@ -286,6 +370,8 @@ class PipelineWorker:
                 log.info("Resuming encode from existing download: %s", item.downloaded_path)
                 downloaded_path = item.downloaded_path
                 duration = await _get_duration(downloaded_path)
+                if duration > 0 and item.duration <= 0:
+                    item.duration = duration
             else:
                 # Download
                 item.status = "downloading"
@@ -302,6 +388,8 @@ class PipelineWorker:
                     item.url, config.TEMP_DIR, dl_progress
                 )
                 item.downloaded_path = downloaded_path
+                if duration > 0 and item.duration <= 0:
+                    item.duration = duration
 
                 if self._prepare_cancel.is_set():
                     item.status = "queued"
@@ -347,6 +435,8 @@ class PipelineWorker:
             item.status = "ready"
             self.notify()
             log.info("Ready: %s (encoded in %.1fs)", item.title, time.monotonic() - t0)
+            await self._probe_duration(item)
+            await self._ensure_preview(item)
 
         except Exception as e:
             log.exception("Pipeline prepare error for %s", item.url)

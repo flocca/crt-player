@@ -346,6 +346,23 @@ def test_remove_deletes_cache_files(tmp_path, monkeypatch):
     assert not download_path.exists()
 
 
+def test_remove_deletes_preview_copy(tmp_path, monkeypatch):
+    from crt import config
+    monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
+    (tmp_path / "vid_old_pal_crop.mp4").write_text("fake mp4")
+    preview = tmp_path / "vid_old_pal_crop_noaudio.mp4"
+    preview.write_text("fake preview")
+    library = LibraryStore()
+    library.items.append(QueueItem(url="u", video_id="vid_old", filename="vid_old_pal_crop.mp4"))
+    yt_client = MagicMock()
+    yt_client.list_playlist_items.return_value = []
+    engine = SyncEngine(library, yt_client, playlist_id="PL")
+
+    engine.run_sync_once()
+
+    assert not preview.exists()
+
+
 def test_run_sync_once_handles_auth_error():
     library = LibraryStore()
     yt_client = MagicMock()

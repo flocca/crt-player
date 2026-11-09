@@ -31,6 +31,10 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# How long shutdown waits for deletions still finishing in the background
+# (YouTube delete): well inside `docker stop`'s 10 s before SIGKILL.
+SHUTDOWN_DELETE_TIMEOUT_S = 5.0
+
 
 def cleanup_temp_files(library: LibraryStore) -> None:
     """Remove cache files older than FILE_TTL_HOURS that no library item uses.
@@ -48,8 +52,11 @@ def cleanup_temp_files(library: LibraryStore) -> None:
     for item in library.items:
         if item.filename:
             in_use.add(item.filename)
+            in_use.add(config.preview_filename(item.filename))
         if item.video_id:
-            in_use.add(config.cached_encoded_filename(item.video_id))
+            canonical = config.cached_encoded_filename(item.video_id)
+            in_use.add(canonical)
+            in_use.add(config.preview_filename(canonical))
         if item.downloaded_path:
             in_use.add(os.path.basename(item.downloaded_path))
     cutoff = time.time() - config.FILE_TTL_HOURS * 3600
@@ -117,6 +124,8 @@ async def main_async() -> None:
         library, chromecast, receiver, youtube_client=yt_client,
         on_cache_miss=pipeline.wake_prepare,
     )
+    # A delete from the screen or the remote stops that video's encode.
+    player.on_delete = pipeline.cancel_prepare_for
 
     # Capture the running loop here so callbacks invoked from worker threads
     # (e.g. SyncEngine.run_sync_once dispatched via asyncio.to_thread) can
@@ -125,9 +134,9 @@ async def main_async() -> None:
     main_loop = asyncio.get_running_loop()
 
     # Pipeline updates (progress, a finished encode) come from worker threads
-    # too: redraw an open pause menu on the loop.
+    # too: redraw the screen on the loop.
     pipeline.set_update_callback(
-        lambda: main_loop.call_soon_threadsafe(player.refresh_menu),
+        lambda: main_loop.call_soon_threadsafe(player.refresh_screen),
     )
 
     sync_engine = None
@@ -148,11 +157,12 @@ async def main_async() -> None:
             library, yt_client, config.YT_PLAYLIST_ID,
             on_remove=_on_yt_remove,
             on_add=_on_yt_add,
-            on_synced=player.refresh_menu,
+            on_synced=player.refresh_screen,
         )
         log.info("SyncEngine ready (playlist=%s)", config.YT_PLAYLIST_ID)
-        # Menu command "Sync now".
+        # Screen command "Sync", and its time / error on the bottom line.
         player.on_sync_request = sync_engine.kick
+        player.sync_info = lambda: (sync_engine.last_sync_at, sync_engine.state == "degraded")
 
     app = create_app(
         library=library,
@@ -177,6 +187,10 @@ async def main_async() -> None:
         # One-shot: calibrate() never waits for ffmpeg (CRT_MARGIN_* only
         # change with a restart, so one render serves the whole run).
         asyncio.create_task(player.prepare_calibration(), name="calibration_clip"),
+        # One-shot: previews of items encoded before the copy existed.
+        asyncio.create_task(pipeline.backfill_previews(), name="preview_backfill"),
+        # One-shot: durations of items cached before the field existed.
+        asyncio.create_task(pipeline.backfill_durations(), name="duration_backfill"),
         asyncio.create_task(
             player.watch_idle(config.RECEIVER_IDLE_CLOSE_S), name="player_idle_close",
         ),
@@ -209,6 +223,7 @@ async def main_async() -> None:
     log.info("Shutdown signal received")
 
     server.should_exit = True
+    await player.finish_deletes(timeout_s=SHUTDOWN_DELETE_TIMEOUT_S)
     for t in tasks:
         if not t.done():
             t.cancel()

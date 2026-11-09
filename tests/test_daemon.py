@@ -111,3 +111,25 @@ def test_cleanup_temp_files_removes_old_orphans(monkeypatch, tmp_path):
     daemon.cleanup_temp_files(library)
 
     assert [p.name for p in tmp_path.iterdir()] == ["fresh_orphan.mp4"]
+
+
+def test_cleanup_temp_files_keeps_preview_of_library_items(monkeypatch, tmp_path):
+    from crt import config
+    from crt.library_store import LibraryStore, QueueItem
+    monkeypatch.setattr(config, "TEMP_DIR", str(tmp_path))
+    encoded = config.cached_encoded_filename("A")
+    preview = config.preview_filename(encoded)
+    _old_file(tmp_path / preview)
+    _old_file(tmp_path / config.preview_filename(config.cached_encoded_filename("Q")))
+    _old_file(tmp_path / "orphan_noaudio.mp4")
+    library = LibraryStore()
+    library.items += [
+        QueueItem(url="u", video_id="A", status="ready", filename=encoded),
+        QueueItem(url="u", video_id="Q", status="queued"),
+    ]
+
+    daemon.cleanup_temp_files(library)
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+        [preview, config.preview_filename(config.cached_encoded_filename("Q"))]
+    )

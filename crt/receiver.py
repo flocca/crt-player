@@ -7,7 +7,9 @@ queues and a local model of the page's playback (position, duration, paused)
 so the daemon can answer "where are we now" without a round trip.
 
 Messages daemon→page: config{margins}, load{url, position, autoplay}, play{},
-pause{}, seek{position}, blank{}, menu{view}, calibration{url}.
+pause{}, seek{position}, blank{}, screen{view}, calibration{url}.
+`screen{view}` carries the whole teletext screen (Screen.view), or view null
+to hide it; `blank{}` only unloads the main video and stops the calibration.
 Reports page→daemon: {event: hello|status|ended|error, position, duration,
 paused, src, error, media}; `media` is true on an error of the <video>
 element itself (bad file), not on a script or play() error.

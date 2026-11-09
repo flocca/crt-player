@@ -11,6 +11,7 @@ from crt.receiver import ReceiverChannel, sse_events
 log = logging.getLogger(__name__)
 
 RECEIVER_PAGE = os.path.join(os.path.dirname(__file__), "receiver_page", "index.html")
+RECEIVER_FONT = os.path.join(os.path.dirname(__file__), "receiver_page", "bedstead.otf")
 
 
 def create_app(
@@ -84,7 +85,9 @@ def create_app(
                 # Position and duration come from the receiver page.
                 "current_time_s": pc.live_position() if pc else None,
                 "duration_s": receiver.duration if receiver is not None else None,
-                "menu_open": getattr(pc, "menu", None) is not None if pc else False,
+                "menu_open": pc.screen_state != "none" if pc else False,
+                "screen": pc.screen_state if pc else "none",
+                "selected_video_id": pc.selected_video_id if pc else None,
                 "chromecast": "connected" if (cc and getattr(cc, "connected", False)) else "disconnected",
             },
         }
@@ -146,15 +149,21 @@ def create_app(
         )
 
     @app.post("/control/loop/toggle")
-    def control_loop_toggle():
-        library.loop_mode = not library.loop_mode
+    async def control_loop_toggle():
+        if player is not None:
+            player.toggle_loop()
+        else:
+            library.loop_mode = not library.loop_mode
         return {"ok": True, "loop_mode": library.loop_mode}
 
     @app.post("/control/sync", status_code=202)
-    def control_sync():
+    async def control_sync():
         if sync_engine is None:
             raise HTTPException(503, "sync engine unavailable")
-        sync_engine.kick()
+        if player is not None:
+            player.request_sync()
+        else:
+            sync_engine.kick()
         return {"ok": True}
 
     @app.post("/control/calibrate")
@@ -182,11 +191,14 @@ def create_app(
     async def control_delete_current():
         if player is None:
             raise HTTPException(503, "player unavailable")
-        video_id = library.cursor_video_id
-        if not video_id:
-            raise HTTPException(404, "no current video")
-        await player.delete_current()
-        return {"ok": True, "deleted_video_id": video_id}
+        result = await player.delete_request()
+        return _ack(
+            result,
+            cursor_video_id=library.cursor_video_id,
+            state=player.state,
+            # The video deleted at once (while playing), else None.
+            deleted_video_id=getattr(result, "deleted_video_id", None),
+        )
 
     # ─── Receiver page (opened on the Chromecast through DashCast) ──
 
@@ -195,6 +207,15 @@ def create_app(
         with open(RECEIVER_PAGE, encoding="utf-8") as f:
             html = f.read()
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+    @app.get("/receiver/bedstead.otf")
+    def receiver_font():
+        # The teletext font never changes between deploys of the same page.
+        return FileResponse(
+            RECEIVER_FONT,
+            media_type="font/otf",
+            headers={"Cache-Control": "max-age=86400"},
+        )
 
     @app.get("/receiver/events")
     def receiver_events():
