@@ -31,13 +31,24 @@ def _restore_config():
 
 @pytest.mark.asyncio
 async def test_fetch_title():
-    mock_info = {"title": "Test Video Title", "id": "abc"}
+    mock_info = {"title": "Test Video Title", "id": "abc", "duration": 552}
     with patch("crt.pipeline.yt_dlp.YoutubeDL") as MockYDL:
         instance = MockYDL.return_value.__enter__.return_value
         instance.extract_info.return_value = mock_info
-        title, video_id = await fetch_title("https://youtube.com/watch?v=abc")
+        title, video_id, duration = await fetch_title("https://youtube.com/watch?v=abc")
     assert title == "Test Video Title"
     assert video_id == "abc"
+    assert duration == 552.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_title_without_duration_gives_zero():
+    """Live streams and some extractors carry no duration (or None)."""
+    with patch("crt.pipeline.yt_dlp.YoutubeDL") as MockYDL:
+        instance = MockYDL.return_value.__enter__.return_value
+        instance.extract_info.return_value = {"title": "T", "id": "abc", "duration": None}
+        _, _, duration = await fetch_title("https://youtube.com/watch?v=abc")
+    assert duration == 0.0
 
 
 @pytest.mark.asyncio
@@ -251,7 +262,7 @@ def _worker_with_slow_encode(monkeypatch, tmp_path, video_id="A"):
     encoding = asyncio.Event()
 
     async def fake_title(url):
-        return video_id, video_id
+        return video_id, video_id, 300.0
 
     async def fake_download(url, temp_dir, on_progress):
         path = os.path.join(temp_dir, f"{video_id}.mp4")
@@ -472,3 +483,114 @@ async def test_backfill_previews_skips_the_item_being_prepared(monkeypatch, tmp_
     await worker.backfill_previews()
 
     preview.assert_awaited_once_with(str(tmp_path / "B.mp4"))
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_cache_hit_takes_the_duration_from_fetch_title(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+    (tmp_path / cached_encoded_filename("A")).write_text("encoded")
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    assert item.duration == 300.0
+
+
+async def _quick_encode(input_path, output_path, duration, on_progress, worker=None):
+    with open(output_path, "w") as f:
+        f.write("encoded")
+    return output_path
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_download_overwrites_the_duration(monkeypatch, tmp_path):
+    """The downloaded file's duration (10 s in the fixture) wins over the
+    metadata read before it."""
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+    monkeypatch.setattr(pl, "encode_video", _quick_encode)
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    assert item.duration == 10.0
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_download_without_duration_keeps_the_known_one(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+
+    async def no_duration_download(url, temp_dir, on_progress):
+        path = os.path.join(temp_dir, "A.mp4")
+        with open(path, "w") as f:
+            f.write("source")
+        return path, 0.0
+
+    monkeypatch.setattr(pl, "download_video", no_duration_download)
+    monkeypatch.setattr(pl, "encode_video", _quick_encode)
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    assert item.duration == 300.0
+
+
+@pytest.mark.asyncio
+async def test_prepare_one_resumed_download_takes_the_ffprobe_duration(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    worker, item, _ = _worker_with_slow_encode(monkeypatch, tmp_path)
+    raw = tmp_path / "A.mp4"
+    raw.write_text("source")
+    item.downloaded_path = str(raw)
+    monkeypatch.setattr(pl, "_get_duration", AsyncMock(return_value=42.0))
+    monkeypatch.setattr(pl, "encode_video", _quick_encode)
+    monkeypatch.setattr(pl, "make_preview", AsyncMock(return_value=None))
+
+    await worker._prepare_one(item)
+
+    assert item.duration == 42.0
+
+
+@pytest.mark.asyncio
+async def test_backfill_durations_probes_encoded_items_without_duration(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    from crt.library_store import LibraryStore
+    monkeypatch.setattr(config_module, "TEMP_DIR", str(tmp_path))
+    for name in ("A.mp4", "B.mp4"):
+        (tmp_path / name).write_text("x")
+    library = LibraryStore()
+    library.items += [
+        QueueItem(url="u", video_id="A", status="ready", filename="A.mp4"),
+        QueueItem(url="u", video_id="B", status="done", filename="B.mp4", duration=99.0),
+        QueueItem(url="u", video_id="C", status="queued"),
+        QueueItem(url="u", video_id="D", status="ready", filename="gone.mp4"),
+    ]
+    worker = pl.PipelineWorker(library)
+    probe = AsyncMock(return_value=552.0)
+    monkeypatch.setattr(pl, "_get_duration", probe)
+    updates = []
+    worker.set_update_callback(lambda: updates.append(1))
+
+    await worker.backfill_durations()
+
+    probe.assert_awaited_once_with(str(tmp_path / "A.mp4"))
+    assert [i.duration for i in library.items] == [552.0, 99.0, 0.0, 0.0]
+    assert updates  # the open screen redraws with the new durations
+
+
+@pytest.mark.asyncio
+async def test_backfill_durations_leaves_zero_when_ffprobe_fails(monkeypatch, tmp_path):
+    from crt import pipeline as pl
+    from crt.library_store import LibraryStore
+    monkeypatch.setattr(config_module, "TEMP_DIR", str(tmp_path))
+    (tmp_path / "A.mp4").write_text("x")
+    library = LibraryStore()
+    library.items.append(QueueItem(url="u", video_id="A", status="ready", filename="A.mp4"))
+    worker = pl.PipelineWorker(library)
+    monkeypatch.setattr(pl, "_get_duration", AsyncMock(return_value=0.0))
+
+    await worker.backfill_durations()
+
+    assert library.items[0].duration == 0.0

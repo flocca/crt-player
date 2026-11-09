@@ -128,11 +128,27 @@ def test_play_and_seek_check_a_stale_main_before_a_pending_load():
     assert seek.index("mainStale !== null") < seek.index("pending !== null")
 
 
+def test_row_4_takes_the_duration_from_the_view():
+    """The library's duration is known before the page loads the file."""
+    src = PAGE.read_text()
+    line = _between(src, "function playerLine(", "function videoLine(")
+    assert "v.paused_duration" in line
+
+
 def test_row_4_keeps_the_duration_across_a_reload():
-    """A reload resets main.duration to NaN: row 4 must not flash --:--."""
+    """Fallback while the library has no duration yet: a reload resets
+    main.duration to NaN, and row 4 must not flash --:--."""
     src = PAGE.read_text()
     line = _between(src, "function playerLine(", "function videoLine(")
     assert "knownDuration()" in line
+
+
+def test_video_rows_right_field_is_8_columns():
+    """8 columns fit -1:05:00; the title gives up the column."""
+    src = PAGE.read_text()
+    line = _between(src, "function videoLine(", "function commandLine(")
+    assert "COLS - len(head) - 9" in line
+    assert 'padL(r.right || "", 8)' in line
 
 
 def test_paused_load_is_muted_before_its_pipeline_starts():

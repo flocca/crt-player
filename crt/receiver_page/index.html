@@ -208,7 +208,7 @@
 
   function playerLine(v) {
     if (v.paused_position !== null && v.paused_position !== undefined) {
-      var dur = knownDuration();
+      var dur = v.paused_duration > 0 ? v.paused_duration : knownDuration();
       var pos = v.paused_position;
       var filled = dur > 0 ? Math.max(0, Math.min(BAR_COLS, Math.round(BAR_COLS * pos / dur))) : 0;
       return [seg("▌▌ " + fmt(pos) + " / " + (dur > 0 ? fmt(dur) : "--:--") + "  " +
@@ -219,7 +219,7 @@
 
   function videoLine(r) {
     var head = r.symbol + " " + pad2(r.num) + " ";
-    var text = head + padR(r.text, COLS - len(head) - 8) + " " + padL(r.right || "", 7);
+    var text = head + padR(r.text, COLS - len(head) - 9) + " " + padL(r.right || "", 8);
     if (r.confirm) { return [seg(text, C.black, C.red)]; }
     if (r.selected) { return [seg(text, C.black, C.yellow)]; }
     return [seg(text, ROW_COLOURS[r.kind] || C.white)];

@@ -109,7 +109,7 @@ Dieci video per sottopagina, pagine fisse come nel teletext (1-10, 11-20, ...). 
 
 ### Riga 4: stato del player
 
-- **In pausa**: il video in pausa, sempre, anche se l'evidenziazione è su un'altra sottopagina: `▌▌ 12:34 / 45:00  ▓▓▓▓▓░░░░░░░░░` (barra di 14 colonne a blocchi). La durata viene dalla pagina (`receiver.duration`, `crt/receiver.py:53`).
+- **In pausa**: il video in pausa, sempre, anche se l'evidenziazione è su un'altra sottopagina: `▌▌ 12:34 / 45:00  ▓▓▓▓▓░░░░░░░░░` (barra di 14 colonne a blocchi). La durata viene dalla libreria (`QueueItem.duration`, vedi "Durata nella libreria"), e dal `<video>` della pagina finché la libreria non la conosce.
 - **Da fermo**: l'avviso d'arrivo per 5 secondi (vedi "Arrivo"), poi vuota.
 - **Playlist vuota**: `La playlist è vuota`, fisso.
 

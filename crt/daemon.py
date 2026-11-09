@@ -185,6 +185,8 @@ async def main_async() -> None:
         asyncio.create_task(player.prepare_calibration(), name="calibration_clip"),
         # One-shot: previews of items encoded before the copy existed.
         asyncio.create_task(pipeline.backfill_previews(), name="preview_backfill"),
+        # One-shot: durations of items cached before the field existed.
+        asyncio.create_task(pipeline.backfill_durations(), name="duration_backfill"),
         asyncio.create_task(
             player.watch_idle(config.RECEIVER_IDLE_CLOSE_S), name="player_idle_close",
         ),

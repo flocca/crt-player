@@ -15,13 +15,17 @@ from crt.library_store import QueueItem, LibraryStore
 log = logging.getLogger(__name__)
 
 
-async def fetch_title(url: str) -> tuple[str, str]:
-    """Return (title, video_id) for the given URL."""
+async def fetch_title(url: str) -> tuple[str, str, float]:
+    """Return (title, video_id, duration) for the given URL; duration 0 if unknown."""
     def _extract():
         opts = {"quiet": True, "no_warnings": True, "skip_download": True}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            return info.get("title", "Unknown"), info.get("id", "")
+            return (
+                info.get("title", "Unknown"),
+                info.get("id", ""),
+                float(info.get("duration") or 0.0),
+            )
 
     return await asyncio.to_thread(_extract)
 
@@ -315,12 +319,24 @@ class PipelineWorker:
             if item.cache_file_present() and not item.preview_present():
                 await self._ensure_preview(item)
 
+    async def backfill_durations(self) -> None:
+        """One-shot: read with ffprobe the duration of items cached before the field existed."""
+        for item in list(self.queue.items):
+            if item.duration > 0 or not item.cache_file_present():
+                continue
+            duration = await _get_duration(os.path.join(config.TEMP_DIR, item.filename))
+            if duration > 0:
+                item.duration = duration
+                self.notify()
+
     async def _prepare_one(self, item: QueueItem) -> None:
         self._preparing = item
         try:
-            item.title, video_id = await fetch_title(item.url)
+            item.title, video_id, duration = await fetch_title(item.url)
             if video_id:
                 item.video_id = video_id
+            if duration > 0:
+                item.duration = duration
             self.notify()
 
             # Check for cached encoded file
@@ -338,6 +354,8 @@ class PipelineWorker:
                 log.info("Resuming encode from existing download: %s", item.downloaded_path)
                 downloaded_path = item.downloaded_path
                 duration = await _get_duration(downloaded_path)
+                if duration > 0:
+                    item.duration = duration
             else:
                 # Download
                 item.status = "downloading"
@@ -354,6 +372,8 @@ class PipelineWorker:
                     item.url, config.TEMP_DIR, dl_progress
                 )
                 item.downloaded_path = downloaded_path
+                if duration > 0:
+                    item.duration = duration
 
                 if self._prepare_cancel.is_set():
                     item.status = "queued"

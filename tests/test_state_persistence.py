@@ -393,3 +393,21 @@ def test_done_and_error_items_preserved(tmp_path):
     assert qm.items[0].status == "done"
     assert qm.items[1].status == "error"
     assert qm.items[1].error == "something broke"
+
+
+def test_queue_item_duration_roundtrips():
+    original = QueueItem(url="https://youtube.com/watch?v=x", duration=552.0)
+    restored = QueueItem.from_dict(original.to_dict())
+    assert restored.duration == 552.0
+
+
+def test_queue_item_from_old_state_has_no_duration():
+    """States written before the field load with 0 (unknown)."""
+    item = QueueItem.from_dict({"url": "https://youtube.com/watch?v=x"})
+    assert item.duration == 0.0
+
+
+def test_requeue_keeps_the_duration():
+    item = QueueItem(url="u", status="ready", filename="x.mp4", duration=552.0)
+    item.requeue()
+    assert item.duration == 552.0

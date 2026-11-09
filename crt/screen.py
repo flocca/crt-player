@@ -74,13 +74,18 @@ def row_for(item: QueueItem, loaded_video_id: str | None) -> dict:
     else:  # queued, downloading, encoding and anything unknown
         symbol, kind = "…", "preparing"
     text = item.title if loaded else _PREFIXES.get(status, "") + item.title
-    if status in ("downloading", "encoding"):
-        right = f"{int(item.progress)}%"
-    elif item.playback_position > 0:
-        right = _format_position(item.playback_position)
-    else:
-        right = ""
-    return {"num": 0, "symbol": symbol, "text": text, "right": right, "kind": kind}
+    return {"num": 0, "symbol": symbol, "text": text, "right": _right_field(item), "kind": kind}
+
+
+def _right_field(item: QueueItem) -> str:
+    """Percentage while preparing, time left once started, else the duration."""
+    if item.status in ("downloading", "encoding"):
+        return f"{int(item.progress)}%"
+    if item.duration <= 0:
+        return ""
+    if item.playback_position > 0:
+        return "-" + _format_position(max(0.0, item.duration - item.playback_position))
+    return _format_position(item.duration)
 
 
 class Screen:
@@ -209,6 +214,7 @@ class Screen:
             "pages": pages,
             "rows": rows,
             "paused_position": loaded.playback_position if loaded else None,
+            "paused_duration": (loaded.duration or None) if loaded else None,
             "status": status,
             "commands": [video_cmds, player_cmds],
             "flash": flash,

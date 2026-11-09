@@ -32,14 +32,11 @@ def test_rows_symbols_text_right_and_kind():
                 ("e", "encoding"), ("f", "error"), ("g", "paused"))
     lib[3].progress = 43.7
     lib[4].progress = 10
-    lib[0].playback_position = 247
-    lib[1].playback_position = 3725
     r = {i.video_id: row_for(i, "g") for i in lib}
     assert r["g"]["symbol"] == "▶" and r["g"]["kind"] == "ready"
     assert r["a"]["symbol"] == "○" and r["a"]["kind"] == "ready"
-    assert r["a"]["right"] == "04:07" and r["a"]["text"] == "Ta"
+    assert r["a"]["text"] == "Ta"
     assert r["b"]["symbol"] == "✓" and r["b"]["kind"] == "done"
-    assert r["b"]["right"] == "1:02:05"
     assert r["c"]["symbol"] == "…" and r["c"]["text"] == "In coda · Tc"
     assert r["c"]["kind"] == "preparing" and r["c"]["right"] == ""
     assert r["d"]["text"] == "Download · Td" and r["d"]["right"] == "43%"
@@ -48,6 +45,51 @@ def test_rows_symbols_text_right_and_kind():
     assert r["f"]["kind"] == "error"
     assert row_for(lib[0], "a")["symbol"] == "▶"
     assert row_for(QueueItem(url="u", video_id="x", status="casting"), None)["symbol"] == "○"
+
+
+def _right(status, *, duration=0.0, position=0.0, progress=0.0, loaded=None):
+    item = QueueItem(url="u", video_id="x", status=status, duration=duration,
+                     playback_position=position, progress=progress)
+    return row_for(item, loaded)["right"]
+
+
+def test_right_shows_the_duration_of_a_video_not_started():
+    assert _right("ready", duration=552) == "09:12"
+    assert _right("ready", duration=3930) == "1:05:30"
+
+
+def test_right_shows_the_duration_of_watched_queued_and_error_videos_once_known():
+    assert _right("done", duration=552) == "09:12"
+    assert _right("queued", duration=552) == "09:12"
+    assert _right("error", duration=552) == "09:12"
+
+
+def test_right_is_empty_while_the_duration_is_unknown():
+    assert _right("queued") == ""
+    assert _right("ready") == ""
+
+
+def test_right_shows_the_time_left_of_a_started_video():
+    assert _right("ready", duration=2400, position=420) == "-33:00"
+    assert _right("ready", duration=4000, position=100) == "-1:05:00"
+
+
+def test_right_shows_the_time_left_on_the_paused_row():
+    assert _right("paused", duration=552, position=52, loaded="x") == "-08:20"
+
+
+def test_right_shows_zero_left_when_the_position_passes_the_duration():
+    assert _right("ready", duration=552, position=600) == "-00:00"
+
+
+def test_right_is_empty_for_a_started_video_of_unknown_duration():
+    """No remaining time to show; the old position display is gone."""
+    assert _right("ready", position=247) == ""
+
+
+def test_right_percentage_wins_while_downloading_or_encoding():
+    assert _right("downloading", duration=552, position=60, progress=43.7) == "43%"
+    assert _right("encoding", duration=552, progress=10) == "10%"
 
 
 def test_subpage_follows_selection():
@@ -158,14 +200,17 @@ def test_preview_window():
 def test_paused_position_and_state():
     lib = items(("a", "paused"), ("b", "ready"))
     lib[0].playback_position = 30
+    lib[0].duration = 552
     v = view(Screen("a", "a"), lib, "a")
     assert v["state"] == "paused" and v["paused_position"] == 30
+    assert v["paused_duration"] == 552
     assert [c["key"] for c in v["commands"][0]] == ["resume", "delete", "stop"]
     assert [c["key"] for c in v["commands"][1]] == ["calibrate", "loop", "sync", "power"]
     assert v["commands"][0][0]["label"] == "Riprendi" and v["commands"][0][0]["selected"]
     assert v["help"] == "OK = Riprendi"
     v = view(Screen("a"), lib, "a")
     assert v["state"] == "stopped" and v["paused_position"] is None
+    assert v["paused_duration"] is None
 
 
 def test_command_index_clamped_when_commands_shrink():
